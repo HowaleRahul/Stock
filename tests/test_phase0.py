@@ -42,3 +42,13 @@ async def test_db_check_endpoint():
         assert "status" in data
         assert data["status"] in ("connected", "disconnected", "error")
         assert "latency_ms" in data
+
+
+def test_mask_db_url_various_formats():
+    """Verify _mask_db_url handles passwords, user-only, and passwordless DB connection URLs safely."""
+    from api.db import _mask_db_url
+
+    assert _mask_db_url("postgresql+asyncpg://admin:supersecret@localhost:5432/trading") == "postgresql+asyncpg://admin:***@localhost:5432/trading"
+    assert _mask_db_url("postgresql+asyncpg://postgres@localhost:5432/trading") == "postgresql+asyncpg://postgres@localhost:5432/trading"
+    assert _mask_db_url("postgresql+asyncpg://localhost:5432/trading") == "postgresql+asyncpg://localhost:5432/trading"
+    assert _mask_db_url("") == "unknown_db_url"

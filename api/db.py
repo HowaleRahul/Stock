@@ -91,14 +91,18 @@ async def check_database_connection() -> Dict[str, Any]:
 
 def _mask_db_url(url: str) -> str:
     """Helper to mask password in database connection URL for safe logging/display."""
+    if not url:
+        return "unknown_db_url"
     try:
         from urllib.parse import urlsplit, urlunsplit
         parsed = urlsplit(url)
-        if parsed.username:
-            netloc = f"{parsed.username}:***@{parsed.hostname or ''}"
+        if parsed.password or parsed.username:
+            user_part = parsed.username or "user"
+            pass_part = ":***" if parsed.password else ""
+            netloc = f"{user_part}{pass_part}@{parsed.hostname or ''}"
             if parsed.port:
                 netloc += f":{parsed.port}"
             return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+        return url
     except Exception:
-        pass
-    return "postgresql+asyncpg://***:***@***"
+        return "postgresql+asyncpg://***:***@***"
