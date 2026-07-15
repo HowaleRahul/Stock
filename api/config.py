@@ -36,6 +36,23 @@ class Settings(BaseSettings):
         alias="TARGET_SYMBOLS"
     )
 
+    @field_validator("target_symbols", mode="before")
+    @classmethod
+    def parse_target_symbols(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            # Check if JSON array string or comma separated
+            v_clean = v.strip()
+            if v_clean.startswith("[") and v_clean.endswith("]"):
+                import json
+                try:
+                    return [str(item).strip().upper() for item in json.loads(v_clean) if str(item).strip()]
+                except Exception:
+                    pass
+            return [s.strip().upper() for s in v.split(",") if s.strip()]
+        if isinstance(v, list):
+            return [str(item).strip().upper() for item in v if str(item).strip()]
+        return v
+
     # Broker API placeholders (for Phase 1+)
     kite_api_key: Optional[str] = Field(default=None, alias="KITE_API_KEY")
     kite_api_secret: Optional[str] = Field(default=None, alias="KITE_API_SECRET")

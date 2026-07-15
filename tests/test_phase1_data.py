@@ -399,3 +399,20 @@ async def test_granular_ohlcv_and_news_error_isolation():
             assert "success" in statuses
             assert any("Mocked network timeout" in str(s) for s in statuses)
 
+
+def test_target_symbols_env_parsing_and_normalization():
+    """
+    Verifies that target_symbols can be cleanly parsed from either comma-separated strings,
+    JSON array strings, or raw lists without raising pydantic validation errors.
+    """
+    from api.config import Settings
+
+    s1 = Settings(TARGET_SYMBOLS="NIFTY, banknifty , reliance.ns ")
+    assert s1.target_symbols == ["NIFTY", "BANKNIFTY", "RELIANCE.NS"]
+
+    s2 = Settings(TARGET_SYMBOLS='["aapl", " msft "]')
+    assert s2.target_symbols == ["AAPL", "MSFT"]
+
+    s3 = Settings(TARGET_SYMBOLS=["tcs.ns", "infy.ns"])
+    assert s3.target_symbols == ["TCS.NS", "INFY.NS"]
+
