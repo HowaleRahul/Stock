@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.config import settings
 from api.db import get_db, check_database_connection, engine, Base
+from models.init_db import init_database
+from api.router import router as data_router
 
 # Configure logging
 logging.basicConfig(
@@ -25,10 +27,13 @@ async def lifespan(app: FastAPI):
     db_status = await check_database_connection()
     if db_status["status"] == "connected":
         logger.info(f"✅ Database connected successfully! Latency: {db_status['latency_ms']}ms | TimescaleDB: {db_status.get('timescaledb_version', 'N/A')}")
-        # Initialize schema if in local development
+        # Initialize schema and TimescaleDB hypertables if in local development
         if settings.environment.lower() == "development":
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+            try:
+                init_res = await init_database(seed_watchlist=True)
+                logger.info(f"✅ Schema & Hypertables initialized: {init_res}")
+            except Exception as e:
+                logger.error(f"❌ Error initializing hypertables: {e}")
     else:
         logger.warning(f"⚠️ Could not connect to Database on startup: {db_status.get('error', 'unknown error')}. Please check your docker container or .env DATABASE_URL.")
 
@@ -54,13 +59,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include API routes
+app.include_router(data_router)
+
 
 @app.get("/", tags=["General"])
 async def root():
     """Root endpoint providing system identification and navigation."""
     return {
         "system": "Personal AI-Assisted Trading System",
-        "current_phase": "Phase 0 — Foundations & Project Setup",
+        "current_phase": "Phase 1 — Data Pipeline (MVP)",
         "documentation": "/docs",
         "health_check": "/health",
         "database_check": "/db-check"
@@ -73,8 +81,8 @@ async def health_check():
     return {
         "status": "ok",
         "service": "trading-api",
-        "version": "0.1.0-phase0",
-        "phase": "Phase 0 (Foundations)",
+        "version": "0.1.0-phase1",
+        "phase": "Phase 1 (Data Pipeline)",
         "environment": settings.environment,
         "target_symbols": settings.target_symbols,
     }

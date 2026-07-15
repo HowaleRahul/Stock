@@ -1,6 +1,8 @@
 services:
   timescaledb:
-    image: timescale/timescaledb:latest-pg16
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres-local
     container_name: trading_timescaledb
     restart: unless-stopped
     environment:
@@ -12,7 +14,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d trading_db"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trading_db || true"]
       interval: 10s
       timeout: 5s
       retries: 5

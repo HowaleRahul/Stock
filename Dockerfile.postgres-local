@@ -1,0 +1,20 @@
+FROM alpine:latest
+
+# Install PostgreSQL client + server + TimescaleDB extension
+RUN apk add --no-cache postgresql-client postgresql postgresql-timescaledb
+
+# Initialize postgres database directory
+RUN mkdir -p /var/lib/postgresql/data /run/postgresql && \
+    chown -R postgres:postgres /var/lib/postgresql /run/postgresql && \
+    chmod 700 /var/lib/postgresql/data && \
+    chmod 755 /run/postgresql
+
+# Copy entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh && chown postgres:postgres /entrypoint.sh
+
+EXPOSE 5432
+
+WORKDIR /var/lib/postgresql
+USER postgres
+ENTRYPOINT ["/entrypoint.sh"]

@@ -1,0 +1,24 @@
+Step 1: Start the Database Container
+Whenever you restart your laptop, open terminal inside Stock and run:
+
+cmd
+
+
+docker compose up -d
+(Because it is already running and healthy (Up About a minute), if you run this now it simply says Container trading_timescaledb is up-to-date).
+
+Step 2: Start the Trading Backend API Server
+Open PowerShell or Command Prompt inside C:\Users\Rahul\OneDrive\Desktop\Stock and run:
+
+cmd
+
+
+venv\Scripts\python -m uvicorn api.main:app --reload --port 8000
+Step 3: View & Interact with your Trading API in the Browser!
+Once uvicorn boots up (Application startup complete), open your web browser (Chrome, Edge, etc.) and go to:
+
+👉 http://localhost:8000/docs
+
+That will open up your live, interactive Swagger API Dashboard, where you can click Try it out -> Execute on /health and /health/db to see real-time JSON responses directly from your TimescaleDB database!
+
+Whenever you are ready to expand our API and database with stock ticker tables and live historical bar ingestion, just say "Start Phase 1" and we will dive right into coding it!
