@@ -432,3 +432,42 @@ def test_sanitize_text_null_bytes_and_truncation():
     assert DataCleaner.sanitize_text(None) is None
     assert DataCleaner.sanitize_text("\x00\x00") is None
 
+
+@pytest.mark.asyncio
+async def test_sync_watchlist_auto_seeding():
+    """
+    Verifies that when sync_watchlist is called on a clean database with no active symbols,
+    it automatically seeds symbols from settings.target_symbols before syncing.
+    """
+    from unittest.mock import patch, AsyncMock
+    from data.service import DataIngestionService
+    from models.models import Symbol
+
+    # Mock DB select returning empty list initially
+    mock_session = AsyncMock()
+    from unittest.mock import MagicMock
+    mock_execute_res = MagicMock()
+    mock_execute_res.scalars.return_value.all.return_value = []
+    mock_session.execute.return_value = mock_execute_res
+
+    # Mock session factory context manager
+    from unittest.mock import MagicMock
+    mock_factory = MagicMock()
+    mock_factory.return_value.__aenter__.return_value = mock_session
+
+    async def mock_get_or_create(ticker, custom_info=None, db=None):
+        return Symbol(id=1, ticker=ticker, is_active=True)
+
+    async def mock_ohlcv(ticker, period="1mo", interval="1d", start=None, end=None):
+        return {"ticker": ticker, "status": "success", "bars_synced": 5}
+
+    with patch("data.service.async_session_factory", mock_factory):
+        with patch.object(DataIngestionService, "get_or_create_symbol", side_effect=mock_get_or_create) as mock_seed:
+            with patch.object(DataIngestionService, "sync_symbol_ohlcv", side_effect=mock_ohlcv) as mock_sync:
+                res = await DataIngestionService.sync_watchlist()
+                # Should have seeded and synced settings.target_symbols
+                assert mock_seed.call_count >= 1
+                assert mock_sync.call_count >= 1
+                assert len(res) >= 1
+                assert res[0]["status"] == "success"
+

@@ -267,6 +267,17 @@ class DataIngestionService:
             res = await session.execute(stmt)
             symbols = res.scalars().all()
 
+        if not symbols:
+            logger.info("No active symbols found in database. Auto-seeding from settings.target_symbols...")
+            from api.config import settings
+            symbols = []
+            for t in settings.target_symbols:
+                try:
+                    sym = await cls.get_or_create_symbol(t)
+                    symbols.append(sym)
+                except Exception as seed_err:
+                    logger.warning(f"Failed to auto-seed {t} during watchlist sync: {seed_err}")
+
         results = []
         for sym in symbols:
             try:
