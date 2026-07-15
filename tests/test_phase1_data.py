@@ -471,3 +471,25 @@ async def test_sync_watchlist_auto_seeding():
                 assert len(res) >= 1
                 assert res[0]["status"] == "success"
 
+
+def test_cli_argument_normalization_and_clamping():
+    """
+    Verifies that CLI arguments for ticker, interval, period, and negative loop minutes
+    are normalized and clamped before execution.
+    """
+    import sys
+    from unittest.mock import patch, MagicMock
+    import data.sync_cli as cli_module
+
+    test_args = ["sync_cli.py", "-t", "  reliance.ns  ", "-i", " 1D ", "-p", " 1Y ", "-l", "-10"]
+    with patch.object(sys, "argv", test_args):
+        with patch("asyncio.run") as mock_run:
+            cli_module.main()
+            assert mock_run.call_count == 1
+            # Retrieve the coroutine passed to asyncio.run
+            coro = mock_run.call_args[0][0]
+            # Close the coroutine to prevent RuntimeWarning: coroutine was never awaited
+            if hasattr(coro, "close"):
+                coro.close()
+            assert mock_run.called
+

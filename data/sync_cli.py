@@ -87,6 +87,10 @@ def main():
         args.ticker = args.ticker.upper().strip()
         if not args.ticker:
             args.ticker = None
+    args.interval = args.interval.lower().strip() if args.interval else "1d"
+    args.period = args.period.lower().strip() if args.period else "1mo"
+    if args.loop_minutes < 0:
+        args.loop_minutes = 0
 
     if not args.ticker and not args.watchlist:
         parser.print_help()
