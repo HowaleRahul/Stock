@@ -71,6 +71,14 @@ class SyncRequest(BaseModel):
             return cleaned if cleaned else None
         return str(v).upper().strip()
 
+    @field_validator("interval", mode="before")
+    @classmethod
+    def clean_interval(cls, v: Any) -> str:
+        if isinstance(v, str):
+            cleaned = v.lower().strip()
+            return cleaned if cleaned else "1d"
+        return str(v).lower().strip() if v is not None else "1d"
+
 class SyncResponse(BaseModel):
     message: str
     results: List[Dict[str, Any]]

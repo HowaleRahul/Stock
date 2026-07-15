@@ -114,6 +114,7 @@ async def get_candles(
     ticker_clean = ticker.upper().strip()
     if not ticker_clean:
         raise HTTPException(status_code=400, detail="Ticker symbol cannot be empty.")
+    timeframe_clean = timeframe.lower().strip() if timeframe else "1d"
     stmt = select(Symbol).where(Symbol.ticker == ticker_clean)
     res = await db.execute(stmt)
     sym = res.scalar_one_or_none()
@@ -122,7 +123,7 @@ async def get_candles(
 
     stmt_candles = (
         select(OHLCVBar)
-        .where(OHLCVBar.symbol_id == sym.id, OHLCVBar.timeframe == timeframe)
+        .where(OHLCVBar.symbol_id == sym.id, OHLCVBar.timeframe == timeframe_clean)
         .order_by(OHLCVBar.time.desc())
         .limit(limit)
     )
