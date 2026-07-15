@@ -26,6 +26,21 @@ async def list_symbols(db: AsyncSession = Depends(get_db)):
     return symbols
 
 
+@router.post("/init", status_code=status.HTTP_200_OK, summary="Initialize schema and seed watchlist")
+async def init_schema_and_seed(seed_watchlist: bool = Query(True, description="Whether to seed default/target symbols")):
+    """
+    On-demand initialization of database tables, TimescaleDB hypertables ('ohlcv_bars' & 'news_headlines'),
+    and seeding of target focus tickers.
+    """
+    from models.init_db import init_database
+    res = await init_database(seed_watchlist=seed_watchlist)
+    return {
+        "status": "success",
+        "message": "Database schema, hypertables, and watchlist initialization completed.",
+        "details": res
+    }
+
+
 @router.post("/symbols", response_model=SymbolResponse, status_code=status.HTTP_201_CREATED, summary="Add symbol to watchlist")
 async def add_symbol(payload: SymbolCreate, db: AsyncSession = Depends(get_db)):
     """Register a new ticker in the watchlist."""

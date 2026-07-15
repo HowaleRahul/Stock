@@ -79,8 +79,8 @@ async def init_database(seed_watchlist: bool = True) -> dict:
                         seed_items.append({
                             "ticker": clean_t,
                             "name": clean_t,
-                            "exchange": "NSE" if ".NS" in clean_t else "NASDAQ",
-                            "currency": "INR" if ".NS" in clean_t else "USD"
+                            "exchange": "NSE" if ".NS" in clean_t else ("BSE" if ".BO" in clean_t else "NASDAQ"),
+                            "currency": "INR" if (".NS" in clean_t or ".BO" in clean_t) else "USD"
                         })
                         existing_seed_tickers.add(clean_t)
 

@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 import pytest_asyncio
 from api.db import engine
@@ -10,3 +11,5 @@ async def dispose_db_engine():
     """
     yield
     await engine.dispose()
+    # Give Windows ProactorEventLoop a tick to close asyncpg socket FDs
+    await asyncio.sleep(0.01)

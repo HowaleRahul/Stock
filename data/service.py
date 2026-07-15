@@ -268,15 +268,18 @@ class DataIngestionService:
             symbols = res.scalars().all()
 
         if not symbols:
-            logger.info("No active symbols found in database. Auto-seeding from settings.target_symbols...")
+            logger.info("No active symbols found in database. Auto-seeding from DEFAULT_WATCHLIST + settings.target_symbols...")
             from api.config import settings
+            from models.init_db import DEFAULT_WATCHLIST
+            all_targets = list(DEFAULT_WATCHLIST) + [t for t in settings.target_symbols if t not in DEFAULT_WATCHLIST]
             symbols = []
-            for t in settings.target_symbols:
+            for item in all_targets:
+                ticker_str = item["ticker"] if isinstance(item, dict) else str(item)
                 try:
-                    sym = await cls.get_or_create_symbol(t)
+                    sym = await cls.get_or_create_symbol(ticker_str)
                     symbols.append(sym)
                 except Exception as seed_err:
-                    logger.warning(f"Failed to auto-seed {t} during watchlist sync: {seed_err}")
+                    logger.warning(f"Failed to auto-seed {ticker_str} during watchlist sync: {seed_err}")
 
         results = []
         for sym in symbols:

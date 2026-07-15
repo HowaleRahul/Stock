@@ -89,6 +89,14 @@ def main():
             args.ticker = None
     args.interval = args.interval.lower().strip() if args.interval else "1d"
     args.period = args.period.lower().strip() if args.period else "1mo"
+    allowed_periods = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
+    allowed_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+    if args.period not in allowed_periods:
+        logger.warning(f"Invalid period '{args.period}' specified. Defaulting to '1mo'.")
+        args.period = "1mo"
+    if args.interval not in allowed_intervals:
+        logger.warning(f"Invalid interval '{args.interval}' specified. Defaulting to '1d'.")
+        args.interval = "1d"
     if args.loop_minutes < 0:
         args.loop_minutes = 0
 

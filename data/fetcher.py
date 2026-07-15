@@ -146,15 +146,15 @@ class YFinanceFetcher:
             info = yt.info or {}
             return {
                 "name": info.get("longName") or info.get("shortName") or ticker,
-                "exchange": info.get("exchange") or ("NSE" if ticker.endswith(".NS") else "NASDAQ"),
-                "currency": info.get("currency") or ("INR" if ticker.endswith(".NS") else "USD")
+                "exchange": info.get("exchange") or ("NSE" if ticker.endswith(".NS") else ("BSE" if ticker.endswith(".BO") else "NASDAQ")),
+                "currency": info.get("currency") or ("INR" if (ticker.endswith(".NS") or ticker.endswith(".BO")) else "USD")
             }
         except Exception as e:
             logger.warning(f"Failed to fetch metadata for {ticker}: {e}")
             return {
                 "name": ticker,
-                "exchange": "NSE" if ticker.endswith(".NS") else "NASDAQ",
-                "currency": "INR" if ticker.endswith(".NS") else "USD"
+                "exchange": "NSE" if ticker.endswith(".NS") else ("BSE" if ticker.endswith(".BO") else "NASDAQ"),
+                "currency": "INR" if (ticker.endswith(".NS") or ticker.endswith(".BO")) else "USD"
             }
 
     @classmethod
@@ -169,6 +169,6 @@ class YFinanceFetcher:
             logger.error(f"Metadata request timed out (20s) for {ticker}. Using fallback info.")
             return {
                 "name": ticker,
-                "exchange": "NSE" if ticker.endswith(".NS") else "NASDAQ",
-                "currency": "INR" if ticker.endswith(".NS") else "USD"
+                "exchange": "NSE" if ticker.endswith(".NS") else ("BSE" if ticker.endswith(".BO") else "NASDAQ"),
+                "currency": "INR" if (ticker.endswith(".NS") or ticker.endswith(".BO")) else "USD"
             }

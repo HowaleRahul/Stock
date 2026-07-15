@@ -15,10 +15,18 @@ class SymbolCreate(BaseModel):
             cleaned = v.upper().strip()
             if not cleaned:
                 raise ValueError("Ticker symbol cannot be empty or purely whitespace.")
-            return cleaned
+            return cleaned[:64]
         if v is None or not str(v).strip():
             raise ValueError("Ticker symbol cannot be empty.")
-        return str(v).upper().strip()
+        return str(v).upper().strip()[:64]
+
+    @field_validator("name", "exchange", "currency", mode="before")
+    @classmethod
+    def clean_optional_strings(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = str(v).strip().replace("\x00", "")
+        return cleaned if cleaned else None
 
 class SymbolResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -78,6 +86,14 @@ class SyncRequest(BaseModel):
             cleaned = v.lower().strip()
             return cleaned if cleaned else "1d"
         return str(v).lower().strip() if v is not None else "1d"
+
+    @field_validator("period", mode="before")
+    @classmethod
+    def clean_period(cls, v: Any) -> str:
+        if isinstance(v, str):
+            cleaned = v.lower().strip()
+            return cleaned if cleaned else "5y"
+        return str(v).lower().strip() if v is not None else "5y"
 
 class SyncResponse(BaseModel):
     message: str
