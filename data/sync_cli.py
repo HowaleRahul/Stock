@@ -3,6 +3,7 @@ import asyncio
 import logging
 import sys
 from data.service import DataIngestionService
+from api.db import engine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,13 +52,26 @@ async def run_sync(args):
 async def run_daemon(args):
     """Runs data synchronization continuously on a scheduled interval loop."""
     logger.info(f"🔄 Starting daemon loop every {args.loop_minutes} minutes.")
-    while True:
-        try:
+    try:
+        while True:
+            try:
+                await run_sync(args)
+            except Exception as e:
+                logger.error(f"Error during scheduled sync run: {e}")
+            logger.info(f"Sleeping for {args.loop_minutes} minutes until next scheduled sync...")
+            await asyncio.sleep(args.loop_minutes * 60)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        logger.info("Daemon loop terminated cleanly by user.")
+
+async def _main_async(args):
+    try:
+        if args.loop_minutes > 0:
+            await run_daemon(args)
+        else:
             await run_sync(args)
-        except Exception as e:
-            logger.error(f"Error during scheduled sync run: {e}")
-        logger.info(f"Sleeping for {args.loop_minutes} minutes until next scheduled sync...")
-        await asyncio.sleep(args.loop_minutes * 60)
+    finally:
+        await engine.dispose()
+        logger.debug("Database connection pool disposed cleanly.")
 
 def main():
     parser = argparse.ArgumentParser(description="Trading System Phase 1 Data Ingestion CLI")
@@ -69,14 +83,19 @@ def main():
     parser.add_argument("--loop-minutes", "-l", type=int, default=0, help="If > 0, runs continuously on this interval in minutes")
 
     args = parser.parse_args()
+    if args.ticker:
+        args.ticker = args.ticker.upper().strip()
+        if not args.ticker:
+            args.ticker = None
+
     if not args.ticker and not args.watchlist:
         parser.print_help()
         sys.exit(1)
 
-    if args.loop_minutes > 0:
-        asyncio.run(run_daemon(args))
-    else:
-        asyncio.run(run_sync(args))
+    try:
+        asyncio.run(_main_async(args))
+    except KeyboardInterrupt:
+        logger.info("CLI sync daemon stopped.")
 
 if __name__ == "__main__":
     main()

@@ -68,7 +68,7 @@ class NewsHeadline(Base):
 
     time = Column(DateTime(timezone=True), primary_key=True, nullable=False, index=True)
     url = Column(String(1024), primary_key=True, nullable=False)
-    symbol_id = Column(Integer, ForeignKey("symbols.id", ondelete="SET NULL"), nullable=True, index=True)
+    symbol_id = Column(Integer, ForeignKey("symbols.id", ondelete="CASCADE"), nullable=True, index=True)
     title = Column(String(512), nullable=False)
     source = Column(String(128), default="Yahoo Finance", nullable=False)
     summary = Column(Text, nullable=True)

@@ -29,14 +29,22 @@ async def list_symbols(db: AsyncSession = Depends(get_db)):
 @router.post("/symbols", response_model=SymbolResponse, status_code=status.HTTP_201_CREATED, summary="Add symbol to watchlist")
 async def add_symbol(payload: SymbolCreate, db: AsyncSession = Depends(get_db)):
     """Register a new ticker in the watchlist."""
+    ticker_clean = payload.ticker.upper().strip()
     # Check existing
-    stmt = select(Symbol).where(Symbol.ticker == payload.ticker)
+    stmt = select(Symbol).where(Symbol.ticker == ticker_clean)
     res = await db.execute(stmt)
     existing = res.scalar_one_or_none()
     if existing:
-        raise HTTPException(status_code=400, detail=f"Symbol {payload.ticker} is already registered.")
+        raise HTTPException(status_code=400, detail=f"Symbol {ticker_clean} is already registered.")
 
-    sym = await DataIngestionService.get_or_create_symbol(payload.ticker)
+    custom_info = {
+        "name": payload.name,
+        "exchange": payload.exchange,
+        "currency": payload.currency
+    }
+    # Remove keys where value is None so yfinance / fallback defaults can trigger cleanly
+    custom_info = {k: v for k, v in custom_info.items() if v is not None}
+    sym = await DataIngestionService.get_or_create_symbol(ticker_clean, custom_info=custom_info, db=db)
     return sym
 
 
@@ -57,16 +65,32 @@ async def trigger_sync(payload: SyncRequest):
         )
         results.extend(ohlcv_res)
     elif payload.ticker:
-        logger.info(f"APIRouter: Triggered sync for {payload.ticker}")
-        res = await DataIngestionService.sync_symbol_ohlcv(
-            ticker=payload.ticker,
-            period=payload.period,
-            interval=payload.interval
-        )
-        results.append(res)
+        ticker_clean = payload.ticker.upper().strip()
+        logger.info(f"APIRouter: Triggered sync for {ticker_clean}")
+        try:
+            res = await DataIngestionService.sync_symbol_ohlcv(
+                ticker=ticker_clean,
+                period=payload.period,
+                interval=payload.interval
+            )
+            results.append(res)
+        except Exception as e:
+            logger.error(f"Error syncing OHLCV for {ticker_clean} via API: {e}")
+            results.append({
+                "ticker": ticker_clean,
+                "status": f"error: {str(e)}"
+            })
+
         if payload.sync_news:
-            news_res = await DataIngestionService.sync_symbol_news(payload.ticker)
-            results.append(news_res)
+            try:
+                news_res = await DataIngestionService.sync_symbol_news(ticker_clean)
+                results.append(news_res)
+            except Exception as e:
+                logger.error(f"Error syncing News for {ticker_clean} via API: {e}")
+                results.append({
+                    "ticker": ticker_clean,
+                    "status": f"error: {str(e)}"
+                })
     else:
         raise HTTPException(
             status_code=400,
@@ -83,15 +107,18 @@ async def trigger_sync(payload: SyncRequest):
 async def get_candles(
     ticker: str,
     timeframe: str = Query("1d", description="Timeframe interval (e.g. 1d, 1h)"),
-    limit: int = Query(500, le=5000, description="Max bars to return"),
+    limit: int = Query(500, ge=1, le=5000, description="Max bars to return"),
     db: AsyncSession = Depends(get_db)
 ):
     """Query stored candlestick data from TimescaleDB hypertable."""
-    stmt = select(Symbol).where(Symbol.ticker == ticker)
+    ticker_clean = ticker.upper().strip()
+    if not ticker_clean:
+        raise HTTPException(status_code=400, detail="Ticker symbol cannot be empty.")
+    stmt = select(Symbol).where(Symbol.ticker == ticker_clean)
     res = await db.execute(stmt)
     sym = res.scalar_one_or_none()
     if not sym:
-        raise HTTPException(status_code=404, detail=f"Symbol {ticker} not found in database.")
+        raise HTTPException(status_code=404, detail=f"Symbol {ticker_clean} not found in database.")
 
     stmt_candles = (
         select(OHLCVBar)
@@ -108,15 +135,18 @@ async def get_candles(
 @router.get("/news/{ticker}", response_model=List[NewsResponse], summary="Get financial news headlines")
 async def get_news(
     ticker: str,
-    limit: int = Query(50, le=500, description="Max news items to return"),
+    limit: int = Query(50, ge=1, le=500, description="Max news items to return"),
     db: AsyncSession = Depends(get_db)
 ):
     """Retrieve raw financial news headlines from TimescaleDB hypertable."""
-    stmt = select(Symbol).where(Symbol.ticker == ticker)
+    ticker_clean = ticker.upper().strip()
+    if not ticker_clean:
+        raise HTTPException(status_code=400, detail="Ticker symbol cannot be empty.")
+    stmt = select(Symbol).where(Symbol.ticker == ticker_clean)
     res = await db.execute(stmt)
     sym = res.scalar_one_or_none()
     if not sym:
-        raise HTTPException(status_code=404, detail=f"Symbol {ticker} not found in database.")
+        raise HTTPException(status_code=404, detail=f"Symbol {ticker_clean} not found in database.")
 
     stmt_news = (
         select(NewsHeadline)

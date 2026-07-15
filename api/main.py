@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Personal AI-Assisted Trading System API",
     description="Explainable ML-driven decision-support system for equity, intraday, and F&O trading.",
-    version="0.1.0-phase0",
+    version="0.1.0-phase1",
     lifespan=lifespan
 )
 

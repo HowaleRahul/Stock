@@ -65,10 +65,10 @@ class NewsFetcher:
                 if title and url:
                     headlines.append({
                         "time": pub_time,
-                        "url": url[:1020],
-                        "title": title[:510],
-                        "source": source[:120],
-                        "summary": (summary[:2000] if summary else None)
+                        "url": str(url)[:1020],
+                        "title": str(title)[:510],
+                        "source": str(source)[:120],
+                        "summary": (str(summary)[:2000] if summary else None)
                     })
             except Exception as e:
                 logger.debug(f"Skipping malformed news item for {ticker}: {e}")
@@ -82,4 +82,8 @@ class NewsFetcher:
         """
         Asynchronously fetches and standardizes news headlines for a ticker.
         """
-        return await asyncio.to_thread(cls._fetch_news_sync, ticker)
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(cls._fetch_news_sync, ticker), timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.error(f"News request timed out (30s) while fetching headlines for {ticker}.")
+            return []

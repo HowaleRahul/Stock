@@ -1,12 +1,24 @@
 import datetime
 from typing import List, Optional, Any, Dict
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 class SymbolCreate(BaseModel):
     ticker: str = Field(..., description="Stock ticker symbol (e.g. RELIANCE.NS or AAPL)")
     name: Optional[str] = Field(None, description="Company or instrument name")
-    exchange: Optional[str] = Field("NSE", description="Exchange name (NSE, BSE, NASDAQ)")
-    currency: Optional[str] = Field("INR", description="Trading currency")
+    exchange: Optional[str] = Field(None, description="Exchange name (NSE, BSE, NASDAQ). Auto-detected if omitted.")
+    currency: Optional[str] = Field(None, description="Trading currency (INR, USD). Auto-detected if omitted.")
+
+    @field_validator("ticker", mode="before")
+    @classmethod
+    def clean_ticker(cls, v: Any) -> str:
+        if isinstance(v, str):
+            cleaned = v.upper().strip()
+            if not cleaned:
+                raise ValueError("Ticker symbol cannot be empty or purely whitespace.")
+            return cleaned
+        if v is None or not str(v).strip():
+            raise ValueError("Ticker symbol cannot be empty.")
+        return str(v).upper().strip()
 
 class SymbolResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -48,6 +60,16 @@ class SyncRequest(BaseModel):
     interval: str = Field("1d", description="Candle timeframe interval (1d, 1h, 15m)")
     sync_watchlist: bool = Field(False, description="If True, syncs all active watchlist symbols.")
     sync_news: bool = Field(False, description="If True, also pulls financial news headlines.")
+
+    @field_validator("ticker", mode="before")
+    @classmethod
+    def clean_ticker(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            cleaned = v.upper().strip()
+            return cleaned if cleaned else None
+        return str(v).upper().strip()
 
 class SyncResponse(BaseModel):
     message: str

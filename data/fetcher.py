@@ -20,6 +20,7 @@ class YFinanceFetcher:
         start: Optional[str] = None,
         end: Optional[str] = None
     ) -> pd.DataFrame:
+        ticker = ticker.upper().strip()
         logger.info(f"Downloading history for {ticker} (period={period}, interval={interval}, start={start}, end={end})...")
         yt = yf.Ticker(ticker)
         
@@ -36,8 +37,12 @@ class YFinanceFetcher:
         else:
             kwargs["period"] = period
 
-        df = yt.history(**kwargs)
-        return df
+        try:
+            df = yt.history(**kwargs)
+            return df
+        except Exception as e:
+            logger.warning(f"Error fetching history from yfinance for {ticker}: {e}")
+            return pd.DataFrame()
 
     @classmethod
     async def fetch_ohlcv_bars(
@@ -51,14 +56,22 @@ class YFinanceFetcher:
         """
         Fetches OHLCV bars + corporate actions (splits, dividends) for a ticker and returns a list of standardized dicts.
         """
-        df = await asyncio.to_thread(
-            cls._fetch_history_sync,
-            ticker=ticker,
-            period=period,
-            interval=interval,
-            start=start,
-            end=end
-        )
+        ticker = ticker.upper().strip()
+        try:
+            df = await asyncio.wait_for(
+                asyncio.to_thread(
+                    cls._fetch_history_sync,
+                    ticker=ticker,
+                    period=period,
+                    interval=interval,
+                    start=start,
+                    end=end
+                ),
+                timeout=45.0
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Network request timed out (45s) while fetching OHLCV for {ticker}.")
+            return []
 
         if df is None or df.empty:
             logger.warning(f"No OHLCV data returned for {ticker}.")
@@ -66,28 +79,47 @@ class YFinanceFetcher:
 
         # Standardize dataframe
         bars = []
+        def _safe_float(val: Any, default: float = 0.0) -> float:
+            try:
+                if val is None or pd.isna(val):
+                    return default
+                f = float(val)
+                if pd.isna(f) or f != f or abs(f) == float('inf'):
+                    return default
+                return f
+            except (ValueError, TypeError):
+                return default
+
         for dt, row in df.iterrows():
             # Ensure timezone aware (UTC)
-            if dt.tzinfo is None:
-                dt_utc = dt.tz_localize("UTC")
-            else:
-                dt_utc = dt.tz_convert("UTC")
+            try:
+                if hasattr(dt, 'tzinfo') and dt.tzinfo is None:
+                    dt_utc = dt.tz_localize("UTC")
+                elif hasattr(dt, 'tz_convert'):
+                    dt_utc = dt.tz_convert("UTC")
+                else:
+                    dt_utc = pd.to_datetime(dt).tz_localize("UTC") if pd.to_datetime(dt).tzinfo is None else pd.to_datetime(dt).tz_convert("UTC")
+            except Exception as tz_err:
+                logger.debug(f"Timezone conversion fallback for {dt}: {tz_err}")
+                continue
 
             # Extract corporate actions safely
-            split_ratio = float(row["Stock Splits"]) if "Stock Splits" in row and pd.notna(row["Stock Splits"]) else 1.0
-            if split_ratio == 0.0:
+            split_ratio = _safe_float(row.get("Stock Splits"), 1.0)
+            if split_ratio <= 0.0:
                 split_ratio = 1.0
-            dividend = float(row["Dividends"]) if "Dividends" in row and pd.notna(row["Dividends"]) else 0.0
+            dividend = _safe_float(row.get("Dividends"), 0.0)
+            if dividend < 0.0:
+                dividend = 0.0
 
-            open_val = float(row["Open"]) if pd.notna(row["Open"]) else 0.0
-            high_val = float(row["High"]) if pd.notna(row["High"]) else 0.0
-            low_val = float(row["Low"]) if pd.notna(row["Low"]) else 0.0
-            close_val = float(row["Close"]) if pd.notna(row["Close"]) else 0.0
-            adj_close_val = float(row["Adj Close"]) if "Adj Close" in row and pd.notna(row["Adj Close"]) else close_val
-            vol_val = float(row["Volume"]) if pd.notna(row["Volume"]) else 0.0
+            open_val = _safe_float(row.get("Open"), 0.0)
+            high_val = _safe_float(row.get("High"), 0.0)
+            low_val = _safe_float(row.get("Low"), 0.0)
+            close_val = _safe_float(row.get("Close"), 0.0)
+            adj_close_val = _safe_float(row.get("Adj Close"), close_val)
+            vol_val = _safe_float(row.get("Volume"), 0.0)
 
             # Skip rows where Open and Close are both 0 or NaN
-            if open_val == 0.0 and close_val == 0.0 and vol_val == 0.0:
+            if open_val <= 0.0 and close_val <= 0.0 and vol_val <= 0.0:
                 continue
 
             bars.append({
@@ -108,6 +140,7 @@ class YFinanceFetcher:
 
     @staticmethod
     def _fetch_info_sync(ticker: str) -> Dict[str, Any]:
+        ticker = ticker.upper().strip()
         yt = yf.Ticker(ticker)
         try:
             info = yt.info or {}
@@ -129,4 +162,13 @@ class YFinanceFetcher:
         """
         Fetches basic symbol metadata asynchronously.
         """
-        return await asyncio.to_thread(cls._fetch_info_sync, ticker)
+        ticker = ticker.upper().strip()
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(cls._fetch_info_sync, ticker), timeout=20.0)
+        except asyncio.TimeoutError:
+            logger.error(f"Metadata request timed out (20s) for {ticker}. Using fallback info.")
+            return {
+                "name": ticker,
+                "exchange": "NSE" if ticker.endswith(".NS") else "NASDAQ",
+                "currency": "INR" if ticker.endswith(".NS") else "USD"
+            }

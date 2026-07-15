@@ -22,3 +22,13 @@ Once uvicorn boots up (Application startup complete), open your web browser (Chr
 That will open up your live, interactive Swagger API Dashboard, where you can click Try it out -> Execute on /health and /health/db to see real-time JSON responses directly from your TimescaleDB database!
 
 Whenever you are ready to expand our API and database with stock ticker tables and live historical bar ingestion, just say "Start Phase 1" and we will dive right into coding it!
+
+
+
+fix
+------------------
+i want you to be a senior tester who also know development who is senior developer and is testing this website and finding bugs and errors keep looping in this project (checking) for bugs and error in depth for the features which are implemented till now i want each and everything check and the output the prediction should be with precision!
+
+check each and every feature in details for bugs and errors
+
+keep checking and keep looping till precision!

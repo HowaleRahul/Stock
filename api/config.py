@@ -1,6 +1,6 @@
-from typing import List, Optional
+from typing import List, Optional, Any
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, field_validator
 
 
 class Settings(BaseSettings):
@@ -19,6 +19,16 @@ class Settings(BaseSettings):
         default="postgresql+asyncpg://postgres:trading_secret_pwd@127.0.0.1:5432/trading_db",
         alias="DATABASE_URL"
     )
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_asyncpg_scheme(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            if v.startswith("postgres://"):
+                return v.replace("postgres://", "postgresql+asyncpg://", 1)
+            elif v.startswith("postgresql://") and "+asyncpg" not in v:
+                return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
 
     # Initial Focus Target Symbols (Indices & Equities for F&O / Intraday)
     target_symbols: List[str] = Field(

@@ -91,13 +91,14 @@ async def check_database_connection() -> Dict[str, Any]:
 
 def _mask_db_url(url: str) -> str:
     """Helper to mask password in database connection URL for safe logging/display."""
-    if "@" in url and ":" in url:
-        try:
-            prefix, rest = url.split("://", 1)
-            user_info, host_info = rest.split("@", 1)
-            if ":" in user_info:
-                user, _ = user_info.split(":", 1)
-                return f"{prefix}://{user}:***@{host_info}"
-        except Exception:
-            pass
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        parsed = urlsplit(url)
+        if parsed.username:
+            netloc = f"{parsed.username}:***@{parsed.hostname or ''}"
+            if parsed.port:
+                netloc += f":{parsed.port}"
+            return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    except Exception:
+        pass
     return "postgresql+asyncpg://***:***@***"

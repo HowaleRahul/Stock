@@ -57,34 +57,47 @@ async def init_database(seed_watchlist: bool = True) -> dict:
         except Exception as e:
             logger.warning(f"Could not configure hypertable 'news_headlines': {e}")
 
+        try:
+            await session.commit()
+        except Exception as commit_err:
+            await session.rollback()
+            logger.debug(f"Hypertable commit notice (or no transaction active): {commit_err}")
+
         # Seed default watchlist if requested
         if seed_watchlist:
-            added_count = 0
-            for item in DEFAULT_WATCHLIST:
-                stmt = select(Symbol).where(Symbol.ticker == item["ticker"])
-                res = await session.execute(stmt)
-                existing = res.scalar_one_or_none()
-                if not existing:
-                    sym = Symbol(
-                        ticker=item["ticker"],
-                        name=item["name"],
-                        exchange=item["exchange"],
-                        currency=item["currency"],
-                        is_active=True
-                    )
-                    session.add(sym)
-                    added_count += 1
-            await session.commit()
-            results["seeded_symbols_count"] = added_count
-            logger.info(f"Seeded {added_count} new symbols into watchlist.")
+            try:
+                added_count = 0
+                for item in DEFAULT_WATCHLIST:
+                    stmt = select(Symbol).where(Symbol.ticker == item["ticker"])
+                    res = await session.execute(stmt)
+                    existing = res.scalar_one_or_none()
+                    if not existing:
+                        sym = Symbol(
+                            ticker=item["ticker"].upper().strip(),
+                            name=item["name"],
+                            exchange=item["exchange"],
+                            currency=item["currency"],
+                            is_active=True
+                        )
+                        session.add(sym)
+                        added_count += 1
+                await session.commit()
+                results["seeded_symbols_count"] = added_count
+                logger.info(f"Seeded {added_count} new symbols into watchlist.")
+            except Exception as e:
+                await session.rollback()
+                logger.warning(f"Failed to seed watchlist or concurrent initialization detected: {e}")
 
     return results
 
 async def main():
     logging.basicConfig(level=logging.INFO)
     print("Running database initialization script...")
-    res = await init_database(seed_watchlist=True)
-    print("Initialization completed:", res)
+    try:
+        res = await init_database(seed_watchlist=True)
+        print("Initialization completed:", res)
+    finally:
+        await engine.dispose()
 
 if __name__ == "__main__":
     asyncio.run(main())
