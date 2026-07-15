@@ -1,7 +1,7 @@
 import datetime
 import logging
 import math
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 logger = logging.getLogger("trading.data.cleaner")
 
@@ -9,6 +9,24 @@ class DataCleaner:
     """
     Handles missing candle detection, price sanity checks, and corporate action (stock split / bonus issue) verification.
     """
+
+    @staticmethod
+    def sanitize_text(val: Any, max_len: Optional[int] = None) -> Optional[str]:
+        """
+        Sanitizes text by removing NUL (0x00) bytes and truncating to max_len to prevent Postgres DataError.
+        """
+        if val is None:
+            return None
+        try:
+            import pandas as pd
+            if pd.isna(val):
+                return None
+        except Exception:
+            pass
+        s = str(val).replace("\x00", "")
+        if max_len is not None and len(s) > max_len:
+            s = s[:max_len]
+        return s if s else None
 
     @staticmethod
     def detect_missing_trading_days(bars: List[Dict[str, Any]], timeframe: str = "1d") -> List[datetime.date]:

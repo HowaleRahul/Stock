@@ -44,10 +44,10 @@ class DataIngestionService:
                 default_cur = "INR" if (ticker.endswith(".NS") or ticker.endswith(".BO")) else "USD"
 
                 sym = Symbol(
-                    ticker=ticker[:64],
-                    name=str(info.get("name") or ticker)[:256],
-                    exchange=str(info.get("exchange") or default_ex)[:32],
-                    currency=str(info.get("currency") or default_cur)[:16],
+                    ticker=DataCleaner.sanitize_text(ticker, 64) or ticker[:64],
+                    name=DataCleaner.sanitize_text(info.get("name") or ticker, 256) or ticker[:256],
+                    exchange=DataCleaner.sanitize_text(info.get("exchange") or default_ex, 32) or default_ex,
+                    currency=DataCleaner.sanitize_text(info.get("currency") or default_cur, 16) or default_cur,
                     is_active=True
                 )
                 session.add(sym)
@@ -203,18 +203,22 @@ class DataIngestionService:
 
         async with async_session_factory() as session:
             try:
-                records = [
-                    {
+                records = []
+                for h in headlines:
+                    if not (h.get("time") and h.get("url") and h.get("title")):
+                        continue
+                    clean_url = DataCleaner.sanitize_text(h["url"], 1024)
+                    clean_title = DataCleaner.sanitize_text(h["title"], 512)
+                    if not clean_url or not clean_title:
+                        continue
+                    records.append({
                         "time": h["time"],
-                        "url": str(h["url"])[:1024],
+                        "url": clean_url,
                         "symbol_id": symbol.id,
-                        "title": str(h["title"])[:512],
-                        "source": str(h["source"])[:128],
-                        "summary": str(h["summary"])[:65000] if h.get("summary") else None
-                    }
-                    for h in headlines
-                    if h.get("time") and h.get("url") and h.get("title")
-                ]
+                        "title": clean_title,
+                        "source": DataCleaner.sanitize_text(h.get("source"), 128) or "Unknown",
+                        "summary": DataCleaner.sanitize_text(h.get("summary"), 65000)
+                    })
                 if not records:
                     return {
                         "ticker": ticker,

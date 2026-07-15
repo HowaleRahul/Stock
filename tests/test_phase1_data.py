@@ -416,3 +416,19 @@ def test_target_symbols_env_parsing_and_normalization():
     s3 = Settings(TARGET_SYMBOLS=["tcs.ns", "infy.ns"])
     assert s3.target_symbols == ["TCS.NS", "INFY.NS"]
 
+
+def test_sanitize_text_null_bytes_and_truncation():
+    """
+    Verifies that DataCleaner.sanitize_text strips NUL (0x00) bytes and truncates
+    to max_len to prevent Postgres DataError.
+    """
+    from data.cleaner import DataCleaner
+
+    raw = "Headline with null byte\x00 inside and extra text"
+    cleaned = DataCleaner.sanitize_text(raw, max_len=23)
+    assert cleaned == "Headline with null byte"
+    assert "\x00" not in cleaned
+
+    assert DataCleaner.sanitize_text(None) is None
+    assert DataCleaner.sanitize_text("\x00\x00") is None
+
