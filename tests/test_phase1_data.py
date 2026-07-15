@@ -493,3 +493,35 @@ def test_cli_argument_normalization_and_clamping():
                 coro.close()
             assert mock_run.called
 
+
+@pytest.mark.asyncio
+async def test_init_database_seeding_with_target_symbols():
+    """
+    Verifies that init_database(seed_watchlist=True) merges DEFAULT_WATCHLIST
+    and custom settings.target_symbols cleanly into the database.
+    """
+    from unittest.mock import patch, AsyncMock, MagicMock
+    from models.init_db import init_database
+    from models.models import Symbol
+
+    mock_conn = AsyncMock()
+    mock_engine = MagicMock()
+    mock_engine.begin.return_value.__aenter__.return_value = mock_conn
+
+    mock_session = AsyncMock()
+    # Let's say all select queries return None so symbols are added
+    mock_execute_res = MagicMock()
+    mock_execute_res.scalar_one_or_none.return_value = None
+    mock_session.execute.return_value = mock_execute_res
+
+    mock_factory = MagicMock()
+    mock_factory.return_value.__aenter__.return_value = mock_session
+
+    with patch("models.init_db.engine", mock_engine):
+        with patch("models.init_db.async_session_factory", mock_factory):
+            with patch("api.config.settings.target_symbols", ["CUSTOM1.NS", "CUSTOM2"]):
+                res = await init_database(seed_watchlist=True)
+                assert res["tables_created"] is True
+                assert res["seeded_symbols_count"] >= 8  # 8 default + 2 custom = 10
+                assert mock_session.add.call_count >= 10
+

@@ -66,17 +66,37 @@ async def init_database(seed_watchlist: bool = True) -> dict:
         # Seed default watchlist if requested
         if seed_watchlist:
             try:
+                from api.config import settings
+                from data.cleaner import DataCleaner
+
                 added_count = 0
-                for item in DEFAULT_WATCHLIST:
-                    stmt = select(Symbol).where(Symbol.ticker == item["ticker"])
+                # Combine DEFAULT_WATCHLIST with any target symbols configured via environment settings
+                seed_items = list(DEFAULT_WATCHLIST)
+                existing_seed_tickers = {item["ticker"].upper().strip() for item in seed_items}
+                for t in settings.target_symbols:
+                    clean_t = t.upper().strip()
+                    if clean_t and clean_t not in existing_seed_tickers:
+                        seed_items.append({
+                            "ticker": clean_t,
+                            "name": clean_t,
+                            "exchange": "NSE" if ".NS" in clean_t else "NASDAQ",
+                            "currency": "INR" if ".NS" in clean_t else "USD"
+                        })
+                        existing_seed_tickers.add(clean_t)
+
+                for item in seed_items:
+                    clean_ticker = DataCleaner.sanitize_text(item["ticker"].upper().strip(), max_len=64)
+                    if not clean_ticker:
+                        continue
+                    stmt = select(Symbol).where(Symbol.ticker == clean_ticker)
                     res = await session.execute(stmt)
                     existing = res.scalar_one_or_none()
                     if not existing:
                         sym = Symbol(
-                            ticker=item["ticker"].upper().strip(),
-                            name=item["name"],
-                            exchange=item["exchange"],
-                            currency=item["currency"],
+                            ticker=clean_ticker,
+                            name=DataCleaner.sanitize_text(item.get("name", clean_ticker), max_len=256),
+                            exchange=DataCleaner.sanitize_text(item.get("exchange", "NSE"), max_len=32) or "NSE",
+                            currency=DataCleaner.sanitize_text(item.get("currency", "INR"), max_len=16) or "INR",
                             is_active=True
                         )
                         session.add(sym)
