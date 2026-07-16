@@ -31,4 +31,11 @@ i want you to be a senior tester who also know development who is senior develop
 
 check each and every feature in details for bugs and errors
 
+also check for each and every edge case that could happen and fix it
+
+try to tear the code as much as you can to find bugs error and issues and after finding fix them
+
 keep checking and keep looping till precision!
+
+
+-------

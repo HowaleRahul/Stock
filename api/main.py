@@ -1,7 +1,9 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.config import settings
@@ -46,15 +48,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Personal AI-Assisted Trading System API",
     description="Explainable ML-driven decision-support system for equity, intraday, and F&O trading.",
-    version="0.1.0-phase1",
+    version="0.2.0-phase2",
     lifespan=lifespan
 )
 
-# Enable CORS (for future Phase 6 Frontend UI)
+# Enable CORS cleanly according to W3C specification
+_cors_origins = getattr(settings, "cors_origins", ["*"])
+_allow_creds = False if "*" in _cors_origins else True
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_allow_creds,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -62,16 +66,22 @@ app.add_middleware(
 # Include API routes
 app.include_router(data_router)
 
+# Serve frontend static files (Phase 2 Chart UI)
+_frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+if os.path.isdir(_frontend_dir):
+    app.mount("/app", StaticFiles(directory=_frontend_dir, html=True), name="frontend")
+
 
 @app.get("/", tags=["General"])
 async def root():
     """Root endpoint providing system identification and navigation."""
     return {
         "system": "Personal AI-Assisted Trading System",
-        "current_phase": "Phase 1 — Data Pipeline (MVP)",
+        "current_phase": "Phase 2 — Technical Setups + Chart UI",
         "documentation": "/docs",
         "health_check": "/health",
-        "database_check": "/db-check"
+        "database_check": "/db-check",
+        "dashboard": "/app/",
     }
 
 
@@ -81,8 +91,8 @@ async def health_check():
     return {
         "status": "ok",
         "service": "trading-api",
-        "version": "0.1.0-phase1",
-        "phase": "Phase 1 (Data Pipeline)",
+        "version": "0.2.0-phase2",
+        "phase": "Phase 2 (Technical Setups + Chart UI)",
         "environment": settings.environment,
         "target_symbols": settings.target_symbols,
     }

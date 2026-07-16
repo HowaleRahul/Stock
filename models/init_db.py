@@ -42,9 +42,11 @@ async def init_database(seed_watchlist: bool = True) -> dict:
             await session.execute(
                 text("SELECT create_hypertable('ohlcv_bars', 'time', if_not_exists => TRUE);")
             )
+            await session.commit()
             results["hypertables_configured"].append("ohlcv_bars")
             logger.info("Successfully configured hypertable: ohlcv_bars")
         except Exception as e:
+            await session.rollback()
             logger.warning(f"Could not configure hypertable 'ohlcv_bars' (might be standard postgres or already created): {e}")
 
         try:
@@ -52,16 +54,12 @@ async def init_database(seed_watchlist: bool = True) -> dict:
             await session.execute(
                 text("SELECT create_hypertable('news_headlines', 'time', if_not_exists => TRUE);")
             )
+            await session.commit()
             results["hypertables_configured"].append("news_headlines")
             logger.info("Successfully configured hypertable: news_headlines")
         except Exception as e:
-            logger.warning(f"Could not configure hypertable 'news_headlines': {e}")
-
-        try:
-            await session.commit()
-        except Exception as commit_err:
             await session.rollback()
-            logger.debug(f"Hypertable commit notice (or no transaction active): {commit_err}")
+            logger.warning(f"Could not configure hypertable 'news_headlines': {e}")
 
         # Seed default watchlist if requested
         if seed_watchlist:

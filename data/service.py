@@ -58,8 +58,12 @@ class DataIngestionService:
                 except Exception as e:
                     await session.rollback()
                     logger.warning(f"Concurrent insert detected or commit failed for {ticker}: {e}")
-                    res = await session.execute(select(Symbol).where(Symbol.ticker == ticker))
-                    sym = res.scalar_one_or_none()
+                    for _attempt in range(3):
+                        await asyncio.sleep(0.05)
+                        res = await session.execute(select(Symbol).where(Symbol.ticker == ticker))
+                        sym = res.scalar_one_or_none()
+                        if sym:
+                            break
                     if not sym:
                         raise e
             return sym
@@ -87,6 +91,15 @@ class DataIngestionService:
             raise ValueError("Ticker symbol cannot be empty.")
         logger.info(f"Starting OHLCV sync for {ticker} (interval={interval})...")
         symbol = await cls.get_or_create_symbol(ticker)
+
+        if not start and not end:
+            if interval in ["1m"]:
+                period = "7d"
+            elif interval in ["2m", "5m", "15m", "30m"]:
+                period = "60d"
+            elif interval in ["60m", "1h", "90m"]:
+                if period in ["5y", "max", "10y"]:
+                    period = "730d"
 
         # 1. Fetch raw data
         raw_bars = await YFinanceFetcher.fetch_ohlcv_bars(

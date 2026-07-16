@@ -12,8 +12,21 @@ class YFinanceFetcher:
     Runs synchronous yfinance calls inside asyncio threads to avoid blocking the loop.
     """
 
-    @staticmethod
+    YAHOO_TICKER_ALIASES = {
+        "NIFTY": "^NSEI",
+        "NIFTY.NS": "^NSEI",
+        "NIFTY 50": "^NSEI",
+        "BANKNIFTY": "^NSEBANK",
+        "BANKNIFTY.NS": "^NSEBANK",
+        "NIFTY BANK": "^NSEBANK",
+        "SENSEX": "^BSESN",
+        "SENSEX.BO": "^BSESN",
+        "BSE SENSEX": "^BSESN",
+    }
+
+    @classmethod
     def _fetch_history_sync(
+        cls,
         ticker: str,
         period: str = "5y",
         interval: str = "1d",
@@ -21,8 +34,17 @@ class YFinanceFetcher:
         end: Optional[str] = None
     ) -> pd.DataFrame:
         ticker = ticker.upper().strip()
-        logger.info(f"Downloading history for {ticker} (period={period}, interval={interval}, start={start}, end={end})...")
-        yt = yf.Ticker(ticker)
+        yahoo_ticker = cls.YAHOO_TICKER_ALIASES.get(ticker, ticker)
+        if not start and not end:
+            if interval in ["1m"]:
+                period = "7d"
+            elif interval in ["2m", "5m", "15m", "30m"]:
+                period = "60d"
+            elif interval in ["60m", "1h", "90m"]:
+                if period in ["5y", "max", "10y"]:
+                    period = "730d"
+        logger.info(f"Downloading history for {ticker} (yahoo={yahoo_ticker}, period={period}, interval={interval}, start={start}, end={end})...")
+        yt = yf.Ticker(yahoo_ticker)
         
         kwargs = {
             "interval": interval,
@@ -138,10 +160,11 @@ class YFinanceFetcher:
         logger.info(f"Successfully processed {len(bars)} bars for {ticker}.")
         return bars
 
-    @staticmethod
-    def _fetch_info_sync(ticker: str) -> Dict[str, Any]:
+    @classmethod
+    def _fetch_info_sync(cls, ticker: str) -> Dict[str, Any]:
         ticker = ticker.upper().strip()
-        yt = yf.Ticker(ticker)
+        yahoo_ticker = cls.YAHOO_TICKER_ALIASES.get(ticker, ticker)
+        yt = yf.Ticker(yahoo_ticker)
         try:
             info = yt.info or {}
             return {

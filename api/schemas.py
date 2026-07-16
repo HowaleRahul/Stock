@@ -75,26 +75,70 @@ class SyncRequest(BaseModel):
         if v is None:
             return None
         if isinstance(v, str):
-            cleaned = v.upper().strip()
+            cleaned = v.upper().strip().replace("\x00", "")[:64]
             return cleaned if cleaned else None
-        return str(v).upper().strip()
+        return str(v).upper().strip()[:64]
 
     @field_validator("interval", mode="before")
     @classmethod
     def clean_interval(cls, v: Any) -> str:
-        if isinstance(v, str):
-            cleaned = v.lower().strip()
-            return cleaned if cleaned else "1d"
-        return str(v).lower().strip() if v is not None else "1d"
+        cleaned = str(v).lower().strip() if v is not None else "1d"
+        if not cleaned:
+            cleaned = "1d"
+        valid = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+        if cleaned not in valid:
+            raise ValueError(f"Invalid interval '{cleaned}'. Allowed: {', '.join(sorted(valid))}")
+        return cleaned
 
     @field_validator("period", mode="before")
     @classmethod
     def clean_period(cls, v: Any) -> str:
-        if isinstance(v, str):
-            cleaned = v.lower().strip()
-            return cleaned if cleaned else "5y"
-        return str(v).lower().strip() if v is not None else "5y"
+        cleaned = str(v).lower().strip() if v is not None else "5y"
+        if not cleaned:
+            cleaned = "5y"
+        valid = {"1d", "5d", "7d", "1mo", "3mo", "6mo", "60d", "1y", "2y", "730d", "5y", "10y", "ytd", "max"}
+        if cleaned not in valid:
+            raise ValueError(f"Invalid period '{cleaned}'. Allowed: {', '.join(sorted(valid))}")
+        return cleaned
 
 class SyncResponse(BaseModel):
     message: str
     results: List[Dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Setup Evaluation Schemas
+# ---------------------------------------------------------------------------
+
+class SetupSignalResponse(BaseModel):
+    """Single setup evaluation result."""
+    name: str
+    signal: str
+    confidence: float
+    reasoning: str
+
+class SetupEvaluationResponse(BaseModel):
+    """Aggregated response from running all setups on a ticker."""
+    ticker: str
+    timeframe: str
+    bars_analyzed: int
+    evaluated_at: datetime.datetime
+    setups: List[SetupSignalResponse]
+
+class IndicatorDataResponse(BaseModel):
+    """Raw indicator series for chart overlay rendering."""
+    ticker: str
+    timeframe: str
+    candles: List[CandleResponse]
+    ema_20: List[Optional[float]]
+    ema_50: List[Optional[float]]
+    rsi_14: List[Optional[float]]
+    macd_line: List[Optional[float]]
+    macd_signal: List[Optional[float]]
+    macd_histogram: List[Optional[float]]
+    bb_upper: List[Optional[float]]
+    bb_middle: List[Optional[float]]
+    bb_lower: List[Optional[float]]
+    support_levels: List[float]
+    resistance_levels: List[float]
+

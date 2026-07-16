@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Dashboard — Technical Setups</title>
+    <meta name="description" content="Real-time technical analysis dashboard with MA Crossover, RSI, MACD, Bollinger Bands, and Support/Resistance breakout setups.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-bar__brand">
+            <h1>📈 AI Trading Dashboard</h1>
+            <span class="top-bar__subtitle">Technical Setups Engine</span>
+        </div>
+        <div class="top-bar__controls">
+            <div class="search-container" id="search-container">
+                <select id="market-mode-select" class="market-mode-select" title="Select Market Region">
+                    <option value="india" selected>🇮🇳 India (NSE/BSE)</option>
+                    <option value="global">🇺🇸 Global / US</option>
+                    <option value="all">🌐 All Markets</option>
+                </select>
+                <div class="search-input-wrapper">
+                    <input type="text" id="ticker-search" class="ticker-search" placeholder="Search symbol or company..." autocomplete="off" spellcheck="false">
+                    <button id="search-btn" class="search-btn" title="Search stock or index">🔍</button>
+                    <ul id="search-suggestions" class="search-suggestions"></ul>
+                </div>
+            </div>
+            <select id="ticker-select" class="ticker-select" title="Quick Watchlist">
+                <option value="" disabled selected>Loading symbols...</option>
+            </select>
+            <select id="timeframe-select" class="ticker-select" style="margin-left: 8px;">
+                <option value="15m">15m (Intraday)</option>
+                <option value="1h">1h (Intraday)</option>
+                <option value="1d" selected>1d (Daily)</option>
+                <option value="1wk">1wk (Weekly)</option>
+                <option value="1mo">1mo (Monthly)</option>
+            </select>
+            <span id="last-updated" class="last-updated"></span>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="dashboard">
+        <!-- Chart Area -->
+        <section class="chart-area">
+            <div id="price-chart" class="chart-container"></div>
+            <div id="rsi-chart" class="indicator-pane"></div>
+            <div id="macd-chart" class="indicator-pane"></div>
+            <div id="loading-overlay" class="loading-overlay">
+                <div class="spinner"></div>
+                <p>Analyzing...</p>
+            </div>
+        </section>
+
+        <!-- Signals Panel -->
+        <aside class="signals-panel">
+            <h2 class="signals-panel__title">Setup Signals</h2>
+            <div id="signals-container" class="signals-container">
+                <div class="empty-state">
+                    <p>Select a symbol to view analysis</p>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <p>Charts powered by <a href="https://www.tradingview.com" target="_blank" rel="noopener">TradingView</a> Lightweight Charts</p>
+    </footer>
+
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

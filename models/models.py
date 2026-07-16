@@ -53,7 +53,7 @@ class OHLCVBar(Base):
     symbol = relationship("Symbol", back_populates="candles")
 
     __table_args__ = (
-        Index("ix_ohlcv_symbol_time_timeframe", "symbol_id", "time", "timeframe", unique=True),
+        Index("ix_ohlcv_symbol_timeframe_time", "symbol_id", "timeframe", "time", unique=True),
     )
 
     def __repr__(self) -> str:
