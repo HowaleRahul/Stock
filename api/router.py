@@ -4,7 +4,8 @@ import logging
 import httpx
 import urllib.parse
 from typing import Any, List, Optional, Dict
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Request
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 import pandas as pd
@@ -22,17 +23,34 @@ from data.service import DataIngestionService
 from setups.engine import SetupEngine
 from setups.indicators import ema, rsi, macd, bollinger_bands, find_support_resistance
 from api.config import settings
+from api.auth import rate_limiter, get_api_key
 
 logger = logging.getLogger("trading.api.router")
 
 router = APIRouter(prefix="/api/v1", tags=["Data Pipeline & Watchlist"])
 
-_SYNC_LOCKS: Dict[str, asyncio.Lock] = {}
+class RefCountedLock:
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.ref_count = 0
 
-def _get_sync_lock(key: str) -> asyncio.Lock:
+_SYNC_LOCKS: Dict[str, RefCountedLock] = {}
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def _get_sync_lock(key: str):
     if key not in _SYNC_LOCKS:
-        _SYNC_LOCKS[key] = asyncio.Lock()
-    return _SYNC_LOCKS[key]
+        _SYNC_LOCKS[key] = RefCountedLock()
+    lock_obj = _SYNC_LOCKS[key]
+    lock_obj.ref_count += 1
+    try:
+        async with lock_obj.lock:
+            yield
+    finally:
+        lock_obj.ref_count -= 1
+        if lock_obj.ref_count == 0:
+            _SYNC_LOCKS.pop(key, None)
 
 # Shared engine instance
 _setup_engine = SetupEngine()
@@ -144,7 +162,8 @@ def _score_fuzzy_suggestion(q_upper: str, sym: str, name: str) -> float:
 async def search_symbols_endpoint(
     q: str = Query(..., min_length=1, description="Search query string"),
     market: str = Query("all", description="Filter market: india, global, or all"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    _rate_limit: bool = Depends(rate_limiter(100))
 ):
     """Search for matching stocks using algorithmic fuzzy matching, local DB, instant catalog, and live Yahoo queries."""
     clean_q = q.strip().replace("\x00", "")[:64]
@@ -159,7 +178,11 @@ async def search_symbols_endpoint(
 
     # 1. First check local database symbols
     try:
-        stmt = select(Symbol)
+        # Prevent massive table scans by filtering via SQL first, then applying CPU-heavy fuzzy scoring
+        stmt = select(Symbol).where(
+            (Symbol.ticker.ilike(f"%{clean_q}%")) |
+            (Symbol.name.ilike(f"%{clean_q}%"))
+        ).limit(100)
         res = await db.execute(stmt)
         for sym in res.scalars().all():
             if sym.ticker in seen:
@@ -249,7 +272,11 @@ async def list_symbols(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/init", status_code=status.HTTP_200_OK, summary="Initialize schema and seed watchlist")
-async def init_schema_and_seed(seed_watchlist: bool = Query(True, description="Whether to seed default/target symbols")):
+async def init_schema_and_seed(
+    seed_watchlist: bool = Query(True, description="Whether to seed default/target symbols"),
+    _api_key: str = Depends(get_api_key),
+    _rate_limit: bool = Depends(rate_limiter(10))
+):
     """
     On-demand initialization of database tables, TimescaleDB hypertables ('ohlcv_bars' & 'news_headlines'),
     and seeding of target focus tickers.
@@ -269,7 +296,12 @@ async def init_schema_and_seed(seed_watchlist: bool = Query(True, description="W
 
 
 @router.post("/symbols", response_model=SymbolResponse, status_code=status.HTTP_201_CREATED, summary="Add symbol to watchlist")
-async def add_symbol(payload: SymbolCreate, db: AsyncSession = Depends(get_db)):
+async def add_symbol(
+    payload: SymbolCreate,
+    db: AsyncSession = Depends(get_db),
+    _api_key: str = Depends(get_api_key),
+    _rate_limit: bool = Depends(rate_limiter(30))
+):
     """Register a new ticker in the watchlist."""
     ticker_clean = payload.ticker.upper().strip()
     # Check existing
@@ -291,7 +323,11 @@ async def add_symbol(payload: SymbolCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/sync", response_model=SyncResponse, summary="Trigger data ingestion synchronization")
-async def trigger_sync(payload: SyncRequest):
+async def trigger_sync(
+    payload: SyncRequest,
+    _api_key: str = Depends(get_api_key),
+    _rate_limit: bool = Depends(rate_limiter(30))
+):
     """
     On-demand execution of data synchronization for OHLCV bars and/or news headlines.
     Supports either single symbol sync (`ticker="RELIANCE.NS"`) or whole watchlist (`sync_watchlist=True`).
@@ -450,8 +486,7 @@ async def _load_ohlcv_df(
 
     # Auto-trigger on-demand sync from Yahoo Finance if symbol is missing or has insufficient history
     if not sym or len(bars) < 10:
-        lock = _get_sync_lock(f"{ticker_clean}:{timeframe_clean}")
-        async with lock:
+        async with _get_sync_lock(f"{ticker_clean}:{timeframe_clean}"):
             # End any stale read transaction on db so we see whatever another concurrent request just committed inside the lock!
             try:
                 await db.commit()
@@ -548,23 +583,51 @@ async def evaluate_setups(
 ):
     """Run all 5 technical setups (MA Crossover, RSI, MACD, Bollinger Bands,
     S/R Breakout) against the stored OHLCV data and return signals."""
-    sym, bars, df = await _load_ohlcv_df(ticker, timeframe, period, db)
+    sym, bars, df_primary = await _load_ohlcv_df(ticker, timeframe, period, db)
 
-    signals = _setup_engine.evaluate_all(df)
+    # Try fetching lower timeframes for confirmation (fail silently if missing)
+    mtf_map = {"1d": ["1h", "15m"], "1h": ["15m", "5m"]}
+    mtf_targets = mtf_map.get(timeframe.lower().strip(), [])
+    
+    mtf_dfs = {}
+    for tf in mtf_targets:
+        try:
+            _, _, df_tf = await _load_ohlcv_df(ticker, tf, period, db)
+            if not df_tf.empty:
+                mtf_dfs[tf] = df_tf
+        except Exception:
+            pass
+
+    # Evaluate primary timeframe
+    regime_data, primary_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_primary, ticker)
+
+    # Evaluate MTF and boost confidence
+    for tf, df_tf in mtf_dfs.items():
+        try:
+            _, tf_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_tf, ticker)
+            tf_signal_map = {s.name: s.signal for s in tf_signals}
+            
+            for p_sig in primary_signals:
+                if p_sig.signal != "neutral" and tf_signal_map.get(p_sig.name) == p_sig.signal:
+                    p_sig.confidence = min(1.0, p_sig.confidence + 0.15)
+                    if f"Confirmed by {tf}" not in p_sig.reasoning:
+                        p_sig.reasoning += f" [MTF: Confirmed by {tf} chart]"
+        except Exception:
+            pass
 
     return SetupEvaluationResponse(
         ticker=sym.ticker,
         timeframe=timeframe.lower().strip(),
-        bars_analyzed=len(df),
+        bars_analyzed=len(df_primary),
         evaluated_at=datetime.datetime.now(datetime.timezone.utc),
+        regime=regime_data,
         setups=[
             SetupSignalResponse(
                 name=s.name,
                 signal=s.signal,
                 confidence=s.confidence,
                 reasoning=s.reasoning,
-            )
-            for s in signals
+            ) for s in primary_signals
         ],
     )
 

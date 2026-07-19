@@ -60,6 +60,18 @@
         <!-- Signals Panel -->
         <aside class="signals-panel">
             <h2 class="signals-panel__title">Setup Signals</h2>
+            
+            <div id="regime-badge" class="regime-badge hidden">
+                <span id="regime-text">Detecting Regime...</span>
+            </div>
+            
+            <div class="setup-toggles">
+                <label><input type="checkbox" id="toggle-all" checked> Select All</label>
+                <div id="setup-checkboxes" class="setup-checkboxes">
+                    <!-- Populated via JS -->
+                </div>
+            </div>
+            
             <div id="signals-container" class="signals-container">
                 <div class="empty-state">
                     <p>Select a symbol to view analysis</p>

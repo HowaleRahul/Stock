@@ -117,12 +117,18 @@ class SetupSignalResponse(BaseModel):
     confidence: float
     reasoning: str
 
+class RegimeResponse(BaseModel):
+    regime: str
+    adx: float
+    direction: str
+
 class SetupEvaluationResponse(BaseModel):
     """Aggregated response from running all setups on a ticker."""
     ticker: str
     timeframe: str
     bars_analyzed: int
     evaluated_at: datetime.datetime
+    regime: Optional[RegimeResponse] = None
     setups: List[SetupSignalResponse]
 
 class IndicatorDataResponse(BaseModel):

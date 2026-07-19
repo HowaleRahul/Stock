@@ -67,7 +67,7 @@ class BaseSetup(ABC):
     name: str = "Unnamed Setup"
 
     @abstractmethod
-    def evaluate(self, df: pd.DataFrame) -> SetupSignal:
+    def evaluate(self, df: pd.DataFrame, ticker: str = "") -> SetupSignal:
         """Evaluate the setup against an OHLCV DataFrame.
 
         Args:

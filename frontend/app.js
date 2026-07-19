@@ -401,15 +401,85 @@
     }
 
     // ── Render Signal Cards ──────────────────────────────────
-    function renderSignals(setups) {
-        const list = setups.setups || setups;
+    let allSetups = [];
+    let enabledSetups = new Set();
 
-        if (!Array.isArray(list) || list.length === 0) {
-            signalsContainer.innerHTML = '<div class="empty-state"><p>No setup signals available</p></div>';
+    function renderSignals(data) {
+        const container = document.getElementById('signals-container');
+        const regimeBadge = document.getElementById('regime-badge');
+        const regimeText = document.getElementById('regime-text');
+        const toggleAll = document.getElementById('toggle-all');
+        const checkboxesContainer = document.getElementById('setup-checkboxes');
+        
+        container.innerHTML = '';
+        
+        if (!data.setups || data.setups.length === 0) {
+            container.innerHTML = `<div class="empty-state"><p>No analysis available</p></div>`;
+            if (regimeBadge) regimeBadge.classList.add('hidden');
             return;
         }
+        
+        // 1. Handle Regime Badge
+        if (regimeBadge && data.regime && data.regime.regime !== 'unknown' && data.regime.regime !== 'error') {
+            regimeBadge.classList.remove('hidden', 'trending', 'range-bound');
+            regimeBadge.classList.add(data.regime.regime);
+            regimeText.textContent = `Regime: ${data.regime.regime.toUpperCase()} (ADX: ${data.regime.adx}) - ${data.regime.direction}`;
+        } else if (regimeBadge) {
+            regimeBadge.classList.add('hidden');
+        }
+        
+        // Store globally for filtering
+        allSetups = data.setups;
+        
+        // 2. Build Toggles if not already built (only once per symbol load)
+        if (checkboxesContainer.children.length === 0) {
+            data.setups.forEach(setup => {
+                enabledSetups.add(setup.name);
+                const lbl = document.createElement('label');
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = true;
+                cb.value = setup.name;
+                cb.addEventListener('change', (e) => {
+                    if (e.target.checked) enabledSetups.add(setup.name);
+                    else enabledSetups.delete(setup.name);
+                    
+                    // Update "Toggle All" state
+                    toggleAll.checked = enabledSetups.size === allSetups.length;
+                    renderFilteredSignals();
+                });
+                lbl.appendChild(cb);
+                lbl.appendChild(document.createTextNode(setup.name));
+                checkboxesContainer.appendChild(lbl);
+            });
+            
+            // Setup "Toggle All" listener once
+            toggleAll.onchange = (e) => {
+                const isChecked = e.target.checked;
+                checkboxesContainer.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                    cb.checked = isChecked;
+                    if (isChecked) enabledSetups.add(cb.value);
+                    else enabledSetups.delete(cb.value);
+                });
+                renderFilteredSignals();
+            };
+        }
+        
+        renderFilteredSignals();
+    }
 
-        signalsContainer.innerHTML = list.map(s => {
+    function renderFilteredSignals() {
+        const container = document.getElementById('signals-container');
+        container.innerHTML = '';
+        
+        const visibleSetups = allSetups.filter(s => enabledSetups.has(s.name));
+        
+        if (visibleSetups.length === 0) {
+            container.innerHTML = `<div class="empty-state"><p>No setups selected</p></div>`;
+            return;
+        }
+        
+        container.innerHTML = visibleSetups.map(s => {
             const rawSignal  = (s.signal || 'neutral').toLowerCase();
             const signal     = rawSignal.replace(/[^a-z0-9_-]/g, '') || 'neutral';
             const rawConf    = (typeof s.confidence === 'number' && Number.isFinite(s.confidence)) ? s.confidence : 0;
@@ -445,10 +515,23 @@
         signalsContainer.innerHTML = `<div class="error-state"><p>${escapeHTML(msg)}</p></div>`;
     }
 
-    // ── Load Ticker Data ─────────────────────────────────────
+    // ── Load Ticker Data (With Circuit Breaker) ─────────────
+    let circuitBrokenUntil = 0;
+
     async function loadTickerData(ticker) {
+        if (Date.now() < circuitBrokenUntil) {
+            showError("Server is unreachable. Circuit breaker active. Please try again later.");
+            return;
+        }
+
         showLoading(`Loading analysis & charts for ${ticker}...`);
         const tf = timeframeSelect ? timeframeSelect.value : '1d';
+        
+        // Reset toggles on new ticker
+        const checkboxesContainer = document.getElementById('setup-checkboxes');
+        if (checkboxesContainer) checkboxesContainer.innerHTML = '';
+        enabledSetups.clear();
+        
         try {
             let indicatorsResult = null;
             let setupsResult = null;
@@ -478,15 +561,23 @@
             if (!(indicatorsResult instanceof Error)) {
                 renderCharts(indicatorsResult, tf);
             } else {
-                console.error("Chart indicator load error:", indicatorsResult);
+                if (indicatorsResult.message && indicatorsResult.message.includes('Failed to fetch')) {
+                    circuitBrokenUntil = Date.now() + 30000; // Break for 30s
+                }
+                showError("Error loading charts: " + indicatorsResult.message);
             }
 
             if (!(setupsResult instanceof Error)) {
                 renderSignals(setupsResult);
             } else {
-                showError(`Error loading setup evaluation: ${setupsResult.message}`);
-            }
-
+                if (setupsResult.message && setupsResult.message.includes('Failed to fetch')) {
+                    circuitBrokenUntil = Date.now() + 30000; // Break for 30s
+                }
+                if (!(indicatorsResult instanceof Error)) {
+                    showError("Charts loaded, but setups failed: " + setupsResult.message);
+                }
+            } 
+            
             lastUpdatedEl.textContent = `Updated ${new Date().toLocaleTimeString()} (${tf})`;
         } catch (err) {
             console.error(err);

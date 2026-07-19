@@ -53,15 +53,34 @@ app = FastAPI(
 )
 
 # Enable CORS cleanly according to W3C specification
-_cors_origins = getattr(settings, "cors_origins", ["*"])
+# Default to strict local origins if not overridden
+_cors_origins = getattr(settings, "cors_origins", [
+    "http://localhost",
+    "http://localhost:8000",
+    "http://127.0.0.1",
+    "http://127.0.0.1:8000"
+])
 _allow_creds = False if "*" in _cors_origins else True
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=_allow_creds,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# Enforce Strict-Transport-Security (HSTS) in production
+from fastapi import Request
+from starlette.responses import Response
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response: Response = await call_next(request)
+    if settings.environment.lower() == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+    return response
 
 # Include API routes
 app.include_router(data_router)
