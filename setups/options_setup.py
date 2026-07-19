@@ -1,7 +1,16 @@
-from __future__ import annotations
 import pandas as pd
 import yfinance as yf
+from functools import lru_cache
 from setups.base import BaseSetup, SetupSignal
+
+@lru_cache(maxsize=128)
+def get_options_data(ticker: str):
+    stock = yf.Ticker(ticker)
+    expirations = stock.options
+    if not expirations:
+        return None, None
+    nearest_exp = expirations[0]
+    return nearest_exp, stock.option_chain(nearest_exp)
 
 class OptionsSetup(BaseSetup):
     """
@@ -18,15 +27,10 @@ class OptionsSetup(BaseSetup):
             return SetupSignal(self.name, "neutral", 0.0, "No ticker provided.")
             
         try:
-            stock = yf.Ticker(ticker)
-            expirations = stock.options
+            nearest_exp, opt = get_options_data(ticker)
             
-            if not expirations:
+            if not opt:
                 return SetupSignal(self.name, "neutral", 0.0, "No options data available for this ticker.")
-                
-            # Get the nearest expiration date
-            nearest_exp = expirations[0]
-            opt = stock.option_chain(nearest_exp)
             
             calls = opt.calls
             puts = opt.puts

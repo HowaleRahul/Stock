@@ -1,7 +1,12 @@
-from __future__ import annotations
 import pandas as pd
 import yfinance as yf
+from functools import lru_cache
 from setups.base import BaseSetup, SetupSignal
+
+@lru_cache(maxsize=128)
+def get_fundamentals(ticker: str) -> dict:
+    stock = yf.Ticker(ticker)
+    return stock.info
 
 class FundamentalsSetup(BaseSetup):
     """
@@ -18,9 +23,7 @@ class FundamentalsSetup(BaseSetup):
             return SetupSignal(self.name, "neutral", 0.0, "No ticker provided.")
             
         try:
-            # We strip any Yahoo Finance suffixes if needed, but assuming ticker is ready.
-            stock = yf.Ticker(ticker)
-            info = stock.info
+            info = get_fundamentals(ticker)
             
             if not info or "trailingPE" not in info:
                 return SetupSignal(self.name, "neutral", 0.0, "Fundamental data not available.")

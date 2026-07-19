@@ -1,8 +1,13 @@
-from __future__ import annotations
 import pandas as pd
 import yfinance as yf
+from functools import lru_cache
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from setups.base import BaseSetup, SetupSignal
+
+@lru_cache(maxsize=128)
+def get_news_data(ticker: str) -> list:
+    stock = yf.Ticker(ticker)
+    return stock.news
 
 class SentimentSetup(BaseSetup):
     """
@@ -19,8 +24,7 @@ class SentimentSetup(BaseSetup):
             return SetupSignal(self.name, "neutral", 0.0, "No ticker provided.")
             
         try:
-            stock = yf.Ticker(ticker)
-            news = stock.news
+            news = get_news_data(ticker)
             
             if not news:
                 return SetupSignal(self.name, "neutral", 0.0, "No recent news found.")

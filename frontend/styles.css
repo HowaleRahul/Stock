@@ -10,6 +10,7 @@
     --bg-body: #0f1117;
     --bg-panel: rgba(22, 27, 34, 0.95);
     --bg-card: rgba(30, 36, 46, 0.85);
+    --bg-chart: #131722;
     --bg-input: rgba(35, 42, 54, 0.9);
 
     --green: #00c853;
@@ -313,6 +314,36 @@ a:hover {
     background-position: right 12px center;
 }
 
+/* ---------- Timeframe Toolbar ---------- */
+.timeframe-toolbar {
+    display: flex;
+    gap: 4px;
+    margin-left: 8px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 2px;
+}
+.tf-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    padding: 6px 10px;
+    border-radius: var(--radius-xs);
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: var(--transition);
+}
+.tf-btn:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.05);
+}
+.tf-btn.active {
+    background: rgba(41, 98, 255, 0.2);
+    color: #2962ff;
+}
+
 .ticker-select:hover {
     border-color: var(--border-hover);
 }
@@ -356,23 +387,36 @@ a:hover {
 .chart-container {
     width: 100%;
     min-height: 400px;
-    background: var(--bg-panel);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    background: var(--bg-chart);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     overflow: hidden;
+    position: relative;
 }
 
 .indicator-pane {
     width: 100%;
     height: 150px;
-    background: var(--bg-panel);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    background: var(--bg-chart);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     overflow: hidden;
+    position: relative;
+}
+
+/* ---------- Pane Resizers ---------- */
+.pane-resizer {
+    height: 8px;
+    margin: -4px 0;
+    background: transparent;
+    cursor: row-resize;
+    z-index: 100;
+    position: relative;
+    transition: background 0.2s ease;
+    border-radius: 4px;
+}
+.pane-resizer:hover, .pane-resizer.dragging {
+    background: var(--blue);
 }
 
 /* ---------- Loading Overlay ---------- */
@@ -426,6 +470,9 @@ a:hover {
     flex-direction: column;
     gap: 12px;
     min-height: 0;
+    max-height: calc(100vh - 120px); /* Limit height so it doesn't stretch infinitely */
+    position: sticky;
+    top: 24px;
 }
 
 .signals-panel__title {
@@ -460,29 +507,97 @@ a:hover {
     background: rgba(120, 144, 156, 0.1);
 }
 
-.setup-toggles {
-    margin-bottom: 1.5rem;
-    padding-bottom: 1rem;
-    border-bottom: 1px solid var(--border-color);
+.setup-filters {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin-bottom: 1rem;
+    overflow: hidden;
 }
-.setup-toggles label {
+.setup-filters summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    cursor: pointer;
+    user-select: none;
+    list-style: none; /* Hide default arrow */
+}
+.setup-filters summary::-webkit-details-marker {
+    display: none;
+}
+.setup-filters[open] summary {
+    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.02);
+}
+.setup-filters summary .summary-icon {
+    font-size: 0.7rem;
+    transition: transform 0.2s;
+    color: var(--text-muted);
+}
+.setup-filters[open] summary .summary-icon {
+    transform: rotate(180deg);
+}
+
+.setup-toggles {
+    padding: 12px 14px;
+    background: var(--bg-card);
+}
+.toggle-all-label {
     display: flex;
     align-items: center;
-    font-size: 0.85rem;
-    color: var(--text-muted);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-primary);
     cursor: pointer;
-    margin-bottom: 0.5rem;
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px dashed var(--border);
 }
-.setup-toggles input {
-    margin-right: 0.5rem;
-    accent-color: var(--accent-blue);
-}
+.toggle-all-label input { margin-right: 8px; }
+
 .setup-checkboxes {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 0.5rem;
-    margin-top: 0.5rem;
+    gap: 8px 12px;
 }
+.setup-checkboxes label {
+    display: flex;
+    align-items: center;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: color 0.2s;
+}
+.setup-checkboxes label:hover {
+    color: var(--text-primary);
+}
+.setup-checkboxes input {
+    margin-right: 6px;
+    accent-color: var(--blue);
+}
+
+.signals-summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 14px;
+    margin-bottom: 1rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+.signals-summary .tally-bullish { color: var(--green); }
+.signals-summary .tally-bearish { color: var(--red); }
+.signals-summary .tally-neutral { color: var(--gray); }
 
 .signals-container {
     display: flex;
@@ -490,7 +605,22 @@ a:hover {
     gap: 10px;
     overflow-y: auto;
     flex: 1;
-    padding-right: 4px;
+    padding-right: 8px;
+}
+
+/* Custom Scrollbar */
+.signals-container::-webkit-scrollbar {
+    width: 6px;
+}
+.signals-container::-webkit-scrollbar-track {
+    background: transparent;
+}
+.signals-container::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+}
+.signals-container::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
 }
 
 /* ---------- Empty State ---------- */
@@ -506,28 +636,29 @@ a:hover {
 /* ---------- Signal Card ---------- */
 .signal-card {
     background: var(--bg-card);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    padding: 14px 16px;
-    transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
+    padding: 12px 14px;
+    transition: transform var(--transition), border-color var(--transition);
     cursor: default;
+    position: relative;
+    overflow: hidden;
 }
 
 .signal-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    transform: translateX(-2px);
     border-color: var(--border-hover);
 }
 
 /* Color accents per signal type */
 .signal-card--bullish {
     border-left: 3px solid var(--green);
+    background: linear-gradient(90deg, rgba(0, 200, 83, 0.05) 0%, var(--bg-card) 40%);
 }
 
 .signal-card--bearish {
     border-left: 3px solid var(--red);
+    background: linear-gradient(90deg, rgba(255, 23, 68, 0.05) 0%, var(--bg-card) 40%);
 }
 
 .signal-card--neutral {
@@ -539,11 +670,11 @@ a:hover {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
 }
 
 .signal-card__name {
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     font-weight: 600;
     color: var(--text-primary);
 }
@@ -552,12 +683,12 @@ a:hover {
 .signal-badge {
     display: inline-flex;
     align-items: center;
-    font-size: 0.65rem;
+    font-size: 0.6rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    padding: 3px 10px;
-    border-radius: 999px;
+    padding: 3px 8px;
+    border-radius: 4px;
 }
 
 .signal-badge--bullish {
@@ -580,38 +711,30 @@ a:hover {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
 }
 
 .confidence-bar {
     flex: 1;
-    height: 6px;
+    height: 4px;
     background: rgba(255, 255, 255, 0.06);
-    border-radius: 3px;
+    border-radius: 999px;
     overflow: hidden;
 }
 
 .confidence-fill {
     height: 100%;
-    border-radius: 3px;
-    transition: width 0.6s ease;
+    background: var(--blue);
+    border-radius: 999px;
+    transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* Confidence fill colors via parent card modifier */
-.signal-card--bullish .confidence-fill {
-    background: linear-gradient(90deg, rgba(0, 200, 83, 0.2), var(--green));
-}
-
-.signal-card--bearish .confidence-fill {
-    background: linear-gradient(90deg, rgba(255, 23, 68, 0.2), var(--red));
-}
-
-.signal-card--neutral .confidence-fill {
-    background: linear-gradient(90deg, rgba(120, 144, 156, 0.2), var(--gray));
-}
+.signal-card--bullish .confidence-fill { background: var(--green); }
+.signal-card--bearish .confidence-fill { background: var(--red); }
+.signal-card--neutral .confidence-fill { background: var(--gray); }
 
 .confidence-value {
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     font-weight: 600;
     color: var(--text-secondary);
     min-width: 32px;
@@ -620,8 +743,8 @@ a:hover {
 
 /* Reasoning */
 .signal-card__reasoning {
-    font-size: 0.78rem;
-    line-height: 1.55;
+    font-size: 0.75rem;
+    line-height: 1.4;
     color: var(--text-muted);
 }
 
@@ -638,7 +761,51 @@ a:hover {
     font-weight: 500;
 }
 
-/* ---------- Error State ---------- */
+
+/* ---------- Chart Legends ---------- */
+.chart-legend {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 10;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    pointer-events: none;
+    line-height: 1.4;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+}
+.chart-legend .legend-item {
+    display: inline-block;
+    margin-right: 12px;
+}
+.chart-legend .val-up { color: #00c853; }
+.chart-legend .val-down { color: #ff1744; }
+.chart-legend .val-neutral { color: #d1d4dc; }
+.chart-legend .val-ema20 { color: #ffd740; }
+.chart-legend .val-ema50 { color: #448aff; }
+.chart-legend .val-macd { color: #448aff; }
+.chart-legend .val-signal { color: #ff6d00; }
+
+.toggle-vis {
+    cursor: pointer;
+    opacity: 0;
+    margin-left: 4px;
+    transition: opacity 0.2s;
+    user-select: none;
+}
+.legend-item:hover .toggle-vis {
+    opacity: 1;
+}
+.legend-item.hidden-series .toggle-vis {
+    opacity: 0.5;
+    text-decoration: line-through;
+}
+.legend-item.hidden-series > span {
+    opacity: 0.5;
+}
+
+/* ---------- Animations ---------- */
+/* ---------- Loading Overlay ---------- */
 .error-state {
     display: flex;
     align-items: center;

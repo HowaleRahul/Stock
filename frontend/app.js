@@ -9,7 +9,7 @@
 
     // ── DOM refs ──────────────────────────────────────────────
     const tickerSelect     = document.getElementById('ticker-select');
-    const timeframeSelect  = document.getElementById('timeframe-select');
+    let currentTf          = '1d';
     const tickerSearch     = document.getElementById('ticker-search');
     const searchBtn        = document.getElementById('search-btn');
     const marketModeSelect = document.getElementById('market-mode-select');
@@ -149,7 +149,7 @@
             width: safeWidth,
             height: safeHeight,
             layout: {
-                background: { color: '#1a1e2e' },
+                background: { color: '#131722' },
                 textColor: '#d1d4dc',
             },
             grid: {
@@ -164,7 +164,19 @@
             },
             timeScale: {
                 borderColor: '#2a2e3e',
-                timeVisible: false,
+                timeVisible: true,
+            },
+            handleScroll: {
+                mouseWheel: true,
+                pressedMouseMove: true,
+                horzTouchDrag: true,
+                vertTouchDrag: true,
+            },
+            handleScale: {
+                mouseWheel: false,
+                pinch: true,
+                axisPressedMouseMove: { time: true, price: true },
+                axisDoubleClickReset: true,
             },
         });
     }
@@ -185,13 +197,26 @@
     }
 
     // ── Render Charts ────────────────────────────────────────
-    function renderCharts(indicators, tf = '1d') {
+    function renderCharts(indicators, tf = '1d', ticker = '') {
         destroyCharts();
 
         const candles = sanitizeSeriesData(indicators.candles || [], true, tf);
 
         // ── Price Chart ──────────────────────────────────────
         priceChart = createDarkChart(priceChartEl, 400);
+
+        if (ticker) {
+            priceChart.applyOptions({
+                watermark: {
+                    visible: true,
+                    fontSize: 48,
+                    horzAlign: 'center',
+                    vertAlign: 'center',
+                    color: 'rgba(255, 255, 255, 0.05)',
+                    text: ticker,
+                },
+            });
+        }
 
         const candleSeries = priceChart.addSeries(LightweightCharts.CandlestickSeries, {
             upColor:          '#00c853',
@@ -205,9 +230,31 @@
             candleSeries.setData(candles);
         }
 
+        let volumeSeries = null;
+        if (indicators.candles && indicators.candles.length > 0) {
+            volumeSeries = priceChart.addSeries(LightweightCharts.HistogramSeries, {
+                color: '#26a69a',
+                priceFormat: { type: 'volume' },
+                priceScaleId: '', // Set to empty to use a hidden scale
+            });
+            priceChart.priceScale('').applyOptions({
+                scaleMargins: { top: 0.8, bottom: 0 },
+            });
+            
+            const volData = indicators.candles.map((c, i) => {
+                const color = c.close >= c.open ? 'rgba(0, 200, 83, 0.4)' : 'rgba(255, 23, 68, 0.4)';
+                return { time: c.time, value: c.volume, color: color };
+            });
+            volumeSeries.setData(sanitizeSeriesData(volData, false, tf));
+        }
+
+        let ema20Series = null, ema50Series = null;
+        let rsiSeries = null;
+        let histSeries = null, macdLine = null, signalLine = null;
+
         // EMA 20
         if (indicators.ema_20 && indicators.candles) {
-            const ema20Series = priceChart.addSeries(LightweightCharts.LineSeries, {
+            ema20Series = priceChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#ffd740',
                 lineWidth: 1,
                 priceLineVisible: false,
@@ -222,7 +269,7 @@
 
         // EMA 50
         if (indicators.ema_50 && indicators.candles) {
-            const ema50Series = priceChart.addSeries(LightweightCharts.LineSeries, {
+            ema50Series = priceChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#448aff',
                 lineWidth: 1,
                 priceLineVisible: false,
@@ -315,15 +362,15 @@
         // ── RSI Chart ────────────────────────────────────────
         rsiChart = createDarkChart(rsiChartEl, 150);
 
-        if (indicators.rsi && indicators.candles) {
-            const rsiSeries = rsiChart.addSeries(LightweightCharts.LineSeries, {
+        if (indicators.rsi_14 && indicators.candles) {
+            rsiSeries = rsiChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#ffd740',
                 lineWidth: 1.5,
                 priceLineVisible: false,
                 lastValueVisible: false,
             });
             rsiSeries.setData(sanitizeSeriesData(
-                indicators.rsi.map((v, i) => ({ time: indicators.candles[i]?.time, value: v })),
+                indicators.rsi_14.map((v, i) => ({ time: indicators.candles[i]?.time, value: v })),
                 false,
                 tf
             ));
@@ -351,7 +398,7 @@
         macdChart = createDarkChart(macdChartEl, 150);
 
         if (indicators.macd_histogram && indicators.candles) {
-            const histSeries = macdChart.addSeries(LightweightCharts.HistogramSeries, {
+            histSeries = macdChart.addSeries(LightweightCharts.HistogramSeries, {
                 priceLineVisible: false,
                 lastValueVisible: false,
             });
@@ -367,7 +414,7 @@
         }
 
         if (indicators.macd_line && indicators.candles) {
-            const macdLine = macdChart.addSeries(LightweightCharts.LineSeries, {
+            macdLine = macdChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#448aff',
                 lineWidth: 1.5,
                 priceLineVisible: false,
@@ -381,7 +428,7 @@
         }
 
         if (indicators.macd_signal && indicators.candles) {
-            const signalLine = macdChart.addSeries(LightweightCharts.LineSeries, {
+            signalLine = macdChart.addSeries(LightweightCharts.LineSeries, {
                 color: '#ff6d00',
                 lineWidth: 1.5,
                 priceLineVisible: false,
@@ -394,10 +441,121 @@
             ));
         }
 
+        macdChart.applyOptions({
+            timeScale: { timeVisible: true }
+        });
         macdChart.timeScale().fitContent();
 
         // Sync
         syncTimeScales([priceChart, rsiChart, macdChart]);
+        
+        // ── True Crosshair Vertical Sync ────────────────────────
+        function syncCrosshair(param, sourceChart) {
+            if (!param || param.time === undefined || param.point === undefined || param.point.x < 0 || param.point.y < 0) {
+                [priceChart, rsiChart, macdChart].forEach(c => {
+                    if (c && c !== sourceChart) c.clearCrosshairPosition();
+                });
+                return;
+            }
+            [priceChart, rsiChart, macdChart].forEach(c => {
+                if (c && c !== sourceChart) {
+                    const s = (c === priceChart) ? candleSeries : (c === rsiChart) ? rsiSeries : histSeries;
+                    if (s) {
+                        // Trick in v4 to sync just the vertical line: pass NaN for price
+                        c.setCrosshairPosition(NaN, param.time, s);
+                    }
+                }
+            });
+        }
+        
+        // ── Crosshair Legends ────────────────────────────────────
+        const priceLegend = document.getElementById('price-legend');
+        const rsiLegend = document.getElementById('rsi-legend');
+        const macdLegend = document.getElementById('macd-legend');
+        
+        function updateLegends(param, sourceChart) {
+            syncCrosshair(param, sourceChart);
+            if (!param || !param.time) return;
+            
+            if (candleSeries && priceLegend) {
+                const candle = param.seriesData.get(candleSeries);
+                if (candle) {
+                    const colorClass = candle.close >= candle.open ? 'val-up' : 'val-down';
+                    let html = `<span class="legend-item">O <span class="${colorClass}">${candle.open.toFixed(2)}</span></span>`;
+                    html += `<span class="legend-item">H <span class="${colorClass}">${candle.high.toFixed(2)}</span></span>`;
+                    html += `<span class="legend-item">L <span class="${colorClass}">${candle.low.toFixed(2)}</span></span>`;
+                    html += `<span class="legend-item">C <span class="${colorClass}">${candle.close.toFixed(2)}</span></span>`;
+                    
+                    if (volumeSeries) {
+                        const vol = param.seriesData.get(volumeSeries);
+                        if (vol) {
+                            let volStr = vol.value.toFixed(0);
+                            if (vol.value >= 1e6) volStr = (vol.value / 1e6).toFixed(2) + 'M';
+                            else if (vol.value >= 1e3) volStr = (vol.value / 1e3).toFixed(2) + 'K';
+                            const isHidden = !volumeSeries.options().visible ? 'hidden-series' : '';
+                            html += `<span class="legend-item ${isHidden}">Vol <span class="${colorClass}">${volStr}</span><span class="toggle-vis" data-series="vol">👁</span></span>`;
+                        }
+                    }
+                    
+                    if (ema20Series) {
+                        const ema20 = param.seriesData.get(ema20Series);
+                        const isHidden = !ema20Series.options().visible ? 'hidden-series' : '';
+                        if (ema20) html += ` <span class="legend-item val-ema20 ${isHidden}">EMA(20): ${ema20.value.toFixed(2)}<span class="toggle-vis" data-series="ema20">👁</span></span>`;
+                    }
+                    if (ema50Series) {
+                        const ema50 = param.seriesData.get(ema50Series);
+                        const isHidden = !ema50Series.options().visible ? 'hidden-series' : '';
+                        if (ema50) html += ` <span class="legend-item val-ema50 ${isHidden}">EMA(50): ${ema50.value.toFixed(2)}<span class="toggle-vis" data-series="ema50">👁</span></span>`;
+                    }
+                    priceLegend.innerHTML = html;
+                }
+            }
+            
+            if (rsiSeries && rsiLegend) {
+                const rsi = param.seriesData.get(rsiSeries);
+                const isHidden = !rsiSeries.options().visible ? 'hidden-series' : '';
+                if (rsi) rsiLegend.innerHTML = `<span class="legend-item val-ema20 ${isHidden}">RSI(14): ${rsi.value.toFixed(2)}<span class="toggle-vis" data-series="rsi">👁</span></span>`;
+            }
+            
+            if (macdLine && signalLine && histSeries && macdLegend) {
+                const macd = param.seriesData.get(macdLine);
+                const sig = param.seriesData.get(signalLine);
+                const hist = param.seriesData.get(histSeries);
+                if (macd && sig && hist) {
+                    const hCol = hist.value >= 0 ? 'val-up' : 'val-down';
+                    macdLegend.innerHTML = `<span class="legend-item val-macd">MACD: ${macd.value.toFixed(2)}</span> <span class="legend-item val-signal">Sig: ${sig.value.toFixed(2)}</span> <span class="legend-item ${hCol}">Hist: ${hist.value.toFixed(2)}</span>`;
+                }
+            }
+        }
+        
+        // Initial empty state
+        if (priceLegend) priceLegend.innerHTML = `<span class="legend-item">Hover over chart for values</span>`;
+        if (rsiLegend) rsiLegend.innerHTML = `<span class="legend-item val-ema20">RSI(14)<span class="toggle-vis" data-series="rsi">👁</span></span>`;
+        if (macdLegend) macdLegend.innerHTML = `<span class="legend-item val-macd">MACD(12, 26, 9)</span>`;
+
+        priceChart.subscribeCrosshairMove(p => updateLegends(p, priceChart));
+        rsiChart.subscribeCrosshairMove(p => updateLegends(p, rsiChart));
+        macdChart.subscribeCrosshairMove(p => updateLegends(p, macdChart));
+        
+        // Setup legend visibility toggles
+        document.querySelectorAll('.chart-legend').forEach(legend => {
+            legend.addEventListener('click', (e) => {
+                if (e.target.classList.contains('toggle-vis')) {
+                    const seriesName = e.target.getAttribute('data-series');
+                    let targetSeries = null;
+                    if (seriesName === 'vol') targetSeries = volumeSeries;
+                    if (seriesName === 'ema20') targetSeries = ema20Series;
+                    if (seriesName === 'ema50') targetSeries = ema50Series;
+                    if (seriesName === 'rsi') targetSeries = rsiSeries;
+                    
+                    if (targetSeries) {
+                        const currentVis = targetSeries.options().visible !== false;
+                        targetSeries.applyOptions({ visible: !currentVis });
+                        e.target.parentElement.classList.toggle('hidden-series', currentVis);
+                    }
+                }
+            });
+        });
     }
 
     // ── Render Signal Cards ──────────────────────────────────
@@ -452,17 +610,6 @@
                 lbl.appendChild(document.createTextNode(setup.name));
                 checkboxesContainer.appendChild(lbl);
             });
-            
-            // Setup "Toggle All" listener once
-            toggleAll.onchange = (e) => {
-                const isChecked = e.target.checked;
-                checkboxesContainer.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-                    cb.checked = isChecked;
-                    if (isChecked) enabledSetups.add(cb.value);
-                    else enabledSetups.delete(cb.value);
-                });
-                renderFilteredSignals();
-            };
         }
         
         renderFilteredSignals();
@@ -470,18 +617,27 @@
 
     function renderFilteredSignals() {
         const container = document.getElementById('signals-container');
+        const summary = document.getElementById('signals-summary');
         container.innerHTML = '';
         
         const visibleSetups = allSetups.filter(s => enabledSetups.has(s.name));
         
         if (visibleSetups.length === 0) {
             container.innerHTML = `<div class="empty-state"><p>No setups selected</p></div>`;
+            if (summary) summary.classList.add('hidden');
             return;
         }
+        
+        let bullCount = 0, bearCount = 0, neutCount = 0;
         
         container.innerHTML = visibleSetups.map(s => {
             const rawSignal  = (s.signal || 'neutral').toLowerCase();
             const signal     = rawSignal.replace(/[^a-z0-9_-]/g, '') || 'neutral';
+            
+            if (signal === 'bullish') bullCount++;
+            else if (signal === 'bearish') bearCount++;
+            else neutCount++;
+            
             const rawConf    = (typeof s.confidence === 'number' && Number.isFinite(s.confidence)) ? s.confidence : 0;
             const confidence = Math.max(0, Math.min(1, rawConf));
             const pct        = (confidence * 100).toFixed(0);
@@ -503,6 +659,15 @@
                 <p class="signal-card__reasoning">${escapeHTML(reasoning)}</p>
             </div>`;
         }).join('');
+        
+        if (summary) {
+            summary.innerHTML = `
+                <span class="tally-bullish">${bullCount} Bullish</span>
+                <span class="tally-neutral">${neutCount} Neutral</span>
+                <span class="tally-bearish">${bearCount} Bearish</span>
+            `;
+            summary.classList.remove('hidden');
+        }
     }
 
     function escapeHTML(str) {
@@ -525,11 +690,13 @@
         }
 
         showLoading(`Loading analysis & charts for ${ticker}...`);
-        const tf = timeframeSelect ? timeframeSelect.value : '1d';
+        const tf = currentTf;
         
         // Reset toggles on new ticker
         const checkboxesContainer = document.getElementById('setup-checkboxes');
+        const toggleAll = document.getElementById('toggle-all');
         if (checkboxesContainer) checkboxesContainer.innerHTML = '';
+        if (toggleAll) toggleAll.checked = true;
         enabledSetups.clear();
         
         try {
@@ -559,7 +726,7 @@
             }
 
             if (!(indicatorsResult instanceof Error)) {
-                renderCharts(indicatorsResult, tf);
+                renderCharts(indicatorsResult, tf, ticker);
             } else {
                 if (indicatorsResult.message && indicatorsResult.message.includes('Failed to fetch')) {
                     circuitBrokenUntil = Date.now() + 30000; // Break for 30s
@@ -604,12 +771,59 @@
         if (ticker) loadTickerData(ticker);
     });
 
-    if (timeframeSelect) {
-        timeframeSelect.addEventListener('change', () => {
+    const tfButtons = document.querySelectorAll('.tf-btn');
+    tfButtons.forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            tfButtons.forEach(b => b.classList.remove('active'));
+            e.target.classList.add('active');
+            currentTf = e.target.getAttribute('data-tf');
             const ticker = tickerSelect.value;
             if (ticker) loadTickerData(ticker);
         });
-    }
+    });
+
+    // ── Pane Resizers ────────────────────────────────────────
+    let isResizing = false;
+    let currentResizer = null;
+    let startY = 0;
+    let startHeight = 0;
+    let targetPane = null;
+
+    document.querySelectorAll('.pane-resizer').forEach(resizer => {
+        resizer.addEventListener('pointerdown', e => {
+            isResizing = true;
+            currentResizer = resizer;
+            resizer.classList.add('dragging');
+            startY = e.clientY;
+            if (resizer.id === 'resizer-1') targetPane = document.getElementById('rsi-chart');
+            if (resizer.id === 'resizer-2') targetPane = document.getElementById('macd-chart');
+            if (targetPane) startHeight = targetPane.offsetHeight;
+            
+            document.body.style.userSelect = 'none';
+            document.body.style.cursor = 'row-resize';
+        });
+    });
+
+    window.addEventListener('pointermove', e => {
+        if (!isResizing || !targetPane) return;
+        const diff = e.clientY - startY;
+        const newHeight = Math.max(50, Math.min(400, startHeight - diff));
+        targetPane.style.height = `${newHeight}px`;
+        targetPane.style.flex = `0 0 ${newHeight}px`;
+        
+        // Trigger resize on the actual chart object
+        if (targetPane.id === 'rsi-chart' && rsiChart) rsiChart.resize(targetPane.clientWidth, newHeight);
+        if (targetPane.id === 'macd-chart' && macdChart) macdChart.resize(targetPane.clientWidth, newHeight);
+    });
+
+    window.addEventListener('pointerup', () => {
+        if (isResizing) {
+            isResizing = false;
+            if (currentResizer) currentResizer.classList.remove('dragging');
+            document.body.style.userSelect = '';
+            document.body.style.cursor = '';
+        }
+    });
 
     // ── Autocomplete Suggestions & Search ────────────────────
     let debounceTimer = null;
@@ -766,6 +980,68 @@
             searchSuggestions.classList.remove('active');
         }
     });
+
+    // ── TradingView Zoom/Pan Toggle (Ctrl Key) ───────────────
+    let ctrlPressed = false;
+    
+    function updateChartInteractions() {
+        const options = {
+            handleScroll: { 
+                mouseWheel: !ctrlPressed,
+                pressedMouseMove: true,
+                horzTouchDrag: true,
+                vertTouchDrag: true,
+            },
+            handleScale: { 
+                mouseWheel: ctrlPressed,
+                pinch: true,
+                axisPressedMouseMove: { time: true, price: true },
+                axisDoubleClickReset: true,
+            },
+        };
+        if (priceChart) priceChart.applyOptions(options);
+        if (rsiChart) rsiChart.applyOptions(options);
+        if (macdChart) macdChart.applyOptions(options);
+    }
+
+    window.addEventListener('keydown', (e) => {
+        if (e.key === 'Control' && !ctrlPressed) {
+            ctrlPressed = true;
+            updateChartInteractions();
+        }
+    });
+
+    window.addEventListener('keyup', (e) => {
+        if (e.key === 'Control' && ctrlPressed) {
+            ctrlPressed = false;
+            updateChartInteractions();
+        }
+    });
+    
+    // Fallback if window loses focus while Ctrl is held
+    window.addEventListener('blur', () => {
+        if (ctrlPressed) {
+            ctrlPressed = false;
+            updateChartInteractions();
+        }
+    });
+
+    // ── Setup Toggles (Global Listener) ──────────────────────
+    const globalToggleAll = document.getElementById('toggle-all');
+    if (globalToggleAll) {
+        globalToggleAll.addEventListener('change', (e) => {
+            const isChecked = e.target.checked;
+            const checkboxesContainer = document.getElementById('setup-checkboxes');
+            if (checkboxesContainer) {
+                checkboxesContainer.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                    cb.checked = isChecked;
+                    if (isChecked) enabledSetups.add(cb.value);
+                    else enabledSetups.delete(cb.value);
+                });
+            }
+            renderFilteredSignals();
+        });
+    }
 
     // ── Init ─────────────────────────────────────────────────
     populateSymbols();
