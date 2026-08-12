@@ -24,6 +24,7 @@ from setups.engine import SetupEngine
 from setups.indicators import ema, rsi, macd, bollinger_bands, find_support_resistance
 from api.config import settings
 from api.auth import rate_limiter, get_api_key
+from ml.ensemble import EnsembleModel
 
 logger = logging.getLogger("trading.api.router")
 
@@ -38,22 +39,27 @@ _SYNC_LOCKS: Dict[str, RefCountedLock] = {}
 
 from contextlib import asynccontextmanager
 
+_SYNC_LOCKS_GUARD = asyncio.Lock()
+
 @asynccontextmanager
 async def _get_sync_lock(key: str):
-    if key not in _SYNC_LOCKS:
-        _SYNC_LOCKS[key] = RefCountedLock()
-    lock_obj = _SYNC_LOCKS[key]
-    lock_obj.ref_count += 1
+    async with _SYNC_LOCKS_GUARD:
+        if key not in _SYNC_LOCKS:
+            _SYNC_LOCKS[key] = RefCountedLock()
+        lock_obj = _SYNC_LOCKS[key]
+        lock_obj.ref_count += 1
     try:
         async with lock_obj.lock:
             yield
     finally:
-        lock_obj.ref_count -= 1
-        if lock_obj.ref_count == 0:
-            _SYNC_LOCKS.pop(key, None)
+        async with _SYNC_LOCKS_GUARD:
+            lock_obj.ref_count -= 1
+            if lock_obj.ref_count == 0:
+                _SYNC_LOCKS.pop(key, None)
 
 # Shared engine instance
 _setup_engine = SetupEngine()
+_ENSEMBLE_MODELS: Dict[str, EnsembleModel] = {}
 
 # Pre-curated instant dictionary of top stocks for zero-latency autocomplete
 _INSTANT_CATALOG = [
@@ -124,8 +130,12 @@ def _clean_ticker_param(ticker: str) -> str:
     if not ticker or not isinstance(ticker, str):
         raise HTTPException(status_code=400, detail="Ticker symbol cannot be empty.")
     cleaned = ticker.upper().strip().replace("\x00", "")
-    if not cleaned or len(cleaned) > 64 or any(c in cleaned for c in ["/", "\\", ";", "'", '"']):
-        raise HTTPException(status_code=400, detail="Invalid ticker symbol format or length.")
+    if not cleaned or len(cleaned) > 64:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol length.")
+    
+    import re
+    if not re.match(r"^[A-Z0-9\.\-\^]+$", cleaned):
+        raise HTTPException(status_code=400, detail="Invalid characters in ticker symbol.")
     return cleaned
 
 
@@ -178,10 +188,11 @@ async def search_symbols_endpoint(
 
     # 1. First check local database symbols
     try:
-        # Prevent massive table scans by filtering via SQL first, then applying CPU-heavy fuzzy scoring
+        # Prevent SQL injection via LIKE wildcards: escape %, _ and \ in user input
+        safe_q = clean_q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         stmt = select(Symbol).where(
-            (Symbol.ticker.ilike(f"%{clean_q}%")) |
-            (Symbol.name.ilike(f"%{clean_q}%"))
+            (Symbol.ticker.ilike(f"%{safe_q}%")) |
+            (Symbol.name.ilike(f"%{safe_q}%"))
         ).limit(100)
         res = await db.execute(stmt)
         for sym in res.scalars().all():
@@ -356,7 +367,7 @@ async def trigger_sync(
             logger.error(f"Error syncing OHLCV for {ticker_clean} via API: {e}")
             results.append({
                 "ticker": ticker_clean,
-                "status": f"error: {str(e)}"
+                "status": "error: sync failed"
             })
 
         if payload.sync_news:
@@ -367,7 +378,7 @@ async def trigger_sync(
                 logger.error(f"Error syncing News for {ticker_clean} via API: {e}")
                 results.append({
                     "ticker": ticker_clean,
-                    "status": f"error: {str(e)}"
+                    "status": "error: sync failed"
                 })
     else:
         raise HTTPException(
@@ -391,7 +402,7 @@ async def get_candles(
     """Query stored candlestick data from TimescaleDB hypertable."""
     ticker_clean = _clean_ticker_param(ticker)
     timeframe_clean = timeframe.lower().strip() if timeframe else "1d"
-    valid_timeframes = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+    valid_timeframes = {"1m", "2m", "3m", "4m", "5m", "10m", "15m", "30m", "45m", "60m", "90m", "1h", "2h", "3h", "4h", "1d", "5d", "1wk", "1mo", "3mo"}
     if timeframe_clean not in valid_timeframes:
         raise HTTPException(status_code=400, detail=f"Invalid timeframe '{timeframe_clean}'. Must be one of: {', '.join(sorted(valid_timeframes))}.")
     stmt = select(Symbol).where(Symbol.ticker == ticker_clean)
@@ -470,7 +481,7 @@ async def _load_ohlcv_df(
     sym = res.scalar_one_or_none()
 
     timeframe_clean = timeframe.lower().strip() if timeframe else "1d"
-    valid_timeframes = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+    valid_timeframes = {"1m", "2m", "3m", "4m", "5m", "10m", "15m", "30m", "45m", "60m", "90m", "1h", "2h", "3h", "4h", "1d", "5d", "1wk", "1mo", "3mo"}
     if timeframe_clean not in valid_timeframes:
         raise HTTPException(status_code=400, detail=f"Invalid timeframe '{timeframe_clean}'. Must be one of: {', '.join(sorted(valid_timeframes))}.")
     bars = []
@@ -614,13 +625,21 @@ async def evaluate_setups(
                         p_sig.reasoning += f" [MTF: Confirmed by {tf} chart]"
         except Exception:
             pass
+            
+    # Meta-Model Ensemble Prediction
+    tf_clean = timeframe.lower().strip()
+    if tf_clean not in _ENSEMBLE_MODELS:
+        _ENSEMBLE_MODELS[tf_clean] = EnsembleModel(timeframe=tf_clean)
+        
+    meta_model_result = _ENSEMBLE_MODELS[tf_clean].predict(regime_data, primary_signals)
 
     return SetupEvaluationResponse(
         ticker=sym.ticker,
-        timeframe=timeframe.lower().strip(),
+        timeframe=tf_clean,
         bars_analyzed=len(df_primary),
         evaluated_at=datetime.datetime.now(datetime.timezone.utc),
         regime=regime_data,
+        meta_model=meta_model_result,
         setups=[
             SetupSignalResponse(
                 name=s.name,

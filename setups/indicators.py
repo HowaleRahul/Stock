@@ -48,10 +48,9 @@ def ema(series: pd.Series, period: int, *, wilder: bool = False) -> pd.Series:
     result = np.full(len(series), np.nan)
 
     # Find first valid index to avoid seeding with NaN
-    first_idx = series.first_valid_index()
-    if first_idx is None:
+    if series.isna().all():
         return pd.Series(np.nan, index=series.index)
-    start_pos = series.index.get_loc(first_idx)
+    start_pos = int(np.argmax(~series.isna().values))
 
     if len(series) - start_pos < period:
         return pd.Series(np.nan, index=series.index)
@@ -171,7 +170,7 @@ def macd(
         # Place back into full-length series
         signal_line = pd.Series(np.nan, index=close.index)
         valid_indices = macd_line.index[valid_mask]
-        signal_line.iloc[valid_indices] = signal_valid.values
+        signal_line.loc[valid_indices] = signal_valid.values
 
     histogram = macd_line - signal_line
 

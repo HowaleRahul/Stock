@@ -85,7 +85,7 @@ class SyncRequest(BaseModel):
         cleaned = str(v).lower().strip() if v is not None else "1d"
         if not cleaned:
             cleaned = "1d"
-        valid = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+        valid = {"1m", "2m", "3m", "5m", "10m", "15m", "30m", "45m", "60m", "90m", "1h", "2h", "3h", "4h", "1d", "5d", "1wk", "1mo", "3mo"}
         if cleaned not in valid:
             raise ValueError(f"Invalid interval '{cleaned}'. Allowed: {', '.join(sorted(valid))}")
         return cleaned
@@ -122,6 +122,14 @@ class RegimeResponse(BaseModel):
     adx: float
     direction: str
 
+class EnsembleSignalResponse(BaseModel):
+    """Machine Learning Stacking Ensemble Master Signal."""
+    signal: str
+    probability: float
+    drivers: List[str]
+    alternative_scenario: str
+    model_version: str
+
 class SetupEvaluationResponse(BaseModel):
     """Aggregated response from running all setups on a ticker."""
     ticker: str
@@ -129,6 +137,7 @@ class SetupEvaluationResponse(BaseModel):
     bars_analyzed: int
     evaluated_at: datetime.datetime
     regime: Optional[RegimeResponse] = None
+    meta_model: Optional[EnsembleSignalResponse] = None
     setups: List[SetupSignalResponse]
 
 class IndicatorDataResponse(BaseModel):

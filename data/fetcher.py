@@ -35,19 +35,44 @@ class YFinanceFetcher:
     ) -> pd.DataFrame:
         ticker = ticker.upper().strip()
         yahoo_ticker = cls.YAHOO_TICKER_ALIASES.get(ticker, ticker)
+        # Map non-native intervals to native yfinance intervals
+        yf_interval = interval
+        resample_rule = None
+        if interval == "3m":
+            yf_interval = "1m"
+            resample_rule = "3min"
+        elif interval == "4m":
+            yf_interval = "1m"
+            resample_rule = "4min"
+        elif interval == "10m":
+            yf_interval = "5m"
+            resample_rule = "10min"
+        elif interval == "45m":
+            yf_interval = "15m"
+            resample_rule = "45min"
+        elif interval == "2h":
+            yf_interval = "1h"
+            resample_rule = "2h"
+        elif interval == "3h":
+            yf_interval = "1h"
+            resample_rule = "3h"
+        elif interval == "4h":
+            yf_interval = "1h"
+            resample_rule = "4h"
+
         if not start and not end:
-            if interval in ["1m"]:
+            if yf_interval in ["1m"]:
                 period = "7d"
-            elif interval in ["2m", "5m", "15m", "30m"]:
+            elif yf_interval in ["2m", "5m", "15m", "30m"]:
                 period = "60d"
-            elif interval in ["60m", "1h", "90m"]:
+            elif yf_interval in ["60m", "1h", "90m"]:
                 if period in ["5y", "max", "10y"]:
                     period = "730d"
         logger.info(f"Downloading history for {ticker} (yahoo={yahoo_ticker}, period={period}, interval={interval}, start={start}, end={end})...")
         yt = yf.Ticker(yahoo_ticker)
         
         kwargs = {
-            "interval": interval,
+            "interval": yf_interval,
             "actions": True,
             "auto_adjust": False  # Keep raw Open/High/Low/Close separate from Adj Close
         }
@@ -61,6 +86,26 @@ class YFinanceFetcher:
 
         try:
             df = yt.history(**kwargs)
+            if df.empty:
+                return df
+                
+            if resample_rule:
+                agg_dict = {
+                    "Open": "first",
+                    "High": "max",
+                    "Low": "min",
+                    "Close": "last",
+                    "Volume": "sum"
+                }
+                if "Dividends" in df.columns:
+                    agg_dict["Dividends"] = "sum"
+                if "Stock Splits" in df.columns:
+                    agg_dict["Stock Splits"] = "sum"
+                if "Adj Close" in df.columns:
+                    agg_dict["Adj Close"] = "last"
+                    
+                df = df.resample(resample_rule).agg(agg_dict).dropna(subset=["Close"])
+                
             return df
         except Exception as e:
             logger.warning(f"Error fetching history from yfinance for {ticker}: {e}")

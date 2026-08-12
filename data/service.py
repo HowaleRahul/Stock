@@ -309,7 +309,7 @@ class DataIngestionService:
                     "ticker": sym.ticker,
                     "symbol_id": sym.id,
                     "bars_synced": 0,
-                    "status": f"error: {str(e)}"
+                    "status": "error: sync failed"
                 })
 
             if sync_news:
@@ -322,7 +322,7 @@ class DataIngestionService:
                         "ticker": sym.ticker,
                         "symbol_id": sym.id,
                         "news_synced": 0,
-                        "status": f"error: {str(e)}"
+                        "status": "error: news sync failed"
                     })
 
             # Brief pause to avoid hammering yfinance API

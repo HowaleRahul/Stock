@@ -27,6 +27,7 @@ from setups.pattern_setup import PatternSetup
 from setups.sentiment_setup import SentimentSetup
 from setups.fundamentals_setup import FundamentalsSetup
 from setups.options_setup import OptionsSetup
+from setups.psychology_setup import PsychologySetup
 
 logger = logging.getLogger("trading.setups.engine")
 
@@ -49,6 +50,7 @@ class SetupEngine:
             SentimentSetup(),
             FundamentalsSetup(),
             OptionsSetup(),
+            PsychologySetup(),
         ]
 
     def evaluate_all(self, df: pd.DataFrame, ticker: str = "") -> Tuple[Dict[str, Any], List[SetupSignal]]:
@@ -84,6 +86,13 @@ class SetupEngine:
                         if signal.confidence > 0.0:
                             signal.confidence *= 0.5  # Slash confidence by 50%
                             signal.reasoning += " (Confidence reduced due to range-bound regime)."
+                            
+                # Hard Gating: Smart money doesn't catch falling knives
+                if regime_data["regime"] == "crash":
+                    if signal.signal == "bullish":
+                        signal.confidence = 0.0
+                        signal.signal = "neutral"
+                        signal.reasoning += " [SYSTEM BLOCK: Extreme Crash Regime Detected. Bullish setups gated.]"
                             
                 results.append(signal)
             except Exception as e:

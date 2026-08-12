@@ -461,12 +461,21 @@
                 if (c && c !== sourceChart) {
                     const s = (c === priceChart) ? candleSeries : (c === rsiChart) ? rsiSeries : histSeries;
                     if (s) {
-                        // Trick in v4 to sync just the vertical line: pass NaN for price
-                        c.setCrosshairPosition(NaN, param.time, s);
+                        // Pass 0 instead of NaN to prevent Lightweight Charts crash
+                        c.setCrosshairPosition(0, param.time, s);
                     }
                 }
             });
         }
+        
+        // ── Strip Old Listeners ──────────────────────────────────
+        ['price-legend', 'rsi-legend', 'macd-legend'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                const clone = el.cloneNode(false);
+                el.parentNode.replaceChild(clone, el);
+            }
+        });
         
         // ── Crosshair Legends ────────────────────────────────────
         const priceLegend = document.getElementById('price-legend');
@@ -481,7 +490,9 @@
                 const candle = param.seriesData.get(candleSeries);
                 if (candle) {
                     const colorClass = candle.close >= candle.open ? 'val-up' : 'val-down';
-                    let html = `<span class="legend-item">O <span class="${colorClass}">${candle.open.toFixed(2)}</span></span>`;
+                    const ticker = document.getElementById('ticker-search')?.value.toUpperCase() || document.getElementById('ticker-select')?.value || '';
+                    let html = `<strong style="color: var(--text-primary); margin-right: 12px; font-size: 0.95rem;">${escapeHTML(ticker)}</strong>`;
+                    html += `<span class="legend-item">O <span class="${colorClass}">${candle.open.toFixed(2)}</span></span>`;
                     html += `<span class="legend-item">H <span class="${colorClass}">${candle.high.toFixed(2)}</span></span>`;
                     html += `<span class="legend-item">L <span class="${colorClass}">${candle.low.toFixed(2)}</span></span>`;
                     html += `<span class="legend-item">C <span class="${colorClass}">${candle.close.toFixed(2)}</span></span>`;
@@ -529,7 +540,10 @@
         }
         
         // Initial empty state
-        if (priceLegend) priceLegend.innerHTML = `<span class="legend-item">Hover over chart for values</span>`;
+        if (priceLegend) {
+            const ticker = document.getElementById('ticker-search')?.value.toUpperCase() || document.getElementById('ticker-select')?.value || 'Ticker';
+            priceLegend.innerHTML = `<strong style="color: var(--text-primary); margin-right: 12px; font-size: 0.95rem;">${escapeHTML(ticker)}</strong><span class="legend-item">Hover over chart for values</span>`;
+        }
         if (rsiLegend) rsiLegend.innerHTML = `<span class="legend-item val-ema20">RSI(14)<span class="toggle-vis" data-series="rsi">👁</span></span>`;
         if (macdLegend) macdLegend.innerHTML = `<span class="legend-item val-macd">MACD(12, 26, 9)</span>`;
 
@@ -542,16 +556,28 @@
             legend.addEventListener('click', (e) => {
                 if (e.target.classList.contains('toggle-vis')) {
                     const seriesName = e.target.getAttribute('data-series');
-                    let targetSeries = null;
-                    if (seriesName === 'vol') targetSeries = volumeSeries;
-                    if (seriesName === 'ema20') targetSeries = ema20Series;
-                    if (seriesName === 'ema50') targetSeries = ema50Series;
-                    if (seriesName === 'rsi') targetSeries = rsiSeries;
+                    let targetSeries = [];
+                    if (seriesName === 'vol' && volumeSeries) targetSeries.push(volumeSeries);
+                    if (seriesName === 'ema20' && ema20Series) targetSeries.push(ema20Series);
+                    if (seriesName === 'ema50' && ema50Series) targetSeries.push(ema50Series);
+                    if (seriesName === 'rsi' && rsiSeries) targetSeries.push(rsiSeries);
+                    if (seriesName === 'macd' && macdLine) {
+                        targetSeries.push(macdLine);
+                        targetSeries.push(signalLine);
+                        targetSeries.push(histSeries);
+                    }
                     
-                    if (targetSeries) {
-                        const currentVis = targetSeries.options().visible !== false;
-                        targetSeries.applyOptions({ visible: !currentVis });
-                        e.target.parentElement.classList.toggle('hidden-series', currentVis);
+                    let newVis = true;
+                    targetSeries.forEach((ts, idx) => {
+                        if (ts) {
+                            const currentVis = ts.options().visible !== false;
+                            if (idx === 0) newVis = !currentVis;
+                            ts.applyOptions({ visible: newVis });
+                        }
+                    });
+                    
+                    if (targetSeries.length > 0) {
+                        e.target.parentElement.classList.toggle('hidden-series', !newVis);
                     }
                 }
             });
@@ -586,6 +612,21 @@
             regimeBadge.classList.add('hidden');
         }
         
+        // 1b. Handle Ensemble AI Badge
+        const ensembleBadge = document.getElementById('ensemble-badge');
+        if (ensembleBadge && data.meta_model) {
+            ensembleBadge.classList.remove('hidden', 'bullish', 'bearish', 'neutral');
+            ensembleBadge.classList.add(data.meta_model.signal);
+            
+            document.getElementById('ensemble-signal').textContent = `AI Prediction: ${data.meta_model.signal.toUpperCase()}`;
+            document.getElementById('ensemble-prob').textContent = `${(data.meta_model.probability * 100).toFixed(1)}% Conf`;
+            
+            document.getElementById('ensemble-drivers').textContent = `Top Driver: ${data.meta_model.drivers.join(', ')}`;
+            document.getElementById('ensemble-alt').textContent = data.meta_model.alternative_scenario;
+        } else if (ensembleBadge) {
+            ensembleBadge.classList.add('hidden');
+        }
+        
         // Store globally for filtering
         allSetups = data.setups;
         
@@ -607,7 +648,9 @@
                     renderFilteredSignals();
                 });
                 lbl.appendChild(cb);
-                lbl.appendChild(document.createTextNode(setup.name));
+                const span = document.createElement('span');
+                span.textContent = setup.name;
+                lbl.appendChild(span);
                 checkboxesContainer.appendChild(lbl);
             });
         }
@@ -777,7 +820,7 @@
             tfButtons.forEach(b => b.classList.remove('active'));
             e.target.classList.add('active');
             currentTf = e.target.getAttribute('data-tf');
-            const ticker = tickerSelect.value;
+            const ticker = tickerSearch?.value.trim().toUpperCase() || tickerSelect?.value;
             if (ticker) loadTickerData(ticker);
         });
     });
@@ -855,13 +898,26 @@
         list.forEach(item => {
             const li = document.createElement('li');
             li.className = 'suggestion-item';
-            li.innerHTML = `
-                <div class="suggestion-item__left">
-                    <span class="suggestion-item__sym">${escapeHTML(String(item.symbol || ''))}</span>
-                    <span class="suggestion-item__name">${escapeHTML(String(item.name || ''))}</span>
-                </div>
-                <span class="suggestion-item__badge">${escapeHTML(String(item.exchange || ''))}</span>
-            `;
+            const leftDiv = document.createElement('div');
+            leftDiv.className = 'suggestion-item__left';
+            
+            const symSpan = document.createElement('span');
+            symSpan.className = 'suggestion-item__sym';
+            symSpan.textContent = String(item.symbol || '');
+            
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'suggestion-item__name';
+            nameSpan.textContent = String(item.name || '');
+            
+            leftDiv.appendChild(symSpan);
+            leftDiv.appendChild(nameSpan);
+            
+            const badgeSpan = document.createElement('span');
+            badgeSpan.className = 'suggestion-item__badge';
+            badgeSpan.textContent = String(item.exchange || '');
+            
+            li.appendChild(leftDiv);
+            li.appendChild(badgeSpan);
             li.addEventListener('click', () => {
                 tickerSearch.value = item.symbol;
                 searchSuggestions.classList.remove('active');

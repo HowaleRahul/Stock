@@ -37,11 +37,12 @@ class MACDSetup(BaseSetup):
         )
 
         # Current and previous valid values
-        cur_macd = float(macd_line.iloc[-1])
-        cur_signal = float(signal_line.iloc[-1])
-        cur_hist = float(histogram.iloc[-1])
-        prev_macd = float(macd_line.iloc[-2])
-        prev_signal = float(signal_line.iloc[-2])
+        # Current and previous valid values using numpy arrays to bypass duplicated index errors
+        cur_macd = float(macd_line.values[-1])
+        cur_signal = float(signal_line.values[-1])
+        cur_hist = float(histogram.values[-1])
+        prev_macd = float(macd_line.values[-2])
+        prev_signal = float(signal_line.values[-2])
 
         if any(np.isnan(v) for v in [cur_macd, cur_signal, cur_hist, prev_macd, prev_signal]):
             return SetupSignal(

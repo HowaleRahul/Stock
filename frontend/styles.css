@@ -100,45 +100,39 @@ a:hover {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 12px;
-    padding: 14px 24px;
-    background: var(--bg-panel);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--border);
-    position: sticky;
-    top: 0;
-    z-index: 500;
+    padding: 0 24px;
+    height: 56px;
+    background: #191919; /* Kite style dark nav */
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    gap: 16px;
+}
+
+.top-bar__left, .top-bar__center, .top-bar__right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.top-bar__center {
+    flex: 1;
+    justify-content: center;
+    min-width: 0; /* Allow flex children to shrink */
 }
 
 .top-bar__brand {
     display: flex;
-    align-items: baseline;
-    gap: 12px;
+    align-items: center;
+    gap: 8px;
 }
 
 .top-bar__brand h1 {
-    font-size: 1.2rem;
+    font-size: 1.1rem;
     font-weight: 700;
-    letter-spacing: -0.02em;
+    color: var(--text-primary);
     white-space: nowrap;
 }
 
-.top-bar__subtitle {
-    font-size: 0.75rem;
-    font-weight: 400;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-}
-
-.top-bar__controls {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 12px;
-}
+/* (kept for backwards compat, but no longer used in new layout) */
 
 /* ---------- Search Container & Market Mode Selector ---------- */
 .search-container {
@@ -317,31 +311,43 @@ a:hover {
 /* ---------- Timeframe Toolbar ---------- */
 .timeframe-toolbar {
     display: flex;
-    gap: 4px;
-    margin-left: 8px;
-    background: var(--bg-input);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 2px;
+    align-items: center;
+    gap: 2px;
+    height: 100%;
+    overflow-x: auto;
+    scrollbar-width: none; /* Firefox */
+}
+.timeframe-toolbar::-webkit-scrollbar {
+    display: none; /* Chrome/Safari */
 }
 .tf-btn {
     background: transparent;
     border: none;
-    color: var(--text-muted);
-    padding: 6px 10px;
-    border-radius: var(--radius-xs);
-    font-size: 0.8rem;
+    color: var(--text-secondary);
+    padding: 0 12px;
+    height: 100%;
+    font-size: 0.85rem;
     font-weight: 500;
     cursor: pointer;
-    transition: var(--transition);
+    transition: color 0.2s ease;
+    position: relative;
 }
 .tf-btn:hover {
-    color: var(--text-primary);
-    background: rgba(255, 255, 255, 0.05);
+    color: #fff;
 }
 .tf-btn.active {
-    background: rgba(41, 98, 255, 0.2);
-    color: #2962ff;
+    color: #fff;
+    font-weight: 600;
+}
+.tf-btn.active::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 10%;
+    width: 80%;
+    height: 2px;
+    background: #ff5722; /* Kite style active indicator */
+    border-radius: 2px 2px 0 0;
 }
 
 .ticker-select:hover {
@@ -476,10 +482,10 @@ a:hover {
 }
 
 .signals-panel__title {
-    font-size: 1.25rem;
+    font-size: 1.15rem;
     font-weight: 600;
-    margin-bottom: 1rem;
-    color: var(--text-main);
+    margin-bottom: 0.5rem;
+    color: var(--text-primary);
 }
 
 .regime-badge {
@@ -508,10 +514,9 @@ a:hover {
 }
 
 .setup-filters {
-    background: var(--bg-input);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    margin-bottom: 1rem;
+    background: transparent;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 0.5rem;
     overflow: hidden;
 }
 .setup-filters summary {
@@ -531,7 +536,7 @@ a:hover {
 }
 .setup-filters[open] summary {
     border-bottom: 1px solid var(--border);
-    background: rgba(255, 255, 255, 0.02);
+    background: transparent;
 }
 .setup-filters summary .summary-icon {
     font-size: 0.7rem;
@@ -544,7 +549,7 @@ a:hover {
 
 .setup-toggles {
     padding: 12px 14px;
-    background: var(--bg-card);
+    background: transparent;
 }
 .toggle-all-label {
     display: flex;
@@ -570,15 +575,21 @@ a:hover {
     font-size: 0.75rem;
     color: var(--text-secondary);
     cursor: pointer;
+    transition: color 0.2s;
+    line-height: 1.5;
+    min-width: 0; /* allows flex children to shrink */
+}
+.setup-checkboxes label span {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    transition: color 0.2s;
+    min-width: 0; /* Critical: allows flex item to shrink below content size */
 }
 .setup-checkboxes label:hover {
     color: var(--text-primary);
 }
 .setup-checkboxes input {
+    flex-shrink: 0;
     margin-right: 6px;
     accent-color: var(--blue);
 }
@@ -587,11 +598,12 @@ a:hover {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background: var(--bg-input);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 8px 14px;
-    margin-bottom: 1rem;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+    padding: 8px 4px;
+    margin-bottom: 0.5rem;
     font-size: 0.75rem;
     font-weight: 600;
 }
@@ -635,14 +647,15 @@ a:hover {
 
 /* ---------- Signal Card ---------- */
 .signal-card {
-    background: var(--bg-card);
+    background-color: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    padding: 12px 14px;
+    padding: 14px 16px;
     transition: transform var(--transition), border-color var(--transition);
     cursor: default;
     position: relative;
     overflow: hidden;
+    flex-shrink: 0; /* CRITICAL: prevents cards from squishing when list overflows */
 }
 
 .signal-card:hover {
@@ -653,12 +666,12 @@ a:hover {
 /* Color accents per signal type */
 .signal-card--bullish {
     border-left: 3px solid var(--green);
-    background: linear-gradient(90deg, rgba(0, 200, 83, 0.05) 0%, var(--bg-card) 40%);
+    background-image: linear-gradient(90deg, rgba(0, 200, 83, 0.15) 0%, transparent 50%);
 }
 
 .signal-card--bearish {
     border-left: 3px solid var(--red);
-    background: linear-gradient(90deg, rgba(255, 23, 68, 0.05) 0%, var(--bg-card) 40%);
+    background-image: linear-gradient(90deg, rgba(255, 23, 68, 0.15) 0%, transparent 50%);
 }
 
 .signal-card--neutral {
@@ -674,21 +687,26 @@ a:hover {
 }
 
 .signal-card__name {
-    font-size: 0.8rem;
+    font-size: 0.85rem;
     font-weight: 600;
     color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 8px;
 }
 
 /* Signal Badge (pill) */
 .signal-badge {
     display: inline-flex;
     align-items: center;
-    font-size: 0.6rem;
+    font-size: 0.65rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    padding: 3px 8px;
+    padding: 4px 10px;
     border-radius: 4px;
+    flex-shrink: 0;
 }
 
 .signal-badge--bullish {
@@ -748,6 +766,13 @@ a:hover {
     color: var(--text-muted);
 }
 
+/* ---------- Utilities ---------- */
+.hidden {
+    display: none !important;
+}
+
+.text-green { color: var(--green); }
+
 /* ---------- Footer ---------- */
 .footer {
     text-align: center;
@@ -777,6 +802,7 @@ a:hover {
 .chart-legend .legend-item {
     display: inline-block;
     margin-right: 12px;
+    pointer-events: auto; /* Allow hover on items despite parent pointer-events: none */
 }
 .chart-legend .val-up { color: #00c853; }
 .chart-legend .val-down { color: #ff1744; }
@@ -792,6 +818,7 @@ a:hover {
     margin-left: 4px;
     transition: opacity 0.2s;
     user-select: none;
+    pointer-events: auto; /* Override parent's pointer-events: none */
 }
 .legend-item:hover .toggle-vis {
     opacity: 1;
@@ -820,18 +847,23 @@ a:hover {
 /* ---------- Responsive ---------- */
 @media (max-width: 900px) {
     .top-bar {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 10px;
-        padding: 12px 16px;
+        flex-wrap: wrap;
+        padding: 10px 16px;
     }
 
-    .top-bar__controls {
+    .top-bar__left {
+        order: 1;
+    }
+
+    .top-bar__right {
+        order: 2;
+    }
+
+    .top-bar__center {
+        order: 3;
         width: 100%;
-    }
-
-    .ticker-select {
-        flex: 1;
+        justify-content: flex-start;
+        overflow-x: auto;
     }
 
     .dashboard {
@@ -857,3 +889,10 @@ a:hover {
         height: 120px;
     }
 }
+
+.ensemble-badge { background: linear-gradient(135deg, #2a2e3e, #131722); border: 1px solid #4a4e5e; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
+.ensemble-header { display: flex; justify-content: space-between; font-weight: bold; font-size: 1.1em; margin-bottom: 8px; }
+.ensemble-details p { margin: 4px 0; font-size: 0.9em; color: #a1a4b5; }
+.ensemble-badge.bullish { border-left: 4px solid #26a69a; }
+.ensemble-badge.bearish { border-left: 4px solid #ef5350; }
+.ensemble-badge.neutral { border-left: 4px solid #888; }

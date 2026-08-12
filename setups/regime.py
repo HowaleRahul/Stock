@@ -38,8 +38,16 @@ class RegimeDetector:
             is_trending = adx_val >= adx_threshold
             direction = "bullish" if dmp_val > dmn_val else "bearish"
             
+            # Identify extreme panic / high volatility crash
+            regime = "range-bound"
+            if is_trending:
+                regime = "trending"
+                
+            if adx_val >= 35.0 and direction == "bearish" and (dmn_val > dmp_val * 1.5):
+                regime = "crash"
+            
             return {
-                "regime": "trending" if is_trending else "range-bound",
+                "regime": regime,
                 "adx": round(adx_val, 2),
                 "direction": direction,
                 "dmp": round(dmp_val, 2),

@@ -10,6 +10,7 @@ from api.config import settings
 from api.db import get_db, check_database_connection, engine, Base
 from models.init_db import init_database
 from api.router import router as data_router
+from api.auth import get_api_key
 
 # Configure logging
 logging.basicConfig(
@@ -76,10 +77,13 @@ from starlette.responses import Response
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     response: Response = await call_next(request)
+    # Always set these headers regardless of environment
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     if settings.environment.lower() == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:;"
     return response
 
 # Include API routes
@@ -118,7 +122,7 @@ async def health_check():
 
 
 @app.get("/db-check", tags=["Monitoring"])
-async def db_check():
+async def db_check(_api_key: str = Depends(get_api_key)):
     """Exercises async database connection pool to verify Postgres/TimescaleDB connectivity."""
     status_summary = await check_database_connection()
     return status_summary
