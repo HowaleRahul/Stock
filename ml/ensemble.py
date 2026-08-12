@@ -46,7 +46,7 @@ class EnsembleModel:
         if r == "trending-bearish": return -1
         return 0 # range-bound or neutral
 
-    def predict(self, regime_data: Dict[str, Any], setups: List[Any]) -> Dict[str, Any]:
+    def predict(self, regime_data: Dict[str, Any], setups: List[Any], setup_weights: Dict[str, float] = None) -> Dict[str, Any]:
         """
         Takes the regime and the raw setups from SetupEngine and outputs the ensemble prediction.
         """
@@ -73,7 +73,7 @@ class EnsembleModel:
                 
         # If no model is trained yet, fallback to heuristic unweighted voting
         if not self.model or not self.feature_names:
-            return self._fallback_voting(features_dict, expected_setups)
+            return self._fallback_voting(features_dict, expected_setups, setup_weights)
             
         # Build feature vector
         X = np.array([[features_dict.get(f, 0.0) for f in self.feature_names]])
@@ -113,12 +113,18 @@ class EnsembleModel:
             
         except Exception as e:
             logger.error(f"Ensemble prediction error: {e}")
-            return self._fallback_voting(features_dict, expected_setups)
+            return self._fallback_voting(features_dict, expected_setups, setup_weights)
 
-    def _fallback_voting(self, features: Dict[str, float], setups_list: List[str]) -> Dict[str, Any]:
-        """Simple tally if ML model isn't trained yet."""
-        bull_score = sum([features[f"{s}_conf"] for s in setups_list if features[f"{s}_sig"] == 1])
-        bear_score = sum([features[f"{s}_conf"] for s in setups_list if features[f"{s}_sig"] == -1])
+    def _fallback_voting(self, features: Dict[str, float], setups_list: List[str], setup_weights: Dict[str, float] = None) -> Dict[str, Any]:
+        """Simple tally if ML model isn't trained yet, weighted by RL setup_weights if provided."""
+        if setup_weights is None:
+            setup_weights = {s: 1.0 for s in setups_list}
+        else:
+            # Provide default weight of 1.0 if not found in setup_weights
+            setup_weights = {s: setup_weights.get(s, 1.0) for s in setups_list}
+            
+        bull_score = sum([features[f"{s}_conf"] * setup_weights[s] for s in setups_list if features[f"{s}_sig"] == 1])
+        bear_score = sum([features[f"{s}_conf"] * setup_weights[s] for s in setups_list if features[f"{s}_sig"] == -1])
         
         total = bull_score + bear_score
         
