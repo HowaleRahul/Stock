@@ -10,6 +10,7 @@ from api.config import settings
 from api.db import get_db, check_database_connection, engine, Base
 from models.init_db import init_database
 from api.router import router as data_router
+from api.dashboard_router import router as dashboard_router
 from api.auth import get_api_key
 
 # Configure logging
@@ -59,7 +60,9 @@ _cors_origins = getattr(settings, "cors_origins", [
     "http://localhost",
     "http://localhost:8000",
     "http://127.0.0.1",
-    "http://127.0.0.1:8000"
+    "http://127.0.0.1:8000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173"
 ])
 _allow_creds = False if "*" in _cors_origins else True
 app.add_middleware(
@@ -88,6 +91,7 @@ async def add_security_headers(request: Request, call_next):
 
 # Include API routes
 app.include_router(data_router)
+app.include_router(dashboard_router)
 
 # Serve frontend static files (Phase 2 Chart UI)
 _frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
