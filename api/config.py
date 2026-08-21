@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = Field(
-        default="postgresql+asyncpg://postgres:trading_secret_pwd@127.0.0.1:5432/trading_db",
+        default="",
         alias="DATABASE_URL"
     )
 

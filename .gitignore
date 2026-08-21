@@ -32,3 +32,13 @@ data/processed/*
 *.swp
 .DS_Store
 Thumbs.db
+
+# Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Local data files
+paper_account.json
+paper_trades.json
+custom_strategies.json

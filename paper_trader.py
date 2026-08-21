@@ -184,7 +184,7 @@ def run_loop():
                 updated_trades.append(trade)
                 continue
 
-            ticker = trade['ticker']
+            ticker = trade.get('underlying_ticker', trade['ticker'])
             df = fetch_and_enrich(ticker)
             if df is None:
                 updated_trades.append(trade)
@@ -248,15 +248,19 @@ def run_loop():
                     exit_premium = bs_exit["premium"]
                     trade["opt_exit_premium"] = exit_premium
                     
-                    gross_pnl_pct = (exit_premium - trade["opt_entry_premium"]) / trade["opt_entry_premium"]
+                    gross_pnl_pct = (exit_premium - trade["opt_entry_premium"]) / trade["opt_entry_premium"] if trade.get("opt_entry_premium", 0) > 0 else 0.0
                     cash_pnl = trade['invested'] * (gross_pnl_pct - STT_SLIPPAGE_PCT)
                     net_pnl_pct = gross_pnl_pct - STT_SLIPPAGE_PCT
                 else:
                     # Standard Equity PnL
-                    if trade['direction'] == 'LONG':
-                        gross_pnl_pct = (trade['exit_price'] - trade['entry_price']) / trade['entry_price']
+                    entry_p = trade.get('entry_price', 0)
+                    if entry_p > 0:
+                        if trade['direction'] == 'LONG':
+                            gross_pnl_pct = (trade['exit_price'] - entry_p) / entry_p
+                        else:
+                            gross_pnl_pct = (entry_p - trade['exit_price']) / entry_p
                     else:
-                        gross_pnl_pct = (trade['entry_price'] - trade['exit_price']) / trade['entry_price']
+                        gross_pnl_pct = 0.0
 
                     net_pnl_pct = gross_pnl_pct - STT_SLIPPAGE_PCT
                     cash_pnl = trade['invested'] * net_pnl_pct
@@ -407,10 +411,10 @@ def run_loop():
             # Convert setup signals to serializable dicts
             setup_signals_list = [{"name": s.name, "signal": s.signal, "confidence": float(s.confidence)} for s in setups]
 
-            # Create the trade record
             new_trade = {
                 "id": str(datetime.datetime.now().timestamp()),
                 "ticker": ticker if not is_options_trade else opt_plan.option_symbol,
+                "underlying_ticker": ticker,
                 "direction": trade_plan.direction,
                 "quantity": trade_plan.position_size_qty if not is_options_trade else opt_plan.lots_to_buy * opt_plan.lot_size,
                 "invested": trade_plan.position_value if not is_options_trade else opt_plan.total_premium_invested,

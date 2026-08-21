@@ -1,14 +1,28 @@
 import os
 import json
-from fastapi import APIRouter
+import logging
+from fastapi import APIRouter, Depends
 from typing import Dict, Any
+from sqlalchemy import select
 
 from ml.performance_dashboard import PerformanceDashboard
 from ml.trade_logger import TradeLogger
+from api.db import async_session_factory
+from models.models import Account, Trade
+from api.auth import get_api_key, rate_limiter
+
+logger = logging.getLogger("trading.api.dashboard")
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["Dashboard"])
 
 CONFIG_PATH = "config.json"
+
+# Whitelist of allowed config keys to prevent arbitrary injection
+ALLOWED_CONFIG_KEYS = {
+    "risk_per_trade", "max_open_trades", "min_confidence", "capital",
+    "enabled_setups", "tickers", "timeframes", "paper_mode"
+}
+
 
 @router.get("/metrics")
 async def get_metrics():
@@ -21,8 +35,10 @@ async def get_metrics():
         "rolling_win_rate": perf_board.rolling_win_rate()
     }
 
+
 @router.get("/portfolio")
 async def get_portfolio():
+    """Get paper trading portfolio stats and open trades from the database."""
     async with async_session_factory() as session:
         acc_stmt = select(Account)
         acc_res = await session.execute(acc_stmt)
@@ -56,17 +72,14 @@ async def get_portfolio():
             "open_trades": trades_data
         }
 
+
 @router.get("/analytics")
 async def get_analytics():
+    """Compute equity curve, win rate by day, and probability of ruin."""
     async with async_session_factory() as session:
-        # Fetch all closed trades to compute equity curve
         stmt = select(Trade).where(Trade.is_open == False).order_by(Trade.exit_time.asc())
         res = await session.execute(stmt)
         closed_trades = res.scalars().all()
-        
-        acc_stmt = select(Account)
-        acc_res = await session.execute(acc_stmt)
-        account = acc_res.scalar_one_or_none()
         
         starting_capital = 100000.0
         current_capital = starting_capital
@@ -83,14 +96,12 @@ async def get_analytics():
                 pnl_amt = (t.pnl_pct / 100.0) * t.invested
                 current_capital += pnl_amt
                 
-                # Append to equity curve
                 if t.exit_time:
                     equity_curve.append({
                         "time": t.exit_time.timestamp(),
                         "value": current_capital
                     })
                     
-                    # Group by day of week
                     day = t.exit_time.weekday()
                     total_by_day[day] += 1
                     if t.pnl_pct > 0:
@@ -100,9 +111,6 @@ async def get_analytics():
                         losses += 1
                         
         win_rate = (wins / len(closed_trades) * 100) if len(closed_trades) > 0 else 0
-        
-        # Calculate Risk of Ruin (simplified formula based on win rate and reward/risk ratio)
-        # For this prototype, if win_rate > 50, risk of ruin is low.
         probability_of_ruin = max(0.0, 100.0 - (win_rate * 1.5))
         
         return {
@@ -118,6 +126,9 @@ async def get_analytics():
                 "Friday": (win_by_day[4] / total_by_day[4] * 100) if total_by_day[4] else 0,
             }
         }
+
+
+@router.get("/trades")
 async def get_trades():
     """Get all open and closed trades."""
     entries = TradeLogger.get_all_entries()
@@ -127,6 +138,7 @@ async def get_trades():
         "exits": exits
     }
 
+
 @router.get("/config")
 async def get_config():
     """Get current configuration."""
@@ -135,18 +147,27 @@ async def get_config():
             return json.load(f)
     return {}
 
+
 @router.post("/config")
-async def update_config(new_config: Dict[str, Any]):
-    """Update configuration."""
-    # Merge with existing
+async def update_config(
+    new_config: Dict[str, Any],
+    _api_key: str = Depends(get_api_key),
+    _rate_limit: bool = Depends(rate_limiter(10))
+):
+    """Update configuration (authenticated, validated)."""
+    # Filter to only allowed keys
+    filtered = {k: v for k, v in new_config.items() if k in ALLOWED_CONFIG_KEYS}
+    if not filtered:
+        return {"status": "error", "message": "No valid configuration keys provided."}
+    
     config = {}
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r") as f:
             config = json.load(f)
     
-    config.update(new_config)
+    config.update(filtered)
     
     with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=4)
         
-    return {"status": "success"}
+    return {"status": "success", "updated_keys": list(filtered.keys())}

@@ -297,7 +297,14 @@ class OptionsEngine:
         # Gate 2: Theta Decay Check
         # If the daily theta decay is too high relative to expected profit, skip.
         # e.g., if Theta is -₹5/day and we expect a ₹10 profit, time will kill the trade.
-        expected_hold_days = opt_plan.original_plan.max_hold_bars / 24.0 # approximate days
+        timeframe = opt_plan.original_plan.timeframe
+        if timeframe == "1h":
+            expected_hold_days = opt_plan.original_plan.max_hold_bars / 6.25
+        elif timeframe == "1d":
+            expected_hold_days = opt_plan.original_plan.max_hold_bars
+        else:
+            expected_hold_days = opt_plan.original_plan.max_hold_bars / 6.25
+            
         total_theta_decay = abs(opt_plan.theta) * max(1.0, expected_hold_days)
         expected_profit_per_qty = (opt_plan.target_premium - opt_plan.entry_premium)
         

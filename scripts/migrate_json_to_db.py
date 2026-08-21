@@ -51,7 +51,7 @@ async def migrate():
                 
                 if not existing:
                     new_trade = Trade(
-                        order_id=t["order_id"],
+                        order_id=t.get("order_id", t.get("id")),
                         ticker=t["ticker"],
                         direction=t["direction"],
                         entry_price=t["entry_price"],

@@ -45,15 +45,19 @@ def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "
     macro_dfs = {}
     for name, sym in macro_tickers.items():
         try:
-            data = yf.download(sym, period=period, interval=interval, progress=False)
+            # Always fetch daily data for macro to avoid intraday timezone mismatch
+            data = yf.download(sym, period=period, interval="1d", progress=False)
             if not data.empty:
-                # Yahoo Finance sometimes returns MultiIndex columns if multiple tickers are passed, 
-                # but for a single ticker it's usually flat. We ensure we get the 'Close' column.
                 if isinstance(data.columns, pd.MultiIndex):
                     close_series = data['Close'][sym]
                 else:
                     close_series = data['Close']
-                    
+                
+                # Shift by 1 day to strictly prevent lookahead bias
+                close_series = close_series.shift(1)
+                # Remove timezone to allow alignment
+                if close_series.index.tz is not None:
+                    close_series.index = close_series.index.tz_localize(None)
                 macro_dfs[name] = close_series
         except Exception as e:
             logger.warning(f"Failed to fetch {sym}: {e}")
@@ -61,24 +65,37 @@ def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "
     # Combine into main df
     df = df.copy()
     
+    # Ensure main df index has no timezone for alignment
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    
+    # We will reindex macro data to the main df index and forward-fill
+    # Create a temporary dataframe for macro data
+    macro_combined = pd.DataFrame(index=df.index)
+    
+    for name, series in macro_dfs.items():
+        # Reindex and forward fill
+        aligned_series = series.reindex(df.index, method='ffill')
+        macro_combined[name] = aligned_series
+
     if "VIX" in macro_dfs:
-        df['macro_vix'] = macro_dfs["VIX"]
+        df['macro_vix'] = macro_combined["VIX"]
     else:
         df['macro_vix'] = 15.0 # Fallback average VIX
         
     if "SPX" in macro_dfs:
-        df['macro_spx_close'] = macro_dfs["SPX"]
+        df['macro_spx_close'] = macro_combined["SPX"]
         df['macro_spx_ret'] = df['macro_spx_close'].pct_change()
     else:
         df['macro_spx_ret'] = 0.0
         
     if "USDINR" in macro_dfs:
-        df['macro_usdinr'] = macro_dfs["USDINR"]
+        df['macro_usdinr'] = macro_combined["USDINR"]
         df['macro_usdinr_ret'] = df['macro_usdinr'].pct_change()
     else:
         df['macro_usdinr_ret'] = 0.0
         
-    # Forward fill NaNs (due to differing market holidays between US and India)
+    # Forward fill NaNs created at the start of the series
     df.ffill(inplace=True)
     df.fillna(0.0, inplace=True)
     

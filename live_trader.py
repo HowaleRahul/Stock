@@ -61,7 +61,7 @@ async def close_trade(trade_id, exit_price):
             trade.exit_price = exit_price
             trade.exit_time = datetime.datetime.utcnow()
             
-            pnl = (exit_price - trade.entry_price) / trade.entry_price
+            pnl = (exit_price - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
             if trade.direction == "bearish":
                 pnl = -pnl
             trade.pnl_pct = pnl * 100
@@ -125,10 +125,11 @@ async def run_live_loop_async():
                 
                 for trade in active_live_orders:
                     if trade.ticker == ticker or trade.ticker.startswith(ticker):
-                        if current_price <= trade.stop_loss or current_price >= trade.take_profit:
-                            logger.info(f"Closing live position: {trade.ticker}")
-                            await close_trade(trade.id, current_price)
-                            notifier.send_exit_alert({"ticker": trade.ticker}, is_live=True)
+                        if trade.stop_loss is not None and trade.take_profit is not None:
+                            if current_price <= trade.stop_loss or current_price >= trade.take_profit:
+                                logger.info(f"Closing live position: {trade.ticker}")
+                                await close_trade(trade.id, current_price)
+                                notifier.send_exit_alert({"ticker": trade.ticker}, is_live=True)
 
                 config = load_config()
                 regime, setups = engine.evaluate_all(df, ticker)
@@ -137,9 +138,10 @@ async def run_live_loop_async():
                 confidence = prediction_dict.get("probability", 0.0)
                 
                 if ai_signal in ["bullish", "bearish"] and confidence >= 0.55:
+                    actual_capital = broker.get_balance() if hasattr(broker, 'get_balance') else 1000000.0
                     trade_plan = risk_engine.generate_trade_plan(
                         ticker=ticker, direction=ai_signal, ai_probability=confidence,
-                        df=df, capital=1000000, regime=regime, timeframe=TIMEFRAME
+                        df=df, capital=actual_capital, regime=regime, timeframe=TIMEFRAME
                     )
                     
                     if trade_plan.is_approved:

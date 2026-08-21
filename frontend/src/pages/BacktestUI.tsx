@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import axios from 'axios';
 import ChartWidget from '../components/ChartWidget';
 
@@ -10,35 +10,19 @@ const BacktestUI = () => {
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<any>(null);
   const [error, setError] = useState('');
-  const [chartData, setChartData] = useState<any[]>([]);
 
   const runBacktest = async () => {
     setLoading(true);
     setError('');
+    setResults(null);
     try {
-      // Fetch OHLCV data for the chart
-      const period = timeframe === '1d' ? '5y' : '60d';
-      const ohlcvRes = await axios.get(`/api/v1/data/ohlcv`, {
-          params: { ticker, timeframe, period }
-      });
-      
-      const df = ohlcvRes.data.data || [];
-      const formattedDf = df.map((row: any) => ({
-          time: row.timestamp || row.Date || row.Datetime,
-          open: row.open,
-          high: row.high,
-          low: row.low,
-          close: row.close
-      }));
-      setChartData(formattedDf);
-
-      // Run backtest
+      // Run backtest — the backend provides both stats and trade data
       const res = await axios.get('/api/v1/backtest/run', {
         params: { ticker, timeframe, setup }
       });
       setResults(res.data);
     } catch (err: any) {
-      setError(err.response?.data?.message || err.message);
+      setError(err.response?.data?.detail || err.response?.data?.message || err.message);
     } finally {
       setLoading(false);
     }
@@ -48,18 +32,20 @@ const BacktestUI = () => {
     <div className="space-y-6">
       <div className="bg-gray-900 p-6 rounded-lg border border-gray-800 flex flex-wrap gap-4 items-end">
         <div>
-          <label className="block text-sm text-gray-400 mb-1">Ticker</label>
-          <input 
-            type="text" 
-            value={ticker} 
-            onChange={e => setTicker(e.target.value)}
+          <label htmlFor="bt-ticker" className="block text-sm text-gray-400 mb-1">Ticker</label>
+          <input
+            id="bt-ticker"
+            type="text"
+            value={ticker}
+            onChange={e => setTicker(e.target.value.toUpperCase())}
             className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
           />
         </div>
         <div>
-          <label className="block text-sm text-gray-400 mb-1">Timeframe</label>
-          <select 
-            value={timeframe} 
+          <label htmlFor="bt-timeframe" className="block text-sm text-gray-400 mb-1">Timeframe</label>
+          <select
+            id="bt-timeframe"
+            value={timeframe}
             onChange={e => setTimeframe(e.target.value)}
             className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
           >
@@ -68,9 +54,10 @@ const BacktestUI = () => {
           </select>
         </div>
         <div>
-          <label className="block text-sm text-gray-400 mb-1">Setup</label>
-          <select 
-            value={setup} 
+          <label htmlFor="bt-setup" className="block text-sm text-gray-400 mb-1">Setup</label>
+          <select
+            id="bt-setup"
+            value={setup}
             onChange={e => setSetup(e.target.value)}
             className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
           >
@@ -80,17 +67,17 @@ const BacktestUI = () => {
             <option value="bollinger_breakout">Bollinger Breakout</option>
           </select>
         </div>
-        <button 
+        <button
           onClick={runBacktest}
           disabled={loading}
-          className="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded text-white font-medium transition-colors"
+          className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-6 py-2 rounded text-white font-medium transition-colors"
         >
           {loading ? 'Running...' : 'Run Backtest'}
         </button>
       </div>
 
       {error && (
-        <div className="bg-red-900/50 border border-red-500 text-red-200 p-4 rounded">
+        <div className="bg-red-900/50 border border-red-500 text-red-200 p-4 rounded" role="alert">
           {error}
         </div>
       )}
@@ -122,12 +109,12 @@ const BacktestUI = () => {
             </div>
           </div>
 
-          <div className="bg-gray-900 p-4 rounded-lg border border-gray-800">
-            <h3 className="text-lg font-medium mb-4">Trade History & Chart</h3>
-            {chartData.length > 0 && (
-                <ChartWidget data={chartData} trades={results.trades} height={500} />
-            )}
-          </div>
+          {results.trades.length > 0 && (
+            <div className="bg-gray-900 p-4 rounded-lg border border-gray-800">
+              <h3 className="text-lg font-medium mb-4">Trade Markers on Chart</h3>
+              <ChartWidget data={[]} trades={results.trades} height={500} />
+            </div>
+          )}
         </>
       )}
     </div>

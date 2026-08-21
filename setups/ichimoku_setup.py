@@ -28,8 +28,13 @@ class IchimokuSetup(BaseSetup):
             
             # Columns usually look like: ISA_9, ISB_26, ITS_9, IKS_26, ICS_26
             # We care about ISA (Senkou Span A) and ISB (Senkou Span B)
-            span_a_col = [c for c in ichi_df.columns if c.startswith('ISA_')][0]
-            span_b_col = [c for c in ichi_df.columns if c.startswith('ISB_')][0]
+            span_a_cols = [c for c in ichi_df.columns if c.startswith('ISA_')]
+            span_b_cols = [c for c in ichi_df.columns if c.startswith('ISB_')]
+            if not span_a_cols or not span_b_cols:
+                return SetupSignal(self.name, "neutral", 0.0, "Ichimoku Cloud columns not found.")
+                
+            span_a_col = span_a_cols[0]
+            span_b_col = span_b_cols[0]
             
             span_a = ichi_df[span_a_col].values
             span_b = ichi_df[span_b_col].values

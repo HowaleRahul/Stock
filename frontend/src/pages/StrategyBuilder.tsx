@@ -43,19 +43,23 @@ const StrategyBuilder = () => {
         
         <div className="space-y-4 max-w-md">
             <div>
-                <label className="block text-sm text-gray-400 mb-1">Strategy Name</label>
-                <input 
-                    type="text" 
-                    value={name} 
+                <label htmlFor="strat-name" className="block text-sm text-gray-400 mb-1">Strategy Name</label>
+                <input
+                    id="strat-name"
+                    type="text"
+                    value={name}
                     onChange={e => setName(e.target.value)}
+                    maxLength={128}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
                 />
             </div>
             <div>
-                <label className="block text-sm text-gray-400 mb-1">Description</label>
-                <textarea 
-                    value={description} 
+                <label htmlFor="strat-desc" className="block text-sm text-gray-400 mb-1">Description</label>
+                <textarea
+                    id="strat-desc"
+                    value={description}
                     onChange={e => setDescription(e.target.value)}
+                    maxLength={512}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
                 />
             </div>

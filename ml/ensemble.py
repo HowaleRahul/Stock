@@ -83,15 +83,20 @@ class EnsembleModel:
             pred_class = self.model.predict(X)[0]
             probs = self.model.predict_proba(X)[0]
             
+            classes = list(self.model.classes_)
+            
+            def _get_prob(cls_val):
+                return probs[classes.index(cls_val)] if cls_val in classes else 0.0
+                
             if pred_class == 1:
                 direction = "bullish"
-                prob = probs[list(self.model.classes_).index(1)]
+                prob = _get_prob(1)
             elif pred_class == -1:
                 direction = "bearish"
-                prob = probs[list(self.model.classes_).index(-1)]
+                prob = _get_prob(-1)
             else:
                 direction = "neutral"
-                prob = probs[list(self.model.classes_).index(0)]
+                prob = _get_prob(0)
                 
             # Explainability: feature contributions (Logit * Coef)
             contributions = X[0] * self.model.coef_[0]  # Using coef of class 1 (bullish) for analysis

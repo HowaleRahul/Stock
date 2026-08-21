@@ -1,7 +1,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,7 +74,7 @@ app.add_middleware(
 )
 
 # Enforce Strict-Transport-Security (HSTS) in production
-from fastapi import Request
+
 from starlette.responses import Response
 
 @app.middleware("http")

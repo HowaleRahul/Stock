@@ -42,8 +42,12 @@ def load_or_create_model():
     return model, scaler
 
 def save_model(model, scaler):
-    joblib.dump(model, MODEL_PATH)
-    joblib.dump(scaler, SCALER_PATH)
+    tmp_model_path = MODEL_PATH + ".tmp"
+    tmp_scaler_path = SCALER_PATH + ".tmp"
+    joblib.dump(model, tmp_model_path)
+    joblib.dump(scaler, tmp_scaler_path)
+    os.replace(tmp_model_path, MODEL_PATH)
+    os.replace(tmp_scaler_path, SCALER_PATH)
     logger.info("Saved upgraded AI Brain to disk.")
 
 def generate_features_for_ticker(ticker, tf_config):
@@ -92,7 +96,7 @@ def generate_features_for_ticker(ticker, tf_config):
     
     min_periods = 100
     for i in range(min_periods, len(df)):
-        window_df = df.iloc[:i+1]
+        window_df = df.iloc[max(0, i - 300):i+1]
         label = labels[i]
         
         regime_data, setups = engine.evaluate_all(window_df)
@@ -183,7 +187,7 @@ def run_training_loop(stop_event=None, log_callback=None):
             log("💾 Model Checkpoint Saved.")
             
         # Brief pause to avoid destroying APIs
-        time.sleep(2)
+        time.sleep(60)
 
 def main():
     run_training_loop()
