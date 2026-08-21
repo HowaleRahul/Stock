@@ -1,5 +1,6 @@
 import time
 import os
+import secrets
 from typing import Dict, List
 from collections import defaultdict
 from fastapi import Request, HTTPException, status, Depends
@@ -39,12 +40,19 @@ api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 async def get_api_key(api_key: str = Depends(api_key_header)):
     """
     Validates API key if it's set in the environment.
-    If 'API_KEY' is not set in env, allows open access (for backwards compatibility).
+    Development can run without a key for local use.  Production must always
+    provide one; silently disabling authentication there exposes every
+    state-changing endpoint.
     """
     expected_api_key = os.getenv("API_KEY")
     if not expected_api_key:
+        if settings.environment.lower() == "production":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="API authentication is not configured."
+            )
         return None
-    if api_key != expected_api_key:
+    if not api_key or not secrets.compare_digest(api_key, expected_api_key):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid or missing API Key"

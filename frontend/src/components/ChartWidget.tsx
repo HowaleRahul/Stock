@@ -54,6 +54,8 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
     return () => {
       window.removeEventListener('resize', handleResize);
       chart.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
     };
   }, [height]);
 
@@ -61,7 +63,7 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
     if (seriesRef.current && data.length > 0) {
       // Format data for lightweight-charts
       const formattedData = data.map(d => {
-        let time: Time = (new Date(d.time).getTime() / 1000) as Time;
+        const time = (new Date(d.time).getTime() / 1000) as Time;
         return {
           time,
           open: d.open,
@@ -71,7 +73,10 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
         };
       });
       // Sort and remove duplicates based on time
-      const uniqueData = formattedData.filter((v, i, a) => a.findIndex(t => (t.time === v.time)) === i).sort((a, b) => (a.time as number) - (b.time as number));
+      const uniqueData = formattedData
+        .filter(v => Number.isFinite(v.time as number) && [v.open, v.high, v.low, v.close].every(Number.isFinite))
+        .filter((v, i, a) => a.findIndex(t => (t.time === v.time)) === i)
+        .sort((a, b) => (a.time as number) - (b.time as number));
       
       seriesRef.current.setData(uniqueData);
 
@@ -79,7 +84,9 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
         const markers: any[] = [];
         trades.forEach(trade => {
             const entryTime = (new Date(trade.entry_time).getTime() / 1000) as Time;
-            const exitTime = (new Date(trade.exit_time).getTime() / 1000) as Time;
+          const exitTime = (new Date(trade.exit_time).getTime() / 1000) as Time;
+
+          if (!Number.isFinite(entryTime as number) || !Number.isFinite(exitTime as number)) return;
 
             markers.push({
                 time: entryTime,
@@ -101,6 +108,8 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
         // Sort markers by time
         markers.sort((a, b) => (a.time as number) - (b.time as number));
         seriesRef.current.setMarkers(markers);
+      } else {
+        seriesRef.current.setMarkers([]);
       }
     }
   }, [data, trades]);

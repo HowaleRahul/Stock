@@ -96,7 +96,9 @@ from fastapi.exceptions import RequestValidationError
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
-        content={"error": True, "message": exc.detail, "status_code": exc.status_code},
+        # Keep FastAPI's standard `detail` field for compatible clients while
+        # retaining the API's structured error shape.
+        content={"error": True, "detail": exc.detail, "message": exc.detail, "status_code": exc.status_code},
     )
 
 @app.exception_handler(Exception)

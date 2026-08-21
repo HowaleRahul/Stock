@@ -21,6 +21,7 @@ from api.schemas import (
 )
 from data.service import DataIngestionService
 from setups.engine import SetupEngine
+from setups.regime import RegimeDetector
 from setups.indicators import ema, rsi, macd, bollinger_bands, find_support_resistance
 from api.config import settings
 from api.auth import rate_limiter, get_api_key
@@ -549,12 +550,13 @@ async def evaluate_setups(
             pass
 
     # Evaluate primary timeframe
-    regime_data, primary_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_primary.copy(), ticker)
+    regime_data = await run_in_threadpool(RegimeDetector.detect, df_primary.copy())
+    primary_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_primary.copy(), ticker)
 
     # Evaluate MTF and boost confidence
     for tf, df_tf in mtf_dfs.items():
         try:
-            _, tf_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_tf.copy(), ticker)
+            tf_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_tf.copy(), ticker)
             tf_signal_map = {s.name: s.signal for s in tf_signals}
             
             for p_sig in primary_signals:

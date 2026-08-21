@@ -18,25 +18,42 @@ import pandas as pd
 # Moving Averages
 # ---------------------------------------------------------------------------
 
-import pandas_ta as ta
-
 def sma(series: pd.Series, period: int) -> pd.Series:
     """Simple Moving Average."""
     if period < 1 or len(series) < period:
         return pd.Series(np.nan, index=series.index)
-    res = ta.sma(series, length=period)
-    return res if res is not None else pd.Series(np.nan, index=series.index)
+    # Keep the implementation deterministic across pandas-ta versions and do
+    # not calculate an average until a complete window is available.
+    return series.astype(float).rolling(window=period, min_periods=period).mean()
 
 
 def ema(series: pd.Series, period: int, *, wilder: bool = False) -> pd.Series:
     """Exponential Moving Average."""
     if period < 1 or len(series) < period or series.isna().all():
         return pd.Series(np.nan, index=series.index)
-    if wilder:
-        res = ta.rma(series, length=period)
-    else:
-        res = ta.ema(series, length=period)
-    return res if res is not None else pd.Series(np.nan, index=series.index)
+    values = pd.to_numeric(series, errors="coerce").astype(float)
+    result = pd.Series(np.nan, index=series.index, dtype=float)
+    alpha = (1.0 / period) if wilder else (2.0 / (period + 1.0))
+    previous: float | None = None
+    valid_run: list[float] = []
+
+    # Seed from the first complete contiguous window.  Thereafter a missing
+    # source value carries the prior EMA forward instead of poisoning every
+    # later point with NaN.
+    for index, value in values.items():
+        if pd.isna(value):
+            if previous is not None:
+                result.loc[index] = previous
+            continue
+        valid_run.append(float(value))
+        if previous is None:
+            if len(valid_run) < period:
+                continue
+            previous = float(np.mean(valid_run[-period:]))
+        else:
+            previous = (float(value) * alpha) + (previous * (1.0 - alpha))
+        result.loc[index] = previous
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -47,8 +64,21 @@ def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     """Relative Strength Index."""
     if period < 1 or len(close) < period + 1 or close.isna().all():
         return pd.Series(np.nan, index=close.index)
-    res = ta.rsi(close, length=period)
-    return res if res is not None else pd.Series(np.nan, index=close.index)
+    values = pd.to_numeric(close, errors="coerce").astype(float)
+    delta = values.diff()
+    gains = delta.clip(lower=0.0)
+    losses = -delta.clip(upper=0.0)
+    avg_gain = ema(gains, period, wilder=True)
+    avg_loss = ema(losses, period, wilder=True)
+    result = pd.Series(np.nan, index=close.index, dtype=float)
+    valid = avg_gain.notna() & avg_loss.notna()
+    both_zero = valid & (avg_gain == 0) & (avg_loss == 0)
+    no_loss = valid & (avg_loss == 0) & ~both_zero
+    normal = valid & ~both_zero & ~no_loss
+    result.loc[both_zero] = 50.0
+    result.loc[no_loss] = 100.0
+    result.loc[normal] = 100.0 - (100.0 / (1.0 + (avg_gain.loc[normal] / avg_loss.loc[normal])))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -66,13 +96,9 @@ def macd(
     if len(close) < slow + signal_period:
         return nan_s.copy(), nan_s.copy(), nan_s.copy()
         
-    df = ta.macd(close, fast=fast, slow=slow, signal=signal_period)
-    if df is None or df.empty:
-        return nan_s.copy(), nan_s.copy(), nan_s.copy()
-        
-    macd_line = df.iloc[:, 0]
-    histogram = df.iloc[:, 1]
-    signal_line = df.iloc[:, 2]
+    macd_line = ema(close, fast) - ema(close, slow)
+    signal_line = ema(macd_line, signal_period)
+    histogram = macd_line - signal_line
     return macd_line, signal_line, histogram
 
 
@@ -90,13 +116,12 @@ def bollinger_bands(
     if period < 1 or len(close) < period:
         return nan_s.copy(), nan_s.copy(), nan_s.copy()
         
-    df = ta.bbands(close, length=period, std=std_dev)
-    if df is None or df.empty:
-        return nan_s.copy(), nan_s.copy(), nan_s.copy()
-        
-    lower = df.iloc[:, 0]
-    middle = df.iloc[:, 1]
-    upper = df.iloc[:, 2]
+    values = pd.to_numeric(close, errors="coerce").astype(float)
+    middle = values.rolling(window=period, min_periods=period).mean()
+    # Population standard deviation is the conventional Bollinger definition.
+    deviation = values.rolling(window=period, min_periods=period).std(ddof=0)
+    upper = middle + (std_dev * deviation)
+    lower = middle - (std_dev * deviation)
     return upper, middle, lower
 
 

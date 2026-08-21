@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import inspect
-from typing import List, Tuple, Dict, Any
+from typing import List
 
 import pandas as pd
 
@@ -19,15 +19,6 @@ from setups.rsi_setup import RSISetup
 from setups.macd_setup import MACDSetup
 from setups.bollinger_setup import BollingerBandsSetup
 from setups.breakout_setup import BreakoutSetup
-from setups.candlestick_setup import CandlestickSetup
-from setups.vwap_setup import VWAPSetup
-from setups.fibonacci_setup import FibonacciSetup
-from setups.ichimoku_setup import IchimokuSetup
-from setups.pattern_setup import PatternSetup
-from setups.sentiment_setup import SentimentSetup
-from setups.fundamentals_setup import FundamentalsSetup
-from setups.options_setup import OptionsSetup
-from setups.psychology_setup import PsychologySetup
 
 logger = logging.getLogger("trading.setups.engine")
 
@@ -42,18 +33,9 @@ class SetupEngine:
             MACDSetup(),
             BollingerBandsSetup(),
             BreakoutSetup(),
-            CandlestickSetup(),
-            VWAPSetup(),
-            FibonacciSetup(),
-            IchimokuSetup(),
-            PatternSetup(),
-            SentimentSetup(),
-            FundamentalsSetup(),
-            OptionsSetup(),
-            PsychologySetup(),
         ]
 
-    def evaluate_all(self, df: pd.DataFrame, ticker: str = "") -> Tuple[Dict[str, Any], List[SetupSignal]]:
+    def evaluate_all(self, df: pd.DataFrame, ticker: str = "") -> List[SetupSignal]:
         """Run every registered setup.
 
         Args:
@@ -68,7 +50,8 @@ class SetupEngine:
         """
         results: List[SetupSignal] = []
         
-        # Detect Market Regime
+        # Detect Market Regime.  It is used only as a confidence modifier;
+        # failure to determine it must not change the result contract.
         regime_data = RegimeDetector.detect(df)
         
         for setup in self.setups:
@@ -106,23 +89,4 @@ class SetupEngine:
                     )
                 )
                 
-        # Evaluate custom strategies from file
-        import os, json
-        if os.path.exists("custom_strategies.json"):
-            try:
-                with open("custom_strategies.json", "r") as f:
-                    custom_strats = json.load(f)
-                
-                # Simplified evaluation for UI demonstration purposes
-                # In a full implementation, this would parse conditions dynamically via pandas-ta
-                for strat in custom_strats:
-                    results.append(SetupSignal(
-                        name=strat.get("name", "Custom"),
-                        signal="neutral", # Mocked as neutral unless fully implemented
-                        confidence=0.5,
-                        reasoning=f"Custom strategy loaded: {strat.get('description', '')}"
-                    ))
-            except Exception as e:
-                logger.error(f"Failed to evaluate custom strategies: {e}")
-                
-        return regime_data, results
+        return results

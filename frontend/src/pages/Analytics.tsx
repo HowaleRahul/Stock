@@ -62,6 +62,8 @@ const Analytics = () => {
                 chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
             }
         };
+        window.addEventListener('resize', handleResize);
+        
         return () => {
             window.removeEventListener('resize', handleResize);
             if (chartRef.current) {

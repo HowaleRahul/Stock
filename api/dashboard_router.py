@@ -1,8 +1,10 @@
 import os
 import json
 import logging
-from fastapi import APIRouter, Depends
-from typing import Dict, Any
+import tempfile
+from fastapi import APIRouter, Depends, HTTPException
+from typing import Dict, Any, Literal, Optional
+from pydantic import BaseModel, Field, ConfigDict
 from sqlalchemy import select
 
 from ml.performance_dashboard import PerformanceDashboard
@@ -18,10 +20,17 @@ router = APIRouter(prefix="/api/v1/dashboard", tags=["Dashboard"])
 CONFIG_PATH = "config.json"
 
 # Whitelist of allowed config keys to prevent arbitrary injection
-ALLOWED_CONFIG_KEYS = {
-    "risk_per_trade", "max_open_trades", "min_confidence", "capital",
-    "enabled_setups", "tickers", "timeframes", "paper_mode"
-}
+class ConfigUpdate(BaseModel):
+    """Only allow values that preserve the trading configuration invariants."""
+    model_config = ConfigDict(extra="forbid")
+    environment: Optional[Literal["PAPER", "LIVE"]] = None
+    capital: Optional[float] = Field(default=None, gt=0, le=1_000_000_000)
+    risk_per_trade_pct: Optional[float] = Field(default=None, gt=0, le=0.05)
+    max_portfolio_drawdown_pct: Optional[float] = Field(default=None, gt=0, le=1)
+    min_ai_confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    min_risk_reward_ratio: Optional[float] = Field(default=None, gt=0, le=100)
+    retrain_interval_days: Optional[int] = Field(default=None, ge=1, le=365)
+    drift_check_interval_hours: Optional[int] = Field(default=None, ge=1, le=8760)
 
 
 @router.get("/metrics")
@@ -143,31 +152,52 @@ async def get_trades():
 async def get_config():
     """Get current configuration."""
     if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, "r") as f:
-            return json.load(f)
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            if not isinstance(config, dict):
+                raise ValueError("configuration root is not an object")
+            return config
+        except (OSError, ValueError, json.JSONDecodeError):
+            logger.exception("Configuration store is unreadable")
+            raise HTTPException(status_code=503, detail="Configuration store is unavailable.")
     return {}
 
 
 @router.post("/config")
 async def update_config(
-    new_config: Dict[str, Any],
+    new_config: ConfigUpdate,
     _api_key: str = Depends(get_api_key),
     _rate_limit: bool = Depends(rate_limiter(10))
 ):
     """Update configuration (authenticated, validated)."""
-    # Filter to only allowed keys
-    filtered = {k: v for k, v in new_config.items() if k in ALLOWED_CONFIG_KEYS}
+    filtered = new_config.model_dump(exclude_none=True)
     if not filtered:
         return {"status": "error", "message": "No valid configuration keys provided."}
     
     config = {}
     if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, "r") as f:
-            config = json.load(f)
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            if not isinstance(config, dict):
+                raise ValueError("configuration root is not an object")
+        except (OSError, ValueError, json.JSONDecodeError):
+            logger.exception("Configuration store is unreadable")
+            raise HTTPException(status_code=503, detail="Configuration store is unavailable.")
     
     config.update(filtered)
     
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=4)
+    directory = os.path.dirname(os.path.abspath(CONFIG_PATH))
+    fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".config-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, CONFIG_PATH)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
         
     return {"status": "success", "updated_keys": list(filtered.keys())}

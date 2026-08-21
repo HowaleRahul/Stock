@@ -54,4 +54,6 @@ class RegimeDetector:
                 "dmn": round(dmn_val, 2)
             }
         except Exception as e:
-            return {"regime": "error", "adx": 0.0, "direction": "unknown", "error": str(e)}
+            # Regime detection is advisory.  A library/version incompatibility
+            # must not make every setup look like a failed signal.
+            return {"regime": "unknown", "adx": 0.0, "direction": "unknown"}
