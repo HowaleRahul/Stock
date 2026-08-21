@@ -1,9 +1,32 @@
-# Frontend Dashboard (`/frontend`)
+# React + TypeScript + Vite
 
-## Responsibilities
-- **Real-Time Decision Dashboard:** Visualizes live signals from the meta-ensemble along with individual setup contributions (`TrendPullback`, `Breakout`, `MeanReversion`, `OptionsFlow`).
-- **Explainability UI:** Interactive breakdown showing exact feature & setup drivers for each confidence recommendation.
-- **Portfolio & Paper-Trading Monitor:** Live equity curves, active virtual positions, P&L attribution, and risk metrics.
+This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
-## Roadmap Status
-- **Phase 0:** Directory initialized, UI/web application to be developed in Phase 6.
+Currently, two official plugins are available:
+
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+
+## React Compiler
+
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the Oxlint configuration
+
+If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+
+```json
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "oxc"],
+  "options": {
+    "typeAware": true
+  },
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/only-export-components": ["warn", { "allowConstantExport": true }]
+  }
+}
+```
+
+See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.

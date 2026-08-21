@@ -17,8 +17,8 @@ logger = logging.getLogger("trading.db")
 engine: AsyncEngine = create_async_engine(
     settings.database_url,
     echo=(settings.environment.lower() == "development" and settings.log_level.upper() == "DEBUG"),
-    pool_size=10,
-    max_overflow=20,
+    pool_size=50,
+    max_overflow=100,
     pool_pre_ping=True,
 )
 

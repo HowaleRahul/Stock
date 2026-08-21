@@ -13,15 +13,14 @@ asyncpg>=0.29.0
 alembic>=1.13.1
 
 # Data Processing & Math
-pandas>=2.2.0
-numpy>=1.26.0
-scikit-learn>=1.4.0
-joblib>=1.3.2
+pandas==2.2.3
+numpy==1.26.0
+scikit-learn==1.4.0
+joblib==1.3.2
 
 # HTTP Client & Utilities
 httpx>=0.27.0
 yfinance==0.2.52
-pandas==2.2.3
 ta==0.11.0
 cachetools==7.1.4
 pandas-ta==0.3.14b0

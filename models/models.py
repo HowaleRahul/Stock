@@ -78,3 +78,27 @@ class NewsHeadline(Base):
 
     def __repr__(self) -> str:
         return f"<NewsHeadline(time={self.time}, symbol_id={self.symbol_id}, title='{self.title[:30]}...')>"
+class Account(Base):
+    __tablename__ = 'accounts'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    capital = Column(Float, nullable=False)
+    peak_capital = Column(Float, nullable=False)
+    status = Column(String(32), default='ACTIVE')
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+class Trade(Base):
+    __tablename__ = 'trades'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(String(64), unique=True, index=True)
+    ticker = Column(String(64), index=True, nullable=False)
+    direction = Column(String(16), nullable=False)
+    entry_price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False)
+    invested = Column(Float, nullable=False)
+    take_profit = Column(Float, nullable=True)
+    stop_loss = Column(Float, nullable=True)
+    is_open = Column(Boolean, default=True)
+    exit_price = Column(Float, nullable=True)
+    pnl_pct = Column(Float, nullable=True)
+    entry_time = Column(DateTime(timezone=True), default=func.now())
+    exit_time = Column(DateTime(timezone=True), nullable=True)

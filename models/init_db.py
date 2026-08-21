@@ -2,7 +2,7 @@ import asyncio
 import logging
 from sqlalchemy import text, select
 from api.db import engine, Base, async_session_factory
-from models.models import Symbol, OHLCVBar, NewsHeadline
+from models.models import Symbol, OHLCVBar, NewsHeadline, Account, Trade
 
 logger = logging.getLogger("trading.init_db")
 
@@ -102,6 +102,15 @@ async def init_database(seed_watchlist: bool = True) -> dict:
                 await session.commit()
                 results["seeded_symbols_count"] = added_count
                 logger.info(f"Seeded {added_count} new symbols into watchlist.")
+                
+                # Ensure at least one account exists
+                stmt_acc = select(Account)
+                res_acc = await session.execute(stmt_acc)
+                if not res_acc.scalar_one_or_none():
+                    acc = Account(capital=100000.0, peak_capital=100000.0, status='ACTIVE')
+                    session.add(acc)
+                    await session.commit()
+                    logger.info("Seeded default trading Account.")
             except Exception as e:
                 await session.rollback()
                 logger.warning(f"Failed to seed watchlist or concurrent initialization detected: {e}")

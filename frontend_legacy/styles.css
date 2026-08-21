@@ -896,3 +896,78 @@ a:hover {
 .ensemble-badge.bullish { border-left: 4px solid #26a69a; }
 .ensemble-badge.bearish { border-left: 4px solid #ef5350; }
 .ensemble-badge.neutral { border-left: 4px solid #888; }
+/* ---------- Portfolio View ---------- */
+.top-nav {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-left: 20px;
+}
+.nav-btn {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: var(--transition);
+}
+.nav-btn:hover {
+    background: var(--bg-input);
+}
+.nav-btn.active {
+    background: rgba(68, 138, 255, 0.2);
+    border-color: var(--blue);
+    color: var(--blue);
+}
+.hidden {
+    display: none !important;
+}
+.portfolio-view {
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+.portfolio-container {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+.portfolio-summary {
+    background: var(--bg-panel);
+    padding: 20px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+}
+.portfolio-summary h3 {
+    margin-bottom: 12px;
+    color: var(--blue);
+}
+.portfolio-trades {
+    background: var(--bg-panel);
+    padding: 20px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+}
+.portfolio-trades h3 {
+    margin-bottom: 12px;
+    color: var(--blue);
+}
+.trades-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.trades-table th, .trades-table td {
+    padding: 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+.trades-table th {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+}
+.text-green { color: var(--green); font-weight: bold; }
+.text-red { color: var(--red); font-weight: bold; }

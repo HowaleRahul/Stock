@@ -89,12 +89,35 @@ async def add_security_headers(request: Request, call_next):
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:;"
     return response
 
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": True, "message": exc.detail, "status_code": exc.status_code},
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled Exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"error": True, "message": "Internal Server Error", "status_code": 500},
+    )
+
+from api.backtest_router import router as backtest_router
+from api.training_router import router as training_router
+
 # Include API routes
 app.include_router(data_router)
 app.include_router(dashboard_router)
+app.include_router(backtest_router)
+app.include_router(training_router)
 
 # Serve frontend static files (Phase 2 Chart UI)
-_frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+_frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
 if os.path.isdir(_frontend_dir):
     app.mount("/app", StaticFiles(directory=_frontend_dir, html=True), name="frontend")
 

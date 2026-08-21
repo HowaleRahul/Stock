@@ -21,6 +21,41 @@ async def get_metrics():
         "rolling_win_rate": perf_board.rolling_win_rate()
     }
 
+@router.get("/portfolio")
+async def get_portfolio():
+    async with async_session_factory() as session:
+        acc_stmt = select(Account)
+        acc_res = await session.execute(acc_stmt)
+        account = acc_res.scalar_one_or_none()
+        
+        trade_stmt = select(Trade).where(Trade.is_open == True)
+        trade_res = await session.execute(trade_stmt)
+        open_trades = trade_res.scalars().all()
+        
+        account_data = {
+            "capital": account.capital if account else 0.0,
+            "peak_capital": account.peak_capital if account else 0.0,
+            "status": account.status if account else "UNKNOWN"
+        }
+        
+        trades_data = []
+        for t in open_trades:
+            trades_data.append({
+                "order_id": t.order_id,
+                "ticker": t.ticker,
+                "direction": t.direction,
+                "entry_price": t.entry_price,
+                "quantity": t.quantity,
+                "invested": t.invested,
+                "take_profit": t.take_profit,
+                "stop_loss": t.stop_loss
+            })
+            
+        return {
+            "account": account_data,
+            "open_trades": trades_data
+        }
+
 @router.get("/trades")
 async def get_trades():
     """Get all open and closed trades."""

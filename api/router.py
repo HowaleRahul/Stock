@@ -61,68 +61,7 @@ async def _get_sync_lock(key: str):
 _setup_engine = SetupEngine()
 _ENSEMBLE_MODELS: Dict[str, EnsembleModel] = {}
 
-# Pre-curated instant dictionary of top stocks for zero-latency autocomplete
-_INSTANT_CATALOG = [
-    # Indian Stocks (NSE/BSE)
-    {"symbol": "RELIANCE.NS", "name": "Reliance Industries Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "TCS.NS", "name": "Tata Consultancy Services Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "HDFCBANK.NS", "name": "HDFC Bank Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "ICICIBANK.NS", "name": "ICICI Bank Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "INFY.NS", "name": "Infosys Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "SBIN.NS", "name": "State Bank of India", "exchange": "NSE", "market": "india"},
-    {"symbol": "BHARTIARTL.NS", "name": "Bharti Airtel Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "ITC.NS", "name": "ITC Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "TATAMOTORS.NS", "name": "Tata Motors Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "TATASTEEL.NS", "name": "Tata Steel Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "TATAPOWER.NS", "name": "Tata Power Company Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "TATATECH.NS", "name": "Tata Technologies Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "LTIM.NS", "name": "LTIMindtree Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "WIPRO.NS", "name": "Wipro Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "ADANIENT.NS", "name": "Adani Enterprises Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "ADANIPORTS.NS", "name": "Adani Ports & SEZ Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "SUNPHARMA.NS", "name": "Sun Pharmaceutical Industries", "exchange": "NSE", "market": "india"},
-    {"symbol": "MARUTI.NS", "name": "Maruti Suzuki India Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "TITAN.NS", "name": "Titan Company Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "BAJFINANCE.NS", "name": "Bajaj Finance Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "ASIANPAINT.NS", "name": "Asian Paints Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "HINDUNILVR.NS", "name": "Hindustan Unilever Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "KOTAKBANK.NS", "name": "Kotak Mahindra Bank Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "AXISBANK.NS", "name": "Axis Bank Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "LT.NS", "name": "Larsen & Toubro Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "HAL.NS", "name": "Hindustan Aeronautics Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "DLF.NS", "name": "DLF Limited", "exchange": "NSE", "market": "india"},
-    {"symbol": "PAYTM.NS", "name": "One 97 Communications (Paytm)", "exchange": "NSE", "market": "india"},
-    {"symbol": "NYKAA.NS", "name": "FSN E-Commerce Ventures (Nykaa)", "exchange": "NSE", "market": "india"},
-    {"symbol": "POLICYBZR.NS", "name": "PB Fintech (Policybazaar)", "exchange": "NSE", "market": "india"},
-    {"symbol": "BANKNIFTY.NS", "name": "Nifty Bank Index", "exchange": "NSE", "market": "india"},
-    {"symbol": "NIFTY", "name": "Nifty 50 Index", "exchange": "NSE", "market": "india"},
-    {"symbol": "BANKNIFTY", "name": "Nifty Bank Index", "exchange": "NSE", "market": "india"},
-    {"symbol": "SENSEX", "name": "BSE Sensex Index", "exchange": "BSE", "market": "india"},
-    # Global / US Stocks
-    {"symbol": "AAPL", "name": "Apple Inc.", "exchange": "NASDAQ", "market": "global"},
-    {"symbol": "NVDA", "name": "NVIDIA Corporation", "exchange": "NASDAQ", "market": "global"},
-    {"symbol": "MSFT", "name": "Microsoft Corporation", "exchange": "NASDAQ", "market": "global"},
-    {"symbol": "GOOGL", "name": "Alphabet Inc.", "exchange": "NASDAQ", "market": "global"},
-    {"symbol": "AMZN", "name": "Amazon.com Inc.", "exchange": "NASDAQ", "market": "global"},
-    {"symbol": "META", "name": "Meta Platforms Inc.", "exchange": "NASDAQ", "market": "global"},
-    {"symbol": "TSLA", "name": "Tesla Inc.", "exchange": "NASDAQ", "market": "global"},
-    {"symbol": "BRK-B", "name": "Berkshire Hathaway Inc.", "exchange": "NYSE", "market": "global"},
-    {"symbol": "JPM", "name": "JPMorgan Chase & Co.", "exchange": "NYSE", "market": "global"},
-    {"symbol": "V", "name": "Visa Inc.", "exchange": "NYSE", "market": "global"},
-    {"symbol": "WMT", "name": "Walmart Inc.", "exchange": "NYSE", "market": "global"},
-    {"symbol": "MA", "name": "Mastercard Inc.", "exchange": "NYSE", "market": "global"},
-    {"symbol": "PG", "name": "Procter & Gamble Co.", "exchange": "NYSE", "market": "global"},
-    {"symbol": "HD", "name": "The Home Depot Inc.", "exchange": "NYSE", "market": "global"},
-    {"symbol": "CVX", "name": "Chevron Corporation", "exchange": "NYSE", "market": "global"},
-    {"symbol": "LLY", "name": "Eli Lilly and Company", "exchange": "NYSE", "market": "global"},
-    {"symbol": "AMD", "name": "Advanced Micro Devices Inc.", "exchange": "NASDAQ", "market": "global"},
-    {"symbol": "INTC", "name": "Intel Corporation", "exchange": "NASDAQ", "market": "global"},
-    {"symbol": "NFLX", "name": "Netflix Inc.", "exchange": "NASDAQ", "market": "global"},
-    {"symbol": "ADBE", "name": "Adobe Inc.", "exchange": "NASDAQ", "market": "global"},
-    {"symbol": "CRM", "name": "Salesforce Inc.", "exchange": "NYSE", "market": "global"},
-    {"symbol": "BTC-USD", "name": "Bitcoin USD", "exchange": "CRYPTO", "market": "global"},
-    {"symbol": "ETH-USD", "name": "Ethereum USD", "exchange": "CRYPTO", "market": "global"},
-]
+from api.catalog import INSTANT_CATALOG
 
 
 def _clean_ticker_param(ticker: str) -> str:
@@ -134,7 +73,7 @@ def _clean_ticker_param(ticker: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid ticker symbol length.")
     
     import re
-    if not re.match(r"^[A-Z0-9\.\-\^]+$", cleaned):
+    if not re.match(r"^[A-Z0-9\.\-\^\=]+$", cleaned):
         raise HTTPException(status_code=400, detail="Invalid characters in ticker symbol.")
     return cleaned
 
@@ -216,7 +155,7 @@ async def search_symbols_endpoint(
         logger.warning(f"Error querying local DB for search: {e}")
 
     # 2. Check instant catalog with fuzzy scoring
-    for item in _INSTANT_CATALOG:
+    for item in INSTANT_CATALOG:
         if item["symbol"] in seen:
             continue
         if market_clean != "all" and item["market"] != market_clean:
@@ -610,12 +549,12 @@ async def evaluate_setups(
             pass
 
     # Evaluate primary timeframe
-    regime_data, primary_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_primary, ticker)
+    regime_data, primary_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_primary.copy(), ticker)
 
     # Evaluate MTF and boost confidence
     for tf, df_tf in mtf_dfs.items():
         try:
-            _, tf_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_tf, ticker)
+            _, tf_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_tf.copy(), ticker)
             tf_signal_map = {s.name: s.signal for s in tf_signals}
             
             for p_sig in primary_signals:

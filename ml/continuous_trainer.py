@@ -126,12 +126,22 @@ def generate_features_for_ticker(ticker, tf_config):
         y_labels.append(label)
         
     X = pd.DataFrame(X_rows)
+    # Drop rows with NaN values to prevent SGDClassifier crash
+    valid_mask = ~X.isna().any(axis=1)
+    X = X[valid_mask]
+    y_labels = [y for i, y in enumerate(y_labels) if valid_mask.iloc[i]]
+    
     return X, y_labels
 
-def main():
-    logger.info("==================================================")
-    logger.info("STARTING CONTINUOUS TRAINING ENGINE (ALPHAZERO MODE)")
-    logger.info("==================================================")
+def run_training_loop(stop_event=None, log_callback=None):
+    def log(msg):
+        logger.info(msg)
+        if log_callback:
+            log_callback(msg)
+
+    log("==================================================")
+    log("STARTING CONTINUOUS TRAINING ENGINE (ALPHAZERO MODE)")
+    log("==================================================")
     
     model, scaler = load_or_create_model()
     classes = np.array([-1, 0, 1])
@@ -139,19 +149,23 @@ def main():
     
     cycles = 0
     while True:
+        if stop_event and stop_event.is_set():
+            log("🛑 STOP SIGNAL RECEIVED. Halting Training Engine.")
+            break
+            
         cycles += 1
         ticker = random.choice(TARGET_INDICES)
         tf_config = random.choice(TIMEFRAME_CONFIGS)
         
-        logger.info(f"[CYCLE {cycles}] Target: {ticker} | Timeframe: {tf_config['tf']}")
+        log(f"[CYCLE {cycles}] Target: {ticker} | Timeframe: {tf_config['tf']}")
         
         X, y = generate_features_for_ticker(ticker, tf_config)
         
         if X is None or len(X) == 0:
-            logger.warning(f"Not enough data for {ticker}. Skipping...")
+            log(f"Not enough data for {ticker}. Skipping...")
             continue
             
-        logger.info(f"Simulated {len(X)} trades. Win: {y.count(1)}, Loss: {y.count(-1)}, Timeout: {y.count(0)}")
+        log(f"Simulated {len(X)} trades. Win: {y.count(1)}, Loss: {y.count(-1)}, Timeout: {y.count(0)}")
         
         # 1. Incrementally update the Scaler with the new data distribution
         scaler.partial_fit(X)
@@ -160,15 +174,19 @@ def main():
         X_scaled = scaler.transform(X)
         
         # 3. Incrementally teach the ML Model
-        logger.info("Injecting simulated outcomes into AI Brain (partial_fit)...")
+        log("Injecting simulated outcomes into AI Brain (partial_fit)...")
         model.partial_fit(X_scaled, y, classes=classes)
         
         # Save every 3 cycles
         if cycles % 3 == 0:
             save_model(model, scaler)
+            log("💾 Model Checkpoint Saved.")
             
         # Brief pause to avoid destroying APIs
         time.sleep(2)
+
+def main():
+    run_training_loop()
 
 if __name__ == "__main__":
     main()

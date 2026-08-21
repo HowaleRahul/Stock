@@ -18,62 +18,25 @@ import pandas as pd
 # Moving Averages
 # ---------------------------------------------------------------------------
 
-def sma(series: pd.Series, period: int) -> pd.Series:
-    """Simple Moving Average.
+import pandas_ta as ta
 
-    Returns a Series of the same length with NaN for the first (period - 1)
-    entries.
-    """
+def sma(series: pd.Series, period: int) -> pd.Series:
+    """Simple Moving Average."""
     if period < 1 or len(series) < period:
         return pd.Series(np.nan, index=series.index)
-    return series.rolling(window=period, min_periods=period).mean()
+    res = ta.sma(series, length=period)
+    return res if res is not None else pd.Series(np.nan, index=series.index)
 
 
 def ema(series: pd.Series, period: int, *, wilder: bool = False) -> pd.Series:
-    """Exponential Moving Average.
-
-    Args:
-        series: Price series.
-        period: Look-back window.
-        wilder: If True, use Wilder's smoothing factor ``1/period`` instead
-                of the standard ``2/(period+1)``.
-
-    Returns:
-        EMA series (same length, leading NaNs).
-    """
+    """Exponential Moving Average."""
     if period < 1 or len(series) < period or series.isna().all():
         return pd.Series(np.nan, index=series.index)
-
-    alpha = 1.0 / period if wilder else 2.0 / (period + 1)
-    result = np.full(len(series), np.nan)
-
-    # Find first valid index to avoid seeding with NaN
-    if series.isna().all():
-        return pd.Series(np.nan, index=series.index)
-    start_pos = int(np.argmax(~series.isna().values))
-
-    if len(series) - start_pos < period:
-        return pd.Series(np.nan, index=series.index)
-
-    # Seed with SMA of first `period` valid values starting from start_pos
-    seed_val = series.iloc[start_pos : start_pos + period].mean()
-    if pd.isna(seed_val):
-        return pd.Series(np.nan, index=series.index)
-
-    result[start_pos + period - 1] = seed_val
-    vals = series.values.astype(float)
-
-    for i in range(start_pos + period, len(vals)):
-        if np.isnan(vals[i]):
-            result[i] = result[i - 1]
-        else:
-            prev = result[i - 1]
-            if np.isnan(prev):
-                result[i] = vals[i]
-            else:
-                result[i] = alpha * vals[i] + (1.0 - alpha) * prev
-
-    return pd.Series(result, index=series.index)
+    if wilder:
+        res = ta.rma(series, length=period)
+    else:
+        res = ta.ema(series, length=period)
+    return res if res is not None else pd.Series(np.nan, index=series.index)
 
 
 # ---------------------------------------------------------------------------
@@ -81,58 +44,11 @@ def ema(series: pd.Series, period: int, *, wilder: bool = False) -> pd.Series:
 # ---------------------------------------------------------------------------
 
 def rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    """Relative Strength Index (Wilder's smoothing).
-
-    Returns values in [0, 100].  The first ``period`` entries are NaN.
-    """
+    """Relative Strength Index."""
     if period < 1 or len(close) < period + 1 or close.isna().all():
         return pd.Series(np.nan, index=close.index)
-
-    delta = close.diff()
-    gains = delta.clip(lower=0.0)
-    losses = (-delta).clip(lower=0.0)
-
-    # Find first valid diff
-    first_idx = delta.first_valid_index()
-    if first_idx is None:
-        return pd.Series(np.nan, index=close.index)
-    start_pos = close.index.get_loc(first_idx)
-
-    if len(close) - start_pos < period:
-        return pd.Series(np.nan, index=close.index)
-
-    avg_gain = gains.iloc[start_pos : start_pos + period].mean()
-    avg_loss = losses.iloc[start_pos : start_pos + period].mean()
-
-    rsi_values = np.full(len(close), np.nan)
-
-    if pd.isna(avg_gain) or pd.isna(avg_loss):
-        return pd.Series(np.nan, index=close.index)
-
-    if avg_loss == 0:
-        rsi_values[start_pos + period - 1] = 50.0 if avg_gain == 0 else 100.0
-    else:
-        rs = avg_gain / avg_loss
-        rsi_values[start_pos + period - 1] = 100.0 - 100.0 / (1.0 + rs)
-
-    gain_vals = gains.values.astype(float)
-    loss_vals = losses.values.astype(float)
-
-    for i in range(start_pos + period, len(close)):
-        g_i = gain_vals[i]
-        l_i = loss_vals[i]
-        if np.isnan(g_i) or np.isnan(l_i):
-            rsi_values[i] = rsi_values[i - 1]
-            continue
-        avg_gain = (avg_gain * (period - 1) + g_i) / period
-        avg_loss = (avg_loss * (period - 1) + l_i) / period
-        if avg_loss == 0:
-            rsi_values[i] = 50.0 if avg_gain == 0 else 100.0
-        else:
-            rs = avg_gain / avg_loss
-            rsi_values[i] = 100.0 - 100.0 / (1.0 + rs)
-
-    return pd.Series(rsi_values, index=close.index)
+    res = ta.rsi(close, length=period)
+    return res if res is not None else pd.Series(np.nan, index=close.index)
 
 
 # ---------------------------------------------------------------------------
@@ -145,35 +61,18 @@ def macd(
     slow: int = 26,
     signal_period: int = 9,
 ) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """Moving Average Convergence Divergence.
-
-    Returns:
-        (macd_line, signal_line, histogram) — three Series.
-    """
+    """Moving Average Convergence Divergence."""
+    nan_s = pd.Series(np.nan, index=close.index)
     if len(close) < slow + signal_period:
-        nan_s = pd.Series(np.nan, index=close.index)
         return nan_s.copy(), nan_s.copy(), nan_s.copy()
-
-    ema_fast = ema(close, fast)
-    ema_slow = ema(close, slow)
-    macd_line = ema_fast - ema_slow
-
-    # Signal line is EMA of MACD line — but MACD has NaN prefix, so we
-    # compute the EMA only on the valid (non-NaN) tail, then map back.
-    valid_mask = macd_line.notna()
-    macd_valid = macd_line[valid_mask].reset_index(drop=True)
-
-    if len(macd_valid) < signal_period:
-        signal_line = pd.Series(np.nan, index=close.index)
-    else:
-        signal_valid = ema(macd_valid, signal_period)
-        # Place back into full-length series
-        signal_line = pd.Series(np.nan, index=close.index)
-        valid_indices = macd_line.index[valid_mask]
-        signal_line.loc[valid_indices] = signal_valid.values
-
-    histogram = macd_line - signal_line
-
+        
+    df = ta.macd(close, fast=fast, slow=slow, signal=signal_period)
+    if df is None or df.empty:
+        return nan_s.copy(), nan_s.copy(), nan_s.copy()
+        
+    macd_line = df.iloc[:, 0]
+    histogram = df.iloc[:, 1]
+    signal_line = df.iloc[:, 2]
     return macd_line, signal_line, histogram
 
 
@@ -186,21 +85,18 @@ def bollinger_bands(
     period: int = 20,
     std_dev: float = 2.0,
 ) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """Bollinger Bands.
-
-    Returns:
-        (upper_band, middle_band, lower_band).
-    """
+    """Bollinger Bands."""
+    nan_s = pd.Series(np.nan, index=close.index)
     if period < 1 or len(close) < period:
-        nan_s = pd.Series(np.nan, index=close.index)
         return nan_s.copy(), nan_s.copy(), nan_s.copy()
-
-    middle = sma(close, period)
-    rolling_std = close.rolling(window=period, min_periods=period).std(ddof=0)
-
-    upper = middle + std_dev * rolling_std
-    lower = middle - std_dev * rolling_std
-
+        
+    df = ta.bbands(close, length=period, std=std_dev)
+    if df is None or df.empty:
+        return nan_s.copy(), nan_s.copy(), nan_s.copy()
+        
+    lower = df.iloc[:, 0]
+    middle = df.iloc[:, 1]
+    upper = df.iloc[:, 2]
     return upper, middle, lower
 
 
