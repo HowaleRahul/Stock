@@ -159,10 +159,13 @@ def run_loop():
             detector.check_for_drift()
             last_drift_check = now
             
-        # Periodic RL Retraining
+        # Periodic RL Retraining + Self-Review
         if now - last_retrain > CONFIG.get("retrain_interval_days", 7) * 86400:
-            logger.info("Running scheduled batch RL retraining...")
-            learner.batch_learn_from_journal()
+            logger.info("Running scheduled batch RL self-review...")
+            review_report = learner.full_self_review()
+            actions = review_report.get("actions_taken", [])
+            if actions:
+                logger.info(f"🧠 Self-Review applied {len(actions)} weight adjustments.")
             last_retrain = now
             
         all_trades = load_open_trades()

@@ -278,3 +278,82 @@ class ReinforcementLearner:
             ),
             "global_weights": self._state["global_weights"],
         }
+
+    # -------------------------------------------------------------------
+    # Closed-Loop: Apply JournalAnalyzer Insights
+    # -------------------------------------------------------------------
+
+    def apply_insights(self, insights: List[Dict[str, Any]]) -> List[str]:
+        """
+        Apply actionable insights from JournalAnalyzer to adjust setup weights.
+
+        For each insight:
+        - "suppress": multiply the setup's alpha by action_value (< 1.0)
+        - "boost": multiply the setup's alpha by action_value (> 1.0)
+
+        Returns a list of human-readable actions taken.
+        """
+        actions_taken = []
+        weights = self._state["weights"]
+
+        for insight in insights:
+            action = insight.get("action", "")
+            setup = insight.get("setup", "")
+            regime = insight.get("regime", "all")
+            value = insight.get("action_value", 1.0)
+            severity = insight.get("severity", "info")
+
+            if action in ("suppress", "boost") and setup and setup != "PORTFOLIO":
+                if setup in weights:
+                    target_regimes = [regime] if regime != "all" else list(weights[setup].keys())
+                    for r in target_regimes:
+                        if r in weights[setup]:
+                            old_alpha = weights[setup][r]["alpha"]
+                            weights[setup][r]["alpha"] = max(0.1, old_alpha * value)
+                            action_str = (
+                                f"[{severity.upper()}] {action.upper()} {setup} in '{r}': "
+                                f"alpha {old_alpha:.2f} → {weights[setup][r]['alpha']:.2f}"
+                            )
+                            actions_taken.append(action_str)
+                            logger.info(f"[RL] {action_str}")
+
+        if actions_taken:
+            self._update_global_weights()
+            self._state["version"] += 1
+            self._save_state()
+
+        return actions_taken
+
+    def full_self_review(self) -> Dict[str, Any]:
+        """
+        Complete self-review cycle:
+        1. Re-learn from journal (batch)
+        2. Run JournalAnalyzer
+        3. Apply insights
+        
+        Returns the full analysis report with actions taken.
+        """
+        from ml.journal_analyzer import JournalAnalyzer
+
+        # Step 1: Batch re-learn from all trades
+        n_trades = self.batch_learn_from_journal()
+
+        # Step 2: Analyze journal for meta-patterns
+        analyzer = JournalAnalyzer()
+        report = analyzer.analyze()
+
+        # Step 3: Apply insights
+        insights = report.get("insights", [])
+        actions = self.apply_insights(insights)
+
+        report["actions_taken"] = actions
+        report["trades_processed"] = n_trades
+
+        logger.info(
+            f"[RL] Self-review complete. "
+            f"Processed {n_trades} trades, generated {len(insights)} insights, "
+            f"took {len(actions)} actions."
+        )
+
+        return report
+

@@ -5,8 +5,9 @@ import BacktestUI from './pages/BacktestUI';
 import TrainingUI from './pages/TrainingUI';
 import Analytics from './pages/Analytics';
 import StrategyBuilder from './pages/StrategyBuilder';
+import AIJournal from './pages/AIJournal';
 import ErrorBoundary from './components/ErrorBoundary';
-import { LineChart, Briefcase, Activity, BrainCircuit, BarChart2, Wrench } from 'lucide-react';
+import { LineChart, Briefcase, Activity, BrainCircuit, BarChart2, Wrench, BookOpen } from 'lucide-react';
 
 const Navigation = () => {
   const location = useLocation();
@@ -18,6 +19,7 @@ const Navigation = () => {
     { path: '/backtest', label: 'Backtesting', icon: <Activity className="w-5 h-5 mr-2" /> },
     { path: '/training', label: 'Training', icon: <BrainCircuit className="w-5 h-5 mr-2" /> },
     { path: '/strategy', label: 'Strategies', icon: <Wrench className="w-5 h-5 mr-2" /> },
+    { path: '/ai-journal', label: 'AI Journal', icon: <BookOpen className="w-5 h-5 mr-2" /> },
   ];
 
   return (
@@ -64,6 +66,7 @@ function App() {
               <Route path="/backtest" element={<BacktestUI />} />
               <Route path="/training" element={<TrainingUI />} />
               <Route path="/strategy" element={<StrategyBuilder />} />
+              <Route path="/ai-journal" element={<AIJournal />} />
             </Routes>
           </main>
         </div>

@@ -9,6 +9,8 @@ from sqlalchemy import select
 
 from ml.performance_dashboard import PerformanceDashboard
 from ml.trade_logger import TradeLogger
+from ml.journal_analyzer import JournalAnalyzer
+from ml.reinforcement_learner import ReinforcementLearner
 from api.db import async_session_factory
 from models.models import Account, Trade
 from api.auth import get_api_key, rate_limiter
@@ -205,3 +207,45 @@ async def update_config(
             os.unlink(temp_path)
         
     return {"status": "success", "updated_keys": list(filtered.keys())}
+
+
+@router.get("/ai-journal")
+async def get_ai_journal():
+    """
+    Returns the AI's self-play journal: current RL weights, profitability
+    matrix, recent trade insights, and portfolio summary.
+    """
+    try:
+        analyzer = JournalAnalyzer()
+        report = analyzer.analyze()
+
+        learner = ReinforcementLearner()
+        rl_weights = learner.get_deterministic_weights()
+        diagnostics = learner.get_diagnostics()
+
+        # Get the last 20 trades for display
+        recent_exits = TradeLogger.get_recent_exits(n_days=30)
+        recent_trades = []
+        for exit_rec in recent_exits[-20:]:
+            recent_trades.append({
+                "trade_id": exit_rec.get("trade_id"),
+                "ticker": exit_rec.get("ticker"),
+                "direction": exit_rec.get("direction"),
+                "exit_reason": exit_rec.get("exit_reason"),
+                "pnl_pct": round(exit_rec.get("pnl_pct", 0) * 100, 2),
+                "bars_held": exit_rec.get("bars_held"),
+                "regime": exit_rec.get("regime_at_exit"),
+            })
+
+        return {
+            "summary": report.get("summary", {}),
+            "insights": report.get("insights", []),
+            "profitability_matrix": report.get("profitability_matrix", {}),
+            "rl_weights": rl_weights,
+            "rl_diagnostics": diagnostics,
+            "recent_trades": recent_trades,
+        }
+    except Exception as e:
+        logger.error(f"AI Journal endpoint failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate AI journal.")
+
