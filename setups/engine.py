@@ -105,4 +105,24 @@ class SetupEngine:
                         reasoning=f"Evaluation error: {str(e)}",
                     )
                 )
+                
+        # Evaluate custom strategies from file
+        import os, json
+        if os.path.exists("custom_strategies.json"):
+            try:
+                with open("custom_strategies.json", "r") as f:
+                    custom_strats = json.load(f)
+                
+                # Simplified evaluation for UI demonstration purposes
+                # In a full implementation, this would parse conditions dynamically via pandas-ta
+                for strat in custom_strats:
+                    results.append(SetupSignal(
+                        name=strat.get("name", "Custom"),
+                        signal="neutral", # Mocked as neutral unless fully implemented
+                        confidence=0.5,
+                        reasoning=f"Custom strategy loaded: {strat.get('description', '')}"
+                    ))
+            except Exception as e:
+                logger.error(f"Failed to evaluate custom strategies: {e}")
+                
         return regime_data, results

@@ -109,12 +109,14 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 from api.backtest_router import router as backtest_router
 from api.training_router import router as training_router
+from api.strategy_router import router as strategy_router
 
 # Include API routes
 app.include_router(data_router)
 app.include_router(dashboard_router)
 app.include_router(backtest_router)
 app.include_router(training_router)
+app.include_router(strategy_router)
 
 # Serve frontend static files (Phase 2 Chart UI)
 _frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")

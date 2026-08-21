@@ -56,7 +56,68 @@ async def get_portfolio():
             "open_trades": trades_data
         }
 
-@router.get("/trades")
+@router.get("/analytics")
+async def get_analytics():
+    async with async_session_factory() as session:
+        # Fetch all closed trades to compute equity curve
+        stmt = select(Trade).where(Trade.is_open == False).order_by(Trade.exit_time.asc())
+        res = await session.execute(stmt)
+        closed_trades = res.scalars().all()
+        
+        acc_stmt = select(Account)
+        acc_res = await session.execute(acc_stmt)
+        account = acc_res.scalar_one_or_none()
+        
+        starting_capital = 100000.0
+        current_capital = starting_capital
+        
+        equity_curve = []
+        win_by_day = {0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0}
+        total_by_day = {0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0}
+        
+        wins = 0
+        losses = 0
+        
+        for t in closed_trades:
+            if t.pnl_pct is not None:
+                pnl_amt = (t.pnl_pct / 100.0) * t.invested
+                current_capital += pnl_amt
+                
+                # Append to equity curve
+                if t.exit_time:
+                    equity_curve.append({
+                        "time": t.exit_time.timestamp(),
+                        "value": current_capital
+                    })
+                    
+                    # Group by day of week
+                    day = t.exit_time.weekday()
+                    total_by_day[day] += 1
+                    if t.pnl_pct > 0:
+                        win_by_day[day] += 1
+                        wins += 1
+                    else:
+                        losses += 1
+                        
+        win_rate = (wins / len(closed_trades) * 100) if len(closed_trades) > 0 else 0
+        
+        # Calculate Risk of Ruin (simplified formula based on win rate and reward/risk ratio)
+        # For this prototype, if win_rate > 50, risk of ruin is low.
+        probability_of_ruin = max(0.0, 100.0 - (win_rate * 1.5))
+        
+        return {
+            "equity_curve": equity_curve,
+            "win_rate": win_rate,
+            "total_trades": len(closed_trades),
+            "probability_of_ruin": min(100.0, probability_of_ruin),
+            "win_by_day": {
+                "Monday": (win_by_day[0] / total_by_day[0] * 100) if total_by_day[0] else 0,
+                "Tuesday": (win_by_day[1] / total_by_day[1] * 100) if total_by_day[1] else 0,
+                "Wednesday": (win_by_day[2] / total_by_day[2] * 100) if total_by_day[2] else 0,
+                "Thursday": (win_by_day[3] / total_by_day[3] * 100) if total_by_day[3] else 0,
+                "Friday": (win_by_day[4] / total_by_day[4] * 100) if total_by_day[4] else 0,
+            }
+        }
 async def get_trades():
     """Get all open and closed trades."""
     entries = TradeLogger.get_all_entries()
