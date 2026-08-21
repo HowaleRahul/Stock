@@ -1,6 +1,6 @@
 from typing import List, Optional, Any
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 
 
 class Settings(BaseSettings):
@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     api_port: int = Field(default=8000, alias="API_PORT")
     api_host: str = Field(default="127.0.0.1", alias="API_HOST")
+    api_key: Optional[SecretStr] = Field(default=None, alias="API_KEY")
 
     # Database
     database_url: str = Field(

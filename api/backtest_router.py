@@ -8,6 +8,7 @@ from starlette.concurrency import run_in_threadpool
 import pandas as pd
 
 from api.auth import get_api_key, rate_limiter
+from setups.indicators import bollinger_bands, ema, macd, rsi, sma
 
 logger = logging.getLogger("trading.api.backtest")
 
@@ -38,6 +39,46 @@ class BacktestResult(BaseModel):
     trades: list
 
 
+def _add_signal_column(df: pd.DataFrame, signal_name: str, values: pd.Series) -> pd.DataFrame:
+    """Attach a normalized {-1, 0, 1} signal column without mutating caller data."""
+    result = df.copy()
+    result[signal_name] = values.fillna(0).astype(int)
+    return result
+
+
+def _calculate_sma_crossover(df: pd.DataFrame) -> pd.DataFrame:
+    fast = sma(df["close"], 20)
+    slow = sma(df["close"], 50)
+    signal = pd.Series(0, index=df.index, dtype=int)
+    signal[(fast > slow) & (fast.shift(1) <= slow.shift(1))] = 1
+    signal[(fast < slow) & (fast.shift(1) >= slow.shift(1))] = -1
+    return _add_signal_column(df, "sma_signal", signal)
+
+
+def _calculate_rsi_divergence(df: pd.DataFrame) -> pd.DataFrame:
+    values = rsi(df["close"], 14)
+    signal = pd.Series(0, index=df.index, dtype=int)
+    signal[(values < 30) & (values.shift(1) >= 30)] = 1
+    signal[(values > 70) & (values.shift(1) <= 70)] = -1
+    return _add_signal_column(df, "rsi_signal", signal)
+
+
+def _calculate_macd_cross(df: pd.DataFrame) -> pd.DataFrame:
+    macd_line, signal_line, _ = macd(df["close"])
+    signal = pd.Series(0, index=df.index, dtype=int)
+    signal[(macd_line > signal_line) & (macd_line.shift(1) <= signal_line.shift(1))] = 1
+    signal[(macd_line < signal_line) & (macd_line.shift(1) >= signal_line.shift(1))] = -1
+    return _add_signal_column(df, "macd_signal", signal)
+
+
+def _calculate_bollinger_breakout(df: pd.DataFrame) -> pd.DataFrame:
+    upper, _, lower = bollinger_bands(df["close"], 20, 2.0)
+    signal = pd.Series(0, index=df.index, dtype=int)
+    signal[(df["close"] > upper) & (df["close"].shift(1) <= upper.shift(1))] = 1
+    signal[(df["close"] < lower) & (df["close"].shift(1) >= lower.shift(1))] = -1
+    return _add_signal_column(df, "bb_signal", signal)
+
+
 def _download_and_backtest(ticker: str, timeframe: str, setup: str) -> dict:
     """Blocking function that runs in a thread pool."""
     period = "5y" if timeframe == "1d" else "60d"
@@ -53,16 +94,11 @@ def _download_and_backtest(ticker: str, timeframe: str, setup: str) -> dict:
         'Close': 'close', 'Volume': 'volume'
     }, inplace=True)
 
-    from setups.indicators import (
-        calculate_sma_crossover, calculate_rsi_divergence,
-        calculate_macd_cross, calculate_bollinger_breakout
-    )
-
     setup_map = {
-        "sma_crossover": (calculate_sma_crossover, "sma_signal"),
-        "rsi_divergence": (calculate_rsi_divergence, "rsi_signal"),
-        "macd_cross": (calculate_macd_cross, "macd_signal"),
-        "bollinger_breakout": (calculate_bollinger_breakout, "bb_signal"),
+        "sma_crossover": (_calculate_sma_crossover, "sma_signal"),
+        "rsi_divergence": (_calculate_rsi_divergence, "rsi_signal"),
+        "macd_cross": (_calculate_macd_cross, "macd_signal"),
+        "bollinger_breakout": (_calculate_bollinger_breakout, "bb_signal"),
     }
 
     if setup not in setup_map:

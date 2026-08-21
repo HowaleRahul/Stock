@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { createChart, ColorType } from 'lightweight-charts';
-import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts';
+import { createChart, ColorType, LineSeries } from 'lightweight-charts';
+import type { Time } from 'lightweight-charts';
 
 const Analytics = () => {
   const [data, setData] = useState<any>(null);
@@ -27,10 +27,6 @@ const Analytics = () => {
 
   useEffect(() => {
     if (!loading && data && chartContainerRef.current) {
-        if (chartRef.current) {
-            chartRef.current.remove();
-        }
-
         const chart = createChart(chartContainerRef.current, {
             layout: {
                 background: { type: ColorType.Solid, color: 'transparent' },
@@ -44,7 +40,7 @@ const Analytics = () => {
             height: 400,
         });
 
-        const lineSeries = chart.addLineSeries({
+        const lineSeries = chart.addSeries(LineSeries, {
             color: '#2962FF',
             lineWidth: 2,
         });
@@ -60,16 +56,18 @@ const Analytics = () => {
         chartRef.current = chart;
 
         const handleResize = () => {
-            if (chartContainerRef.current && chartRef.current) {
-                chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
+          if (chartContainerRef.current) {
+            chart.applyOptions({ width: chartContainerRef.current.clientWidth });
             }
         };
-        window.addEventListener('resize', handleResize);
+        const resizeObserver = new ResizeObserver(handleResize);
+        resizeObserver.observe(chartContainerRef.current);
+        handleResize();
         
         return () => {
-            window.removeEventListener('resize', handleResize);
-            if (chartRef.current) {
-                chartRef.current.remove();
+          resizeObserver.disconnect();
+          chart.remove();
+          if (chartRef.current === chart) {
                 chartRef.current = null;
             }
         };

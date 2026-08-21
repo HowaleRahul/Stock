@@ -44,7 +44,8 @@ async def get_api_key(api_key: str = Depends(api_key_header)):
     provide one; silently disabling authentication there exposes every
     state-changing endpoint.
     """
-    expected_api_key = os.getenv("API_KEY")
+    configured_key = settings.api_key.get_secret_value() if settings.api_key else None
+    expected_api_key = configured_key or os.getenv("API_KEY")
     if not expected_api_key:
         if settings.environment.lower() != "development":
             raise HTTPException(

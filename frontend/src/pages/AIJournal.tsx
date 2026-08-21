@@ -17,7 +17,7 @@ interface RecentTrade {
   ticker: string;
   direction: string;
   exit_reason: string;
-  pnl_pct: number;
+  pnl_pct: number | null;
   bars_held: number;
   regime: string;
 }
@@ -49,22 +49,31 @@ const AIJournal = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  const fetchJournal = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await axios.get('/api/v1/dashboard/ai-journal');
+      setData(res.data);
+    } catch (err: any) {
+      const status = err?.response?.status;
+      setError(status ? `AI Journal is unavailable (HTTP ${status}).` : 'Backend is offline. Start the API server and retry.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const fetchJournal = async () => {
-      try {
-        const res = await axios.get('/api/v1/dashboard/ai-journal');
-        setData(res.data);
-      } catch (err: any) {
-        setError(err?.response?.data?.detail || 'Failed to load AI Journal.');
-      } finally {
-        setLoading(false);
-      }
-    };
     fetchJournal();
   }, []);
 
   if (loading) return <div className="text-gray-400 p-8">Loading AI Journal...</div>;
-  if (error) return <div className="text-red-400 p-8">{error}</div>;
+  if (error) return (
+    <div className="state-panel" role="alert">
+      <strong>{error}</strong>
+      <button className="retry-button" onClick={fetchJournal}>Retry connection</button>
+    </div>
+  );
   if (!data) return <div className="text-gray-400 p-8">No data available.</div>;
 
   const { summary, insights, profitability_matrix, rl_weights, rl_diagnostics, recent_trades } = data;
@@ -223,8 +232,8 @@ const AIJournal = () => {
                       {trade.direction}
                     </td>
                     <td className="p-2 text-gray-300 text-xs">{trade.exit_reason}</td>
-                    <td className={`p-2 text-right font-bold ${trade.pnl_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {trade.pnl_pct >= 0 ? '+' : ''}{trade.pnl_pct.toFixed(2)}%
+                    <td className={`p-2 text-right font-bold ${trade.pnl_pct == null ? 'text-gray-400' : trade.pnl_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {trade.pnl_pct == null ? '—' : `${trade.pnl_pct >= 0 ? '+' : ''}${trade.pnl_pct.toFixed(2)}%`}
                     </td>
                     <td className="p-2 text-right text-gray-300">{trade.bars_held}</td>
                     <td className="p-2 text-gray-400 text-xs">{trade.regime}</td>

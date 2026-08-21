@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { Play, Square, Terminal, Activity } from 'lucide-react';
+import { Play, Square, Terminal, Activity, BrainCircuit, Clock3, Database, RefreshCw } from 'lucide-react';
 
 const TrainingUI = () => {
   const [isTraining, setIsTraining] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [actionPending, setActionPending] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   const fetchStatus = async () => {
@@ -13,9 +14,9 @@ const TrainingUI = () => {
       const res = await axios.get('/api/v1/training/status');
       setIsTraining(res.data.is_training);
       setLogs(res.data.logs);
-    } catch (err) {
-      console.error("Failed to fetch training status:", err);
-      setError("Training status is unavailable.");
+      setError(null);
+    } catch {
+      setError("Training service is offline. Start the API server and retry.");
     }
   };
 
@@ -31,96 +32,83 @@ const TrainingUI = () => {
 
   const handleStart = async () => {
     try {
+      setActionPending(true);
+      setError(null);
       await axios.post('/api/v1/training/start');
-      fetchStatus();
-    } catch (err) {
-      console.error(err);
+      await fetchStatus();
+    } catch {
       setError("Training could not be started.");
+    } finally {
+      setActionPending(false);
     }
   };
 
   const handleStop = async () => {
     try {
+      setActionPending(true);
+      setError(null);
       await axios.post('/api/v1/training/stop');
-      fetchStatus();
-    } catch (err) {
-      console.error(err);
+      await fetchStatus();
+    } catch {
       setError("Training could not be stopped.");
+    } finally {
+      setActionPending(false);
     }
   };
 
+  const latestLog = logs[logs.length - 1] || 'No training events recorded yet.';
+
   return (
-    <div className="space-y-6">
-      {error && <div role="alert" className="text-red-400">{error}</div>}
-      <div className="bg-gray-900 p-6 rounded-lg border border-gray-800 flex justify-between items-center">
-        <div>
-          <h2 className="text-2xl font-bold text-white flex items-center">
-            <Activity className="w-6 h-6 mr-2 text-blue-400" />
-            AI Training Engine
-          </h2>
-          <p className="text-gray-400 mt-1 text-sm">
-            Continuous reinforcement learning via AlphaZero mode. 
-            The brain incrementally learns by playing millions of simulated trades.
-          </p>
-        </div>
-        
-        <div className="flex gap-4">
+    <div className="training-page">
+      {error && <div className="state-panel compact" role="alert"><strong>{error}</strong><button className="retry-button" onClick={fetchStatus}>Retry connection</button></div>}
+      <div className="page-heading training-heading">
+        <div><span className="eyebrow">Model lab / 05</span><h1>AI Training Engine</h1><p>Incremental learning from simulated market outcomes and new observations.</p></div>
+        <div className={`training-state ${isTraining ? 'running' : ''}`}><span className="state-dot" /> {isTraining ? 'RUNNING' : 'IDLE'}</div>
+      </div>
+      <section className="training-command-bar">
+        <div className="training-command-copy"><div className="training-icon"><BrainCircuit /></div><div><span className="eyebrow">Continuous trainer</span><h2>{isTraining ? 'Training cycle in progress' : 'Ready for a new cycle'}</h2><p>{isTraining ? 'The model is downloading data, generating features, and updating its checkpoint.' : 'Start a run when the market data service and model workspace are ready.'}</p></div></div>
+        <div className="training-actions">
           <button 
             onClick={handleStart}
-            disabled={isTraining}
-            className={`flex items-center px-6 py-2 rounded font-medium transition-colors ${
-              isTraining 
-                ? 'bg-gray-800 text-gray-500 cursor-not-allowed' 
-                : 'bg-emerald-600 hover:bg-emerald-700 text-white'
-            }`}
+            disabled={isTraining || actionPending}
+            className="training-start"
           >
-            <Play className="w-4 h-4 mr-2" /> Start Training
+            <Play /> {actionPending ? 'Working...' : 'Start training'}
           </button>
           <button 
             onClick={handleStop}
-            disabled={!isTraining}
-            className={`flex items-center px-6 py-2 rounded font-medium transition-colors ${
-              !isTraining 
-                ? 'bg-gray-800 text-gray-500 cursor-not-allowed' 
-                : 'bg-red-600 hover:bg-red-700 text-white'
-            }`}
+            disabled={!isTraining || actionPending}
+            className="training-stop"
           >
-            <Square className="w-4 h-4 mr-2" /> Stop
+            <Square /> Stop run
           </button>
         </div>
+      </section>
+
+      <div className="training-metrics">
+        <div className="training-metric"><Activity /><div><span>Engine status</span><strong>{isTraining ? 'RUNNING' : 'STOPPED'}</strong></div></div>
+        <div className="training-metric"><Database /><div><span>Log buffer</span><strong>{logs.length} <small>/ 200 events</small></strong></div></div>
+        <div className="training-metric"><Clock3 /><div><span>Refresh cadence</span><strong>2 sec</strong></div></div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-gray-900 p-4 rounded-lg border border-gray-800">
-          <div className="text-gray-400 text-sm">Engine Status</div>
-          <div className="flex items-center mt-1">
-            <div className={`w-3 h-3 rounded-full mr-2 ${isTraining ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`}></div>
-            <span className="font-bold text-xl">{isTraining ? 'RUNNING' : 'STOPPED'}</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-black p-4 rounded-lg border border-gray-800 font-mono text-sm relative">
-        <div className="flex items-center text-gray-500 border-b border-gray-800 pb-2 mb-2">
-          <Terminal className="w-4 h-4 mr-2" />
-          Training Console Output
-        </div>
-        
-        <div className="h-96 overflow-y-auto space-y-1 scrollbar-thin scrollbar-thumb-gray-700">
+      <section className="training-console">
+        <div className="console-heading"><div><span className="eyebrow">Run telemetry</span><h2><Terminal /> Training console</h2></div><button className="console-refresh" onClick={fetchStatus} aria-label="Refresh training status" title="Refresh status"><RefreshCw /></button></div>
+        <div className="latest-event"><span>Latest event</span><strong>{latestLog}</strong></div>
+        <div className="console-output" aria-live="polite">
           {logs.length === 0 ? (
-            <div className="text-gray-600 italic">No logs available. Click Start Training.</div>
+            <div className="console-empty">No logs available. Start a training cycle to see model activity.</div>
           ) : (
             logs.map((log, idx) => {
               // Syntax highlight logs slightly
-              let color = "text-gray-300";
-              if (log.includes("CRITICAL") || log.includes("Error") || log.includes("🛑")) color = "text-red-400";
-              else if (log.includes("Warning") || log.includes("Skipping")) color = "text-yellow-400";
-              else if (log.includes("Saved")) color = "text-emerald-400";
-              else if (log.includes("[CYCLE")) color = "text-blue-400 font-bold";
+              let color = "log-default";
+              if (log.includes("CRITICAL") || log.includes("Error") || log.includes("🛑")) color = "log-error";
+              else if (log.includes("Warning") || log.includes("Skipping")) color = "log-warning";
+              else if (log.includes("Saved")) color = "log-success";
+              else if (log.includes("[CYCLE")) color = "log-cycle";
               
               return (
-                <div key={idx} className={`${color}`}>
-                  <span className="text-gray-600 mr-2">{new Date().toLocaleTimeString()}</span>
+                <div key={`${idx}-${log}`} className={color}>
+                  <span className="log-index">{String(idx + 1).padStart(3, '0')}</span>
                   {log}
                 </div>
               );
@@ -128,7 +116,7 @@ const TrainingUI = () => {
           )}
           <div ref={logsEndRef} />
         </div>
-      </div>
+      </section>
     </div>
   );
 };

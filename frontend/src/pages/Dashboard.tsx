@@ -1,6 +1,7 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import axios from 'axios';
 import ChartWidget from '../components/ChartWidget';
+import { ArrowUpRight, RefreshCw, Search } from 'lucide-react';
 
 const Dashboard = () => {
   const [ticker, setTicker] = useState('^NSEI');
@@ -49,20 +50,57 @@ const Dashboard = () => {
       console.error(err);
       setError(err.response?.data?.detail || 'Failed to load data');
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted && abortRef.current === controller) {
+        setLoading(false);
+      }
     }
+  }, [ticker, timeframe]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setLoading(true);
+    setError('');
+
+    axios.get(`/api/v1/indicators/${encodeURIComponent(ticker)}`, {
+      params: { timeframe, limit: 500 },
+      signal: controller.signal,
+    }).then(async (res) => {
+      setChartData((res.data.candles || []).map((row: any) => ({
+        time: row.time, open: row.open, high: row.high, low: row.low, close: row.close,
+      })));
+      const signalsRes = await axios.get(`/api/v1/setups/${encodeURIComponent(ticker)}`, {
+        params: { timeframe }, signal: controller.signal,
+      });
+      setSignals(signalsRes.data.setups || []);
+    }).catch((err: any) => {
+      if (!axios.isCancel(err)) setError(err.response?.data?.detail || 'Failed to load data');
+    }).finally(() => {
+      if (!controller.signal.aborted && abortRef.current === controller) setLoading(false);
+    });
+
+    return () => controller.abort();
   }, [ticker, timeframe]);
 
   const handleTimeframeChange = (tf: string) => {
     setTimeframe(tf);
-    loadData(tf);
   };
 
   return (
-    <div className="flex gap-6 h-[calc(100vh-100px)]">
-      <div className="flex-grow flex flex-col gap-4">
-        <div className="flex justify-between items-center bg-gray-900 p-4 rounded-lg border border-gray-800">
-            <div className="flex gap-4">
+    <div className="dashboard-page">
+      <div className="page-heading">
+        <div>
+          <span className="eyebrow">Decision surface / 01</span>
+          <h1>Market pulse</h1>
+          <p>Read the tape, inspect the active setups, and decide what deserves attention.</p>
+        </div>
+        <div className="heading-note"><span className="live-dot" /> Data refreshes on demand</div>
+      </div>
+      <div className="dashboard-grid">
+      <div className="chart-column">
+        <div className="dashboard-toolbar">
+            <div className="ticker-field">
+                <Search aria-hidden="true" />
                 <label htmlFor="ticker-input" className="sr-only">Ticker Symbol</label>
                 <input
                     id="ticker-input"
@@ -73,61 +111,66 @@ const Dashboard = () => {
                     onKeyDown={e => e.key === 'Enter' && loadData()}
                     placeholder="Enter ticker..."
                     aria-label="Ticker symbol"
-                    className="bg-gray-800 border border-gray-700 rounded px-3 py-1 text-white font-bold"
+                    className="ticker-input"
                 />
+                  <span className="exchange-tag">NSE</span>
             </div>
-            <div className="flex gap-2 bg-gray-800 p-1 rounded-lg border border-gray-700" role="tablist" aria-label="Timeframe selector">
+                <div className="timeframe-tabs" role="tablist" aria-label="Timeframe selector">
                 {['1h', '1d', '1wk'].map(tf => (
                     <button
                         key={tf}
                         role="tab"
                         aria-selected={timeframe === tf}
                         onClick={() => handleTimeframeChange(tf)}
-                        className={`px-3 py-1 rounded ${timeframe === tf ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                        className={`timeframe-tab ${timeframe === tf ? 'active' : ''}`}
                     >
                         {tf.toUpperCase()}
                     </button>
                 ))}
             </div>
+              <button className="icon-button" onClick={() => loadData()} aria-label="Refresh market data" title="Refresh market data"><RefreshCw className={loading ? 'spin' : ''} /></button>
         </div>
 
-        <div className="flex-grow bg-gray-900 rounded-lg border border-gray-800 relative">
+            <div className="chart-panel">
+              <div className="chart-panel-heading"><div><span className="eyebrow">NIFTY 50 / NSE</span><h2>{ticker} <ArrowUpRight aria-hidden="true" /></h2></div><span className="chart-live">● LIVE FEED</span></div>
             {loading && (
-                <div className="absolute inset-0 z-10 flex items-center justify-center bg-gray-900/50 rounded-lg">
-                    <div className="text-blue-400 animate-pulse" role="status">Loading Chart Data...</div>
+                <div className="chart-state" role="status">
+                  <div className="loader-line" /> Loading market data...
                 </div>
             )}
             {error && (
-                <div className="absolute inset-0 z-10 flex items-center justify-center bg-gray-900/80 rounded-lg">
-                    <div className="text-red-400">{error}</div>
+                <div className="chart-state error" role="alert">
+                  <div>{error}</div>
                 </div>
             )}
             {chartData.length > 0 && <ChartWidget data={chartData} height={600} />}
+              {!loading && !error && chartData.length === 0 && <div className="chart-state">Enter a ticker and load data to begin.</div>}
         </div>
       </div>
 
-      <div className="w-80 bg-gray-900 rounded-lg border border-gray-800 p-4 overflow-y-auto">
-        <h2 className="text-xl font-bold mb-4 border-b border-gray-800 pb-2">Setup Signals</h2>
-        <div className="space-y-4">
+            <aside className="signals-panel">
+            <div className="signals-heading"><div><span className="eyebrow">AI readout</span><h2>Setup signals</h2></div><span className="signal-count">{signals.length.toString().padStart(2, '0')}</span></div>
+            <div className="signals-list">
             {signals.map((setup, idx) => (
-                <div key={idx} className="bg-gray-800 p-3 rounded border border-gray-700">
-                    <div className="flex justify-between items-center mb-2">
-                        <span className="font-semibold text-gray-200">{(setup.name || '').replace(/_/g, ' ').toUpperCase()}</span>
-                        <span className={`px-2 py-1 rounded text-xs font-bold ${
+                <div key={idx} className="signal-card">
+                  <div className="signal-card-top">
+                    <span className="signal-name">{(setup.name || '').replace(/_/g, ' ').toUpperCase()}</span>
+                    <span className={`signal-pill ${
                             setup.signal === 'bullish' ? 'bg-emerald-900 text-emerald-400' :
                             setup.signal === 'bearish' ? 'bg-red-900 text-red-400' : 'bg-gray-700 text-gray-400'
                         }`}>
                             {setup.signal === 'bullish' ? 'BULLISH' : setup.signal === 'bearish' ? 'BEARISH' : 'NEUTRAL'}
                         </span>
                     </div>
-                    {setup.reasoning && <p className="text-sm text-gray-400">{setup.reasoning}</p>}
+                    {setup.reasoning && <p className="signal-reasoning">{setup.reasoning}</p>}
                 </div>
             ))}
             {signals.length === 0 && !loading && (
-                <div className="text-gray-500 text-center py-4">No active setups on this timeframe.</div>
+                  <div className="empty-signal">No active setups on this timeframe.</div>
             )}
         </div>
-      </div>
+              </aside>
+              </div>
     </div>
   );
 };

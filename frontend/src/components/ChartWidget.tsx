@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { createChart } from 'lightweight-charts';
+import { CandlestickSeries, createChart, createSeriesMarkers } from 'lightweight-charts';
 import type { Time } from 'lightweight-charts';
 
 interface ChartWidgetProps {
@@ -12,6 +12,7 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<any>(null);
   const seriesRef = useRef<any>(null);
+  const markersRef = useRef<any>(null);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -19,29 +20,29 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
     const chart = createChart(chartContainerRef.current, {
       height,
       layout: {
-        background: { color: '#131722' },
-        textColor: '#d1d4dc',
+        background: { color: '#fffdfa' },
+        textColor: '#68757a',
       },
       grid: {
-        vertLines: { color: '#1e222d' },
-        horzLines: { color: '#1e222d' },
+        vertLines: { color: '#eeeae1' },
+        horzLines: { color: '#eeeae1' },
       },
-      timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-      }
+      rightPriceScale: { borderColor: '#dfdcd3' },
+      timeScale: { borderColor: '#dfdcd3' },
+      localization: { priceFormatter: (price: number) => price.toLocaleString('en-IN', { maximumFractionDigits: 2 }) },
     });
 
-    const candleSeries = chart.addCandlestickSeries({
-      upColor: '#26a69a',
-      downColor: '#ef5350',
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: '#4a9b70',
+      downColor: '#e06a57',
       borderVisible: false,
-      wickUpColor: '#26a69a',
-      wickDownColor: '#ef5350',
+      wickUpColor: '#4a9b70',
+      wickDownColor: '#e06a57',
     });
 
     chartRef.current = chart;
     seriesRef.current = candleSeries;
+    markersRef.current = createSeriesMarkers(candleSeries, []);
 
     const handleResize = () => {
       if (chartContainerRef.current) {
@@ -49,13 +50,17 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
       }
     };
 
-    window.addEventListener('resize', handleResize);
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(chartContainerRef.current);
+    handleResize();
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
+      markersRef.current?.detach();
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
+      markersRef.current = null;
     };
   }, [height]);
 
@@ -63,13 +68,14 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
     if (seriesRef.current && data.length > 0) {
       // Format data for lightweight-charts
       const formattedData = data.map(d => {
-        const time = (new Date(d.time).getTime() / 1000) as Time;
+        const parsedTime = new Date(d.time).getTime();
+        const time = (parsedTime / 1000) as Time;
         return {
           time,
-          open: d.open,
-          high: d.high,
-          low: d.low,
-          close: d.close,
+          open: Number(d.open),
+          high: Number(d.high),
+          low: Number(d.low),
+          close: Number(d.close),
         };
       });
       // Sort and remove duplicates based on time
@@ -107,9 +113,9 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
         
         // Sort markers by time
         markers.sort((a, b) => (a.time as number) - (b.time as number));
-        seriesRef.current.setMarkers(markers);
+        markersRef.current?.setMarkers(markers);
       } else {
-        seriesRef.current.setMarkers([]);
+        markersRef.current?.setMarkers([]);
       }
     }
   }, [data, trades]);

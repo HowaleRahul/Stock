@@ -29,7 +29,7 @@ def generate_features(df: pd.DataFrame, ticker: str) -> Tuple[pd.DataFrame, pd.D
         window_df = df.iloc[:i+1]
         
         # Evaluate setups on data up to index i ONLY
-        regime, setups = engine.evaluate_all(window_df, ticker=ticker)
+        regime, setups = engine.evaluate_with_regime(window_df, ticker=ticker)
         
         feat_dict = {}
         r_val = 0

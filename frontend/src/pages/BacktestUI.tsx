@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import axios from 'axios';
-import ChartWidget from '../components/ChartWidget';
 
 const BacktestUI = () => {
   const [ticker, setTicker] = useState('^NSEI');
@@ -111,8 +110,34 @@ const BacktestUI = () => {
 
           {results.trades.length > 0 && (
             <div className="bg-gray-900 p-4 rounded-lg border border-gray-800">
-              <h3 className="text-lg font-medium mb-4">Trade Markers on Chart</h3>
-              <ChartWidget data={[]} trades={results.trades} height={500} />
+              <h3 className="text-lg font-medium mb-4">Trade Results</h3>
+              <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
+                <table className="w-full text-sm text-left">
+                  <caption className="sr-only">Backtest trade results</caption>
+                  <thead className="sticky top-0 bg-gray-900 text-gray-400">
+                    <tr>
+                      <th scope="col" className="p-3">Entry</th>
+                      <th scope="col" className="p-3">Exit</th>
+                      <th scope="col" className="p-3">Direction</th>
+                      <th scope="col" className="p-3 text-right">Entry Price</th>
+                      <th scope="col" className="p-3 text-right">Exit Price</th>
+                      <th scope="col" className="p-3 text-right">P&L</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800">
+                    {results.trades.map((trade: any, idx: number) => (
+                      <tr key={`${trade.entry_time}-${trade.exit_time}-${idx}`}>
+                        <td className="p-3 text-gray-400 whitespace-nowrap">{trade.entry_time}</td>
+                        <td className="p-3 text-gray-400 whitespace-nowrap">{trade.exit_time}</td>
+                        <td className={`p-3 font-semibold ${trade.direction === 'bullish' ? 'text-emerald-400' : 'text-red-400'}`}>{trade.direction}</td>
+                        <td className="p-3 text-right">{Number(trade.entry_price).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                        <td className="p-3 text-right">{Number(trade.exit_price).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
+                        <td className={`p-3 text-right font-semibold ${trade.pnl_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{trade.pnl_pct >= 0 ? '+' : ''}{Number(trade.pnl_pct).toFixed(2)}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </>

@@ -311,18 +311,22 @@ def run_loop():
         save_trades(updated_trades)
 
         # --- Drawdown Check (Kill-Switch) ---
-        if account['capital'] <= account['peak_capital'] * 0.90:
+        max_drawdown = float(CONFIG.get('max_portfolio_drawdown_pct', 0.10))
+        if account['capital'] <= account['peak_capital'] * (1 - max_drawdown):
             account['status'] = 'SUSPENDED'
             TradeLogger.log_kill_switch(
-                reason=f"{CONFIG.get('max_portfolio_drawdown_pct', 0.10) * 100}% PORTFOLIO DRAWDOWN REACHED",
+            reason=f"{max_drawdown * 100}% PORTFOLIO DRAWDOWN REACHED",
                 capital=account['capital'],
                 peak_capital=account['peak_capital'],
                 weekly_pnl=0.0,  # Not strictly tracked here, using total drawdown
                 config_version=CONFIG.get("version", "v1.0")
             )
             
-            notifier.send_entry_alert(new_trade, is_live=False)
-            logger.error("🚨 EMERGENCY STOP: 10% PORTFOLIO DRAWDOWN REACHED!")
+            notifier.send_system_alert(
+                f"Portfolio drawdown reached {max_drawdown * 100:.2f}%. Trading suspended.",
+                level="CRITICAL",
+            )
+            logger.error(f"🚨 EMERGENCY STOP: {max_drawdown * 100:.2f}% PORTFOLIO DRAWDOWN REACHED!")
 
         save_account(account)
 
@@ -342,7 +346,7 @@ def run_loop():
             if df is None:
                 continue
 
-            regime, setups = engine.evaluate_all(df, ticker)
+            regime, setups = engine.evaluate_with_regime(df, ticker)
             regime_str = regime.get('regime', 'unknown')
             
             # Fetch RL weights and pass to brain

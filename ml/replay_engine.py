@@ -182,6 +182,10 @@ class ReplayEngine:
         Returns:
             Dict with replay results and statistics.
         """
+        # A replay run is an isolated experiment even when an engine instance
+        # is reused by a caller or test harness.
+        self.broker = VirtualBroker(starting_capital=self.broker.starting_capital)
+        self._trade_counter = 0
         self._log(f"📥 Downloading {ticker} ({period}, {timeframe})...")
 
         df = yf.download(ticker, period=period, interval=timeframe, progress=False)
@@ -275,8 +279,6 @@ class ReplayEngine:
             if trade.get("underlying_ticker", trade["ticker"]) != ticker:
                 continue
 
-            # Update trailing stop
-            trade = RiskEngine.update_trailing_stop(trade, bar_high, bar_low)
             active_sl = trade.get("trailing_stop", trade["sl"])
 
             # Increment bars held
@@ -343,6 +345,11 @@ class ReplayEngine:
                         f"Capital: ₹{self.broker.capital:,.0f} | "
                         f"Trade #{self._trade_counter}"
                     )
+            else:
+                # OHLC data cannot establish intrabar ordering. Apply a new
+                # trailing stop only after this bar has been evaluated so it
+                # cannot be hit by the same bar that created it.
+                RiskEngine.update_trailing_stop(trade, bar_high, bar_low)
 
     def _check_entry(
         self,
@@ -358,7 +365,7 @@ class ReplayEngine:
         eval_df = visible_df.iloc[-300:]
 
         try:
-            regime, setups = self.engine.evaluate_all(eval_df, ticker)
+            regime, setups = self.engine.evaluate_with_regime(eval_df, ticker)
         except Exception as e:
             return
 
@@ -459,8 +466,7 @@ class ReplayEngine:
         """The AI reviews its own trade journal and updates its beliefs."""
         self._log(f"🧠 Self-Review triggered at trade #{self._trade_counter}...")
 
-        analyzer = JournalAnalyzer()
-        report = analyzer.analyze()
+        report = self.learner.full_self_review()
 
         insights = report.get("insights", [])
         summary = report.get("summary", {})
@@ -469,9 +475,6 @@ class ReplayEngine:
             self._log(f"   Found {len(insights)} insight(s):")
             for insight in insights[:5]:  # Log top 5
                 self._log(f"   → [{insight['severity']}] {insight['recommendation']}")
-
-        # Apply insights to RL learner
-        self.learner.batch_learn_from_journal()
 
         win_rate = summary.get("win_rate", 0)
         sharpe = summary.get("sharpe_ratio", 0)

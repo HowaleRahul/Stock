@@ -7,6 +7,7 @@ def start_services():
     print("🚀 Starting AI Algorithmic Trading System...")
     
     processes = []
+    reported_exits = set()
     
     try:
         # 1. Start the FastAPI Backend
@@ -28,11 +29,11 @@ def start_services():
         # 3. Start the React Frontend (Vite)
         print("[3/3] Starting React Dashboard...")
         # Use shell=True for npm on Windows
-        web_dir = os.path.join(os.getcwd(), "web")
+        frontend_dir = os.path.join(os.getcwd(), "frontend")
         npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
         ui_proc = subprocess.Popen(
             [npm_cmd, "run", "dev"],
-            cwd=web_dir
+            cwd=frontend_dir
         )
         processes.append(("React Dashboard", ui_proc))
         
@@ -44,7 +45,9 @@ def start_services():
             time.sleep(1)
             for name, proc in processes:
                 if proc.poll() is not None:
-                    print(f"⚠️ Warning: {name} exited with code {proc.returncode}")
+                    if name not in reported_exits:
+                        print(f"⚠️ Warning: {name} exited with code {proc.returncode}")
+                        reported_exits.add(name)
                     
     except KeyboardInterrupt:
         print("\n🛑 Shutting down all services...")

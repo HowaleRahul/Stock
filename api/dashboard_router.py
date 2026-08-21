@@ -97,6 +97,13 @@ async def get_analytics():
         closed_trades = res.scalars().all()
         
         starting_capital = 100000.0
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                starting_capital = float(config.get("capital", starting_capital))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                logger.warning("Unable to read configured starting capital; using fallback.")
         current_capital = starting_capital
         
         equity_curve = []
@@ -125,13 +132,14 @@ async def get_analytics():
                     else:
                         losses += 1
                         
-        win_rate = (wins / len(closed_trades) * 100) if len(closed_trades) > 0 else 0
+        completed_trades = wins + losses
+        win_rate = (wins / completed_trades * 100) if completed_trades > 0 else 0
         probability_of_ruin = max(0.0, 100.0 - (win_rate * 1.5))
         
         return {
             "equity_curve": equity_curve,
             "win_rate": win_rate,
-            "total_trades": len(closed_trades),
+            "total_trades": completed_trades,
             "probability_of_ruin": min(100.0, probability_of_ruin),
             "win_by_day": {
                 "Monday": (win_by_day[0] / total_by_day[0] * 100) if total_by_day[0] else 0,
@@ -232,7 +240,7 @@ async def get_ai_journal():
                 "ticker": exit_rec.get("ticker"),
                 "direction": exit_rec.get("direction"),
                 "exit_reason": exit_rec.get("exit_reason"),
-                "pnl_pct": round(exit_rec.get("pnl_pct", 0) * 100, 2),
+                "pnl_pct": round(exit_rec.get("pnl_pct", 0) * 100, 2) if exit_rec.get("pnl_pct") is not None else None,
                 "bars_held": exit_rec.get("bars_held"),
                 "regime": exit_rec.get("regime_at_exit"),
             })
