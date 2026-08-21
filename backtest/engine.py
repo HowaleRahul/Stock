@@ -19,8 +19,10 @@ class Backtester:
         self.threshold = threshold
         
         # Risk management per user specification
-        self.sl_pct = 0.04 # 4% stop loss
-        self.tp_pct = 0.10 # 10% take profit
+        self.sl_pct = 0.04 # Legacy fixed-percentage execution stop
+        self.tp_pct = 0.10 # Legacy fixed-percentage execution target
+        self.sl_atr_mult = 1.0
+        self.tp_atr_mult = 2.0
 
     def run_walk_forward(self, X: pd.DataFrame, df: pd.DataFrame, train_size: int = 120, test_size: int = 20) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         logger.info(f"Starting Real-World walk-forward validation. Total bars: {len(X)}")
@@ -43,7 +45,12 @@ class Backtester:
         total_trades = 0
         
         # Pre-calculate Triple-Barrier Labels for the entire dataframe to use in training windows
-        triple_barrier_labels = generate_triple_barrier_labels(df, tp_pct=self.tp_pct, sl_pct=self.sl_pct, max_hold_bars=20)
+        triple_barrier_labels = generate_triple_barrier_labels(
+            df,
+            tp_atr_mult=self.tp_atr_mult,
+            sl_atr_mult=self.sl_atr_mult,
+            max_hold_bars=20,
+        )
         
         for start in range(0, len(X) - train_size - test_size, test_size):
             train_end = start + train_size

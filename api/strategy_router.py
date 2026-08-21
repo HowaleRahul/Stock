@@ -8,7 +8,11 @@ import tempfile
 
 from api.auth import get_api_key, rate_limiter
 
-router = APIRouter(prefix="/api/v1/strategy", tags=["Strategy Builder"])
+router = APIRouter(
+    prefix="/api/v1/strategy",
+    tags=["Strategy Builder"],
+    dependencies=[Depends(get_api_key)],
+)
 
 STRATEGY_FILE = "custom_strategies.json"
 MAX_STRATEGIES = 50

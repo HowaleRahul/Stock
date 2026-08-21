@@ -6,6 +6,7 @@ import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts';
 const Analytics = () => {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<any>(null);
 
@@ -15,7 +16,8 @@ const Analytics = () => {
         const res = await axios.get('/api/v1/dashboard/analytics');
         setData(res.data);
       } catch (err) {
-        console.error(err);
+        console.error('Failed to load analytics:', err);
+        setError('Analytics are unavailable. Please try again later.');
       } finally {
         setLoading(false);
       }
@@ -75,6 +77,7 @@ const Analytics = () => {
   }, [data, loading]);
 
   if (loading) return <div className="text-gray-400">Loading Analytics...</div>;
+  if (error || !data) return <div role="alert" className="text-red-400">{error || 'Analytics are unavailable.'}</div>;
 
   return (
     <div className="space-y-6">

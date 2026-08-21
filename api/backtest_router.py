@@ -7,11 +7,15 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 import pandas as pd
 
-from api.auth import rate_limiter
+from api.auth import get_api_key, rate_limiter
 
 logger = logging.getLogger("trading.api.backtest")
 
-router = APIRouter(prefix="/api/v1/backtest", tags=["Backtest"])
+router = APIRouter(
+    prefix="/api/v1/backtest",
+    tags=["Backtest"],
+    dependencies=[Depends(get_api_key)],
+)
 
 
 def _validate_ticker(ticker: str) -> str:

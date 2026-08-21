@@ -46,7 +46,7 @@ async def get_api_key(api_key: str = Depends(api_key_header)):
     """
     expected_api_key = os.getenv("API_KEY")
     if not expected_api_key:
-        if settings.environment.lower() == "production":
+        if settings.environment.lower() != "development":
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="API authentication is not configured."

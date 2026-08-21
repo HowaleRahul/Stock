@@ -26,10 +26,15 @@ from setups.indicators import ema, rsi, macd, bollinger_bands, find_support_resi
 from api.config import settings
 from api.auth import rate_limiter, get_api_key
 from ml.ensemble import EnsembleModel
+from ml.assets import classify_ticker
 
 logger = logging.getLogger("trading.api.router")
 
-router = APIRouter(prefix="/api/v1", tags=["Data Pipeline & Watchlist"])
+router = APIRouter(
+    prefix="/api/v1",
+    tags=["Data Pipeline & Watchlist"],
+    dependencies=[Depends(get_api_key)],
+)
 
 class RefCountedLock:
     def __init__(self):
@@ -534,7 +539,8 @@ async def evaluate_setups(
 ):
     """Run all 5 technical setups (MA Crossover, RSI, MACD, Bollinger Bands,
     S/R Breakout) against the stored OHLCV data and return signals."""
-    sym, bars, df_primary = await _load_ohlcv_df(ticker, timeframe, period, db)
+    ticker_clean = _clean_ticker_param(ticker)
+    sym, bars, df_primary = await _load_ohlcv_df(ticker_clean, timeframe, period, db)
 
     # Try fetching lower timeframes for confirmation (fail silently if missing)
     mtf_map = {"1d": ["1h", "15m"], "1h": ["15m", "5m"]}
@@ -572,7 +578,11 @@ async def evaluate_setups(
     if tf_clean not in _ENSEMBLE_MODELS:
         _ENSEMBLE_MODELS[tf_clean] = EnsembleModel(timeframe=tf_clean)
         
-    meta_model_result = _ENSEMBLE_MODELS[tf_clean].predict(regime_data, primary_signals)
+    meta_model_result = _ENSEMBLE_MODELS[tf_clean].predict(
+        regime_data,
+        primary_signals,
+        asset_class=classify_ticker(ticker_clean),
+    )
 
     return SetupEvaluationResponse(
         ticker=sym.ticker,

@@ -3,6 +3,7 @@ import numpy as np
 import scipy.stats as si
 import yfinance as yf
 import logging
+from ml.assets import ASSET_CLASSES
 
 logger = logging.getLogger("trading.ml.features")
 
@@ -28,19 +29,50 @@ def calculate_black_scholes_greeks(S, K, T, r, sigma):
     
     return delta, gamma
 
-def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "2y", interval: str = "1d") -> pd.DataFrame:
+def _close_or_volume(data: pd.DataFrame, symbol: str, field: str) -> pd.Series | None:
+    """Extract a Yahoo series from single- or multi-ticker response shapes."""
+    if data.empty or field not in data:
+        return None
+    values = data[field]
+    if isinstance(values, pd.DataFrame):
+        if symbol not in values:
+            return None
+        values = values[symbol]
+    return pd.to_numeric(values, errors="coerce")
+
+
+def _align_daily_series(series: pd.Series, target_index: pd.Index) -> pd.Series:
+    """Align delayed daily macro data to candles, including crypto weekends.
+
+    Macro markets are closed on weekends.  Mapping by normalized date and
+    forward-filling means a Saturday/Sunday BTC candle receives the latest
+    *previously published* Friday macro observation without lookahead.
+    """
+    source = series.copy()
+    source.index = pd.to_datetime(source.index, utc=True).tz_convert(None).normalize()
+    source = source[~source.index.duplicated(keep="last")].sort_index()
+    dates = pd.to_datetime(target_index, utc=True).tz_convert(None).normalize()
+    return source.reindex(dates, method="ffill").set_axis(target_index)
+
+
+def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "2y", interval: str = "1d", asset_class: str = "IN_EQUITY") -> pd.DataFrame:
     """
     Downloads macro indicators and mathematically generates synthetic options Greeks.
     Merges them directly into the primary dataframe.
     """
-    logger.info(f"Downloading Macro Features (VIX, S&P500, USDINR) for {ticker}...")
+    logger.info(f"Downloading Macro Features for {ticker} ({asset_class})...")
     
-    # We download synchronously here since this is run in the feature pipeline
-    macro_tickers = {
-        "VIX": "^INDIAVIX",
-        "SPX": "^GSPC",
-        "USDINR": "INR=X"
-    }
+    if asset_class not in ASSET_CLASSES:
+        raise ValueError(f"Unsupported asset class: {asset_class}")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("Feature input must use a DatetimeIndex.")
+
+    if asset_class == "IN_EQUITY":
+        macro_tickers = {"VIX": "^INDIAVIX", "SPX": "^GSPC", "USDINR": "INR=X"}
+    elif asset_class == "US_EQUITY":
+        macro_tickers = {"VIX": "^VIX", "SPX": "^GSPC", "USDINR": "DX-Y.NYB"} # Using DXY as fiat currency proxy
+    elif asset_class == "CRYPTO":
+        macro_tickers = {"VIX": "^VIX", "SPX": "^GSPC", "USDINR": "DX-Y.NYB", "BTC_VOLUME": "BTC-USD"}
     
     macro_dfs = {}
     for name, sym in macro_tickers.items():
@@ -48,16 +80,14 @@ def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "
             # Always fetch daily data for macro to avoid intraday timezone mismatch
             data = yf.download(sym, period=period, interval="1d", progress=False)
             if not data.empty:
-                if isinstance(data.columns, pd.MultiIndex):
-                    close_series = data['Close'][sym]
-                else:
-                    close_series = data['Close']
+                field = "Volume" if name == "BTC_VOLUME" else "Close"
+                close_series = _close_or_volume(data, sym, field)
+                if close_series is None:
+                    continue
                 
                 # Shift by 1 day to strictly prevent lookahead bias
                 close_series = close_series.shift(1)
                 # Remove timezone to allow alignment
-                if close_series.index.tz is not None:
-                    close_series.index = close_series.index.tz_localize(None)
                 macro_dfs[name] = close_series
         except Exception as e:
             logger.warning(f"Failed to fetch {sym}: {e}")
@@ -65,17 +95,12 @@ def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "
     # Combine into main df
     df = df.copy()
     
-    # Ensure main df index has no timezone for alignment
-    if df.index.tz is not None:
-        df.index = df.index.tz_localize(None)
-    
-    # We will reindex macro data to the main df index and forward-fill
-    # Create a temporary dataframe for macro data
+    # Create a temporary dataframe while retaining the caller's timezone and
+    # timestamps.  `_align_daily_series` handles the normalized-day join.
     macro_combined = pd.DataFrame(index=df.index)
     
     for name, series in macro_dfs.items():
-        # Reindex and forward fill
-        aligned_series = series.reindex(df.index, method='ffill')
+        aligned_series = _align_daily_series(series, df.index)
         macro_combined[name] = aligned_series
 
     if "VIX" in macro_dfs:
@@ -94,6 +119,13 @@ def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "
         df['macro_usdinr_ret'] = df['macro_usdinr'].pct_change()
     else:
         df['macro_usdinr_ret'] = 0.0
+
+    if "BTC_VOLUME" in macro_dfs:
+        df["macro_btc_volume"] = macro_combined["BTC_VOLUME"]
+        df["macro_btc_volume_ret"] = df["macro_btc_volume"].pct_change()
+    else:
+        df["macro_btc_volume"] = 0.0
+        df["macro_btc_volume_ret"] = 0.0
         
     # Forward fill NaNs created at the start of the series
     df.ffill(inplace=True)

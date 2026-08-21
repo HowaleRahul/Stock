@@ -7,7 +7,11 @@ from typing import List
 from ml.continuous_trainer import run_training_loop
 from api.auth import get_api_key, rate_limiter
 
-router = APIRouter(prefix="/api/v1/training", tags=["Training"])
+router = APIRouter(
+    prefix="/api/v1/training",
+    tags=["Training"],
+    dependencies=[Depends(get_api_key)],
+)
 
 # Thread-safe state using deque and lock
 _lock = threading.Lock()

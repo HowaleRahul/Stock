@@ -153,24 +153,27 @@ async def test_api_symbols_and_candles_endpoints():
 @pytest.mark.asyncio
 async def test_api_trigger_sync_endpoint():
     """Verify POST /api/v1/sync endpoint handles both single symbol and watchlist sync triggers without error."""
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # Test single ticker sync
-        payload = {
-            "ticker": "RELIANCE.NS",
-            "period": "5d",
-            "interval": "1d",
-            "sync_news": True
-        }
-        res = await client.post("/api/v1/sync", json=payload)
-        assert res.status_code == 200
-        data = res.json()
-        assert "Synchronization completed" in data["message"]
-        assert len(data["results"]) >= 1
-        assert any(r["ticker"] == "RELIANCE.NS" and r["status"] == "success" for r in data["results"])
+    from unittest.mock import patch
 
-        # Test invalid payload (no ticker and sync_watchlist=False)
-        res_bad = await client.post("/api/v1/sync", json={"period": "1mo"})
-        assert res_bad.status_code == 400
+    async def fake_ohlcv(**kwargs):
+        return {"ticker": kwargs["ticker"], "bars_synced": 5, "status": "success"}
+
+    async def fake_news(ticker):
+        return {"ticker": ticker, "news_synced": 2, "status": "success"}
+
+    with patch.object(DataIngestionService, "sync_symbol_ohlcv", side_effect=fake_ohlcv), \
+         patch.object(DataIngestionService, "sync_symbol_news", side_effect=fake_news):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            payload = {"ticker": "RELIANCE.NS", "period": "5d", "interval": "1d", "sync_news": True}
+            res = await client.post("/api/v1/sync", json=payload)
+            assert res.status_code == 200
+            data = res.json()
+            assert "Synchronization completed" in data["message"]
+            assert any(r["ticker"] == "RELIANCE.NS" and r["status"] == "success" for r in data["results"])
+
+            # Test invalid payload (no ticker and sync_watchlist=False)
+            res_bad = await client.post("/api/v1/sync", json={"period": "1mo"})
+            assert res_bad.status_code == 400
 
 
 def test_data_cleaner_edge_cases_and_normalization():
@@ -397,7 +400,9 @@ async def test_granular_ohlcv_and_news_error_isolation():
             # Check that successful OHLCV entry exists and error News entry exists independently
             statuses = [r["status"] for r in results]
             assert "success" in statuses
-            assert any("Mocked network timeout" in str(s) for s in statuses)
+            # The response intentionally does not disclose provider exception
+            # details to API callers, but each failed news job is represented.
+            assert any(str(s).startswith("error:") for s in statuses)
 
 
 def test_target_symbols_env_parsing_and_normalization():

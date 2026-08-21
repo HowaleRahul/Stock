@@ -3,6 +3,7 @@ import logging
 from typing import List, Dict, Any, Tuple
 import joblib
 import numpy as np
+from ml.assets import asset_flags
 
 logger = logging.getLogger("trading.ml.ensemble")
 
@@ -20,6 +21,9 @@ class EnsembleModel:
         self.model_path = os.path.join(REGISTRY_DIR, f"model_{timeframe}.pkl")
         self.model = None
         self.feature_names = None
+        self.scaler = None
+        self.feature_version = None
+        self.asset_class = None
         
         self.load_model()
 
@@ -29,6 +33,9 @@ class EnsembleModel:
                 data = joblib.load(self.model_path)
                 self.model = data["model"]
                 self.feature_names = data["features"]
+                self.scaler = data.get("scaler")
+                self.feature_version = data.get("feature_version")
+                self.asset_class = data.get("asset_class")
                 logger.info(f"Loaded ensemble model for {self.timeframe}")
             except Exception as e:
                 logger.error(f"Failed to load model for {self.timeframe}: {e}")
@@ -46,7 +53,13 @@ class EnsembleModel:
         if r == "trending-bearish": return -1
         return 0 # range-bound or neutral
 
-    def predict(self, regime_data: Dict[str, Any], setups: List[Any], setup_weights: Dict[str, float] = None) -> Dict[str, Any]:
+    def predict(
+        self,
+        regime_data: Dict[str, Any],
+        setups: List[Any],
+        setup_weights: Dict[str, float] = None,
+        asset_class: str = "IN_EQUITY",
+    ) -> Dict[str, Any]:
         """
         Takes the regime and the raw setups from SetupEngine and outputs the ensemble prediction.
         """
@@ -54,6 +67,7 @@ class EnsembleModel:
         features_dict = {}
         features_dict["regime_val"] = self._regime_to_num(regime_data.get("regime", "neutral"))
         features_dict["regime_adx"] = float(regime_data.get("adx", 0.0))
+        features_dict.update(asset_flags(asset_class))
         
         setup_map = {s.name: s for s in setups}
         
@@ -72,11 +86,26 @@ class EnsembleModel:
                 features_dict[f"{s_name}_conf"] = 0.0
                 
         # If no model is trained yet, fallback to heuristic unweighted voting
-        if not self.model or not self.feature_names:
+        if not self.model or not self.feature_names or self.scaler is None:
+            if self.model and self.feature_names:
+                logger.warning("Ignoring registry model without compatible scaler metadata.")
+            return self._fallback_voting(features_dict, expected_setups, setup_weights)
+
+        if self.asset_class and self.asset_class != asset_class:
+            logger.warning(
+                "Ignoring %s model trained for %s during %s inference.",
+                self.timeframe, self.asset_class, asset_class,
+            )
+            return self._fallback_voting(features_dict, expected_setups, setup_weights)
+
+        missing_features = [name for name in self.feature_names if name not in features_dict]
+        if missing_features:
+            logger.error("Model feature contract is incomplete: %s", missing_features)
             return self._fallback_voting(features_dict, expected_setups, setup_weights)
             
         # Build feature vector
-        X = np.array([[features_dict.get(f, 0.0) for f in self.feature_names]])
+        X_raw = np.array([[features_dict[f] for f in self.feature_names]], dtype=float)
+        X = self.scaler.transform(X_raw)
         
         # Predict
         try:
@@ -106,12 +135,18 @@ class EnsembleModel:
             top_driver_feature = self.feature_names[driver_idx]
             
             # Generate alternative scenario
-            alt_scenario = f"If {top_driver_feature.replace('_sig', '').replace('_conf', '')} reverses signal, this prediction may be invalidated."
+            if top_driver_feature.startswith("feat_is_"):
+                asset_name = top_driver_feature.removeprefix("feat_is_").replace("_", " ")
+                driver = f"Asset class: {asset_name}"
+                alt_scenario = "This prediction depends materially on the asset-class regime; validate it against asset-specific history."
+            else:
+                driver = top_driver_feature.replace("_sig", "").replace("_conf", "")
+                alt_scenario = f"If {driver} reverses signal, this prediction may be invalidated."
             
             return {
                 "signal": direction,
                 "probability": float(prob),
-                "drivers": [top_driver_feature.replace("_sig", "").replace("_conf", "")],
+                "drivers": [driver],
                 "alternative_scenario": alt_scenario,
                 "model_version": "v1.0"
             }

@@ -15,7 +15,11 @@ from api.auth import get_api_key, rate_limiter
 
 logger = logging.getLogger("trading.api.dashboard")
 
-router = APIRouter(prefix="/api/v1/dashboard", tags=["Dashboard"])
+router = APIRouter(
+    prefix="/api/v1/dashboard",
+    tags=["Dashboard"],
+    dependencies=[Depends(get_api_key)],
+)
 
 CONFIG_PATH = "config.json"
 

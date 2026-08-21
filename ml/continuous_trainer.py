@@ -9,6 +9,7 @@ import yfinance as yf
 from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 from ml.features import enrich_with_macro_and_options, enrich_with_psychology_features, generate_triple_barrier_labels
+from ml.assets import TARGETS, asset_flags, barrier_config
 from setups.engine import SetupEngine
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -16,10 +17,9 @@ logger = logging.getLogger("ContinuousBrain")
 
 MODEL_PATH = "ml/models/continuous_brain.pkl"
 SCALER_PATH = "ml/models/scaler.pkl"
+BUNDLE_PATH = "ml/models/continuous_brain_bundle.pkl"
 
-TARGET_INDICES = [
-    "^NSEI", "^NSEBANK"
-]
+TARGET_CLASSES = TARGETS
 
 # Configuration for multi-timeframe swing trading
 # We remove 5m and 15m as transaction friction (STT, slippage) kills scalping alpha in India.
@@ -31,9 +31,10 @@ TIMEFRAME_CONFIGS = [
 
 def load_or_create_model():
     os.makedirs("ml/models", exist_ok=True)
-    if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
-        model = joblib.load(MODEL_PATH)
-        scaler = joblib.load(SCALER_PATH)
+    if os.path.exists(BUNDLE_PATH):
+        bundle = joblib.load(BUNDLE_PATH)
+        model = bundle["model"]
+        scaler = bundle["scaler"]
         logger.info("Loaded existing AI Brain from disk.")
     else:
         model = SGDClassifier(loss='log_loss')
@@ -41,16 +42,33 @@ def load_or_create_model():
         logger.info("Created NEW AI Brain.")
     return model, scaler
 
-def save_model(model, scaler):
-    tmp_model_path = MODEL_PATH + ".tmp"
-    tmp_scaler_path = SCALER_PATH + ".tmp"
-    joblib.dump(model, tmp_model_path)
-    joblib.dump(scaler, tmp_scaler_path)
-    os.replace(tmp_model_path, MODEL_PATH)
-    os.replace(tmp_scaler_path, SCALER_PATH)
+def save_model(model, scaler, feature_names, asset_class, timeframe):
+    tmp_bundle_path = BUNDLE_PATH + ".tmp"
+    joblib.dump({
+        "model": model,
+        "scaler": scaler,
+        "features": list(feature_names),
+        "feature_version": "v2",
+        "asset_class": asset_class,
+        "timeframe": timeframe,
+    }, tmp_bundle_path)
+    os.replace(tmp_bundle_path, BUNDLE_PATH)
     logger.info("Saved upgraded AI Brain to disk.")
 
-def generate_features_for_ticker(ticker, tf_config):
+def _reset_if_feature_schema_changed(model, scaler, X, feature_names=None):
+    """Avoid silently applying a persisted model to a different feature set."""
+    expected_count = getattr(scaler, "n_features_in_", None)
+    persisted_names = getattr(scaler, "feature_names_in_", None)
+    names_match = persisted_names is None or list(persisted_names) == list(feature_names or X.columns)
+    if expected_count is None or (expected_count == X.shape[1] and names_match):
+        return model, scaler
+    logger.warning(
+        "Feature schema changed from %s to %s columns; resetting the incremental model.",
+        expected_count, X.shape[1],
+    )
+    return SGDClassifier(loss="log_loss"), StandardScaler()
+
+def generate_features_for_ticker(ticker, tf_config, asset_class="IN_EQUITY"):
     logger.info(f"Downloading {ticker} history ({tf_config['period']} at {tf_config['tf']})...")
     df = yf.download(ticker, period=tf_config["period"], interval=tf_config["tf"], progress=False)
     if df.empty or len(df) < 100:
@@ -62,8 +80,7 @@ def generate_features_for_ticker(ticker, tf_config):
     df.columns = [c.lower() for c in df.columns]
     
     try:
-        # This function fetches daily macro data and forward-fills it to align with intraday bars!
-        df = enrich_with_macro_and_options(df, ticker)
+        df = enrich_with_macro_and_options(df, ticker, asset_class=asset_class)
         df = enrich_with_psychology_features(df)
     except Exception as e:
         logger.error(f"Macro fetch failed: {e}")
@@ -99,7 +116,7 @@ def generate_features_for_ticker(ticker, tf_config):
         window_df = df.iloc[max(0, i - 300):i+1]
         label = labels[i]
         
-        regime_data, setups = engine.evaluate_all(window_df)
+        regime_data, setups = engine.evaluate_with_regime(window_df)
         
         feats = {}
         feats["regime_val"] = _regime_to_num(regime_data.get("regime", "neutral"))
@@ -112,20 +129,21 @@ def generate_features_for_ticker(ticker, tf_config):
         feats['macro_vix'] = df['macro_vix'].iloc[i]
         feats['macro_spx_ret'] = df['macro_spx_ret'].iloc[i]
         feats['macro_usdinr_ret'] = df['macro_usdinr_ret'].iloc[i]
+        feats['macro_btc_volume_ret'] = df['macro_btc_volume_ret'].iloc[i]
         feats['opt_delta'] = df['opt_delta'].iloc[i]
         feats['opt_gamma'] = df['opt_gamma'].iloc[i]
         
-        # Add Psychological Features
         feats['psych_fomo_streak'] = df['psych_fomo_streak'].iloc[i]
         feats['psych_panic_index'] = df['psych_panic_index'].iloc[i]
         feats['psych_dist_to_round'] = df['psych_dist_to_round'].iloc[i]
         feats['psych_session_phase'] = df['psych_session_phase'].iloc[i]
         feats['atr'] = df['atr'].iloc[i]
         
-        # Frame hint so the model learns that a 1d setup is mathematically different from a 1h setup
         tf_mapping = {"1h": 0.5, "1d": 1.0}
         feats['tf_hint'] = tf_mapping.get(tf_config["tf"], 1.0)
         
+        feats.update(asset_flags(asset_class))
+
         X_rows.append(feats)
         y_labels.append(label)
         
@@ -149,8 +167,6 @@ def run_training_loop(stop_event=None, log_callback=None):
     
     model, scaler = load_or_create_model()
     classes = np.array([-1, 0, 1])
-    is_fitted = hasattr(model, 'classes_')
-    
     cycles = 0
     while True:
         if stop_event and stop_event.is_set():
@@ -158,12 +174,17 @@ def run_training_loop(stop_event=None, log_callback=None):
             break
             
         cycles += 1
-        ticker = random.choice(TARGET_INDICES)
-        tf_config = random.choice(TIMEFRAME_CONFIGS)
+        asset_class = random.choice(list(TARGET_CLASSES.keys()))
+        ticker = random.choice(TARGET_CLASSES[asset_class])
+
+        base_config = random.choice(TIMEFRAME_CONFIGS)
+        # Crypto may use the same timeframes, but its barriers account for
+        # the materially higher volatility.
+        tf_config = {**base_config, **barrier_config(asset_class, base_config["tf"])}
         
-        log(f"[CYCLE {cycles}] Target: {ticker} | Timeframe: {tf_config['tf']}")
+        log(f"[CYCLE {cycles}] Target: {ticker} ({asset_class}) | Timeframe: {tf_config['tf']}")
         
-        X, y = generate_features_for_ticker(ticker, tf_config)
+        X, y = generate_features_for_ticker(ticker, tf_config, asset_class)
         
         if X is None or len(X) == 0:
             log(f"Not enough data for {ticker}. Skipping...")
@@ -171,6 +192,7 @@ def run_training_loop(stop_event=None, log_callback=None):
             
         log(f"Simulated {len(X)} trades. Win: {y.count(1)}, Loss: {y.count(-1)}, Timeout: {y.count(0)}")
         
+        model, scaler = _reset_if_feature_schema_changed(model, scaler, X, X.columns)
         # 1. Incrementally update the Scaler with the new data distribution
         scaler.partial_fit(X)
         
@@ -183,7 +205,7 @@ def run_training_loop(stop_event=None, log_callback=None):
         
         # Save every 3 cycles
         if cycles % 3 == 0:
-            save_model(model, scaler)
+            save_model(model, scaler, X.columns, asset_class, tf_config["tf"])
             log("💾 Model Checkpoint Saved.")
             
         # Brief pause to avoid destroying APIs

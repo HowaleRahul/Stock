@@ -5,6 +5,7 @@ import { Play, Square, Terminal, Activity } from 'lucide-react';
 const TrainingUI = () => {
   const [isTraining, setIsTraining] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   const fetchStatus = async () => {
@@ -14,6 +15,7 @@ const TrainingUI = () => {
       setLogs(res.data.logs);
     } catch (err) {
       console.error("Failed to fetch training status:", err);
+      setError("Training status is unavailable.");
     }
   };
 
@@ -33,6 +35,7 @@ const TrainingUI = () => {
       fetchStatus();
     } catch (err) {
       console.error(err);
+      setError("Training could not be started.");
     }
   };
 
@@ -42,11 +45,13 @@ const TrainingUI = () => {
       fetchStatus();
     } catch (err) {
       console.error(err);
+      setError("Training could not be stopped.");
     }
   };
 
   return (
     <div className="space-y-6">
+      {error && <div role="alert" className="text-red-400">{error}</div>}
       <div className="bg-gray-900 p-6 rounded-lg border border-gray-800 flex justify-between items-center">
         <div>
           <h2 className="text-2xl font-bold text-white flex items-center">

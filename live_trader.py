@@ -147,7 +147,12 @@ async def run_live_loop_async():
                     if trade_plan.is_approved:
                         opt_plan = opt_engine.generate_options_plan(trade_plan, iv=0.15)
                         if opt_plan.is_approved:
-                            order_id = broker.place_order(ticker=opt_plan.option_symbol, quantity=opt_plan.lots_to_buy * opt_plan.lot_size, direction=opt_plan.option_type)
+                            order_id = broker.place_order(
+                                ticker=opt_plan.option_symbol,
+                                quantity=opt_plan.lots_to_buy * opt_plan.lot_size,
+                                direction="BUY",
+                                exchange="NFO",
+                            )
                             live_trade_record = {
                                 "order_id": order_id, "ticker": opt_plan.option_symbol, "direction": ai_signal,
                                 "quantity": opt_plan.lots_to_buy * opt_plan.lot_size, "entry_price": opt_plan.entry_premium,

@@ -35,7 +35,7 @@ class SetupEngine:
             BreakoutSetup(),
         ]
 
-    def evaluate_all(self, df: pd.DataFrame, ticker: str = "") -> List[SetupSignal]:
+    def evaluate_with_regime(self, df: pd.DataFrame, ticker: str = "") -> tuple[dict, List[SetupSignal]]:
         """Run every registered setup.
 
         Args:
@@ -89,4 +89,14 @@ class SetupEngine:
                     )
                 )
                 
+        return regime_data, results
+
+    def evaluate_all(self, df: pd.DataFrame, ticker: str = "") -> List[SetupSignal]:
+        """Return signals only, preserving the original public contract.
+
+        Call :meth:`evaluate_with_regime` when the caller also needs the
+        detected regime.  Keeping this boundary prevents tuple/list contract
+        drift across API, trainer, and third-party callers.
+        """
+        _, results = self.evaluate_with_regime(df, ticker=ticker)
         return results

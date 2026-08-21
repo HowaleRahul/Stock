@@ -4,6 +4,7 @@ import axios from 'axios';
 const Portfolio = () => {
   const [data, setData] = useState<{account: any, open_trades: any[]}>({ account: {}, open_trades: [] });
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchPortfolio = async () => {
@@ -11,7 +12,8 @@ const Portfolio = () => {
         const res = await axios.get('/api/v1/dashboard/portfolio');
         setData(res.data);
       } catch (err) {
-        console.error(err);
+        console.error('Failed to load portfolio:', err);
+        setError('Portfolio data is unavailable. Please try again later.');
       } finally {
         setLoading(false);
       }
@@ -20,6 +22,7 @@ const Portfolio = () => {
   }, []);
 
   if (loading) return <div className="text-gray-400">Loading Portfolio...</div>;
+  if (error) return <div role="alert" className="text-red-400">{error}</div>;
 
   const { account, open_trades } = data;
 
