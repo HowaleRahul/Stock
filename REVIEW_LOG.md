@@ -140,6 +140,20 @@
 - Both frontend clients build and lint successfully. The active bundle is approximately 501 kB; the legacy bundle is approximately 4.9 MB. These remain performance follow-ups.
 - Compose management still fails closed because `.env` has no `POSTGRES_PASSWORD` key, even though the existing container is healthy. No default password was added.
 
+## Pass 10 — Replay, backtest, and live-exit hardening
+
+- Isolated replay journal writes with context-local routing and isolated temporary RL weights, preventing historical replay from mutating paper/live learning state.
+- Excluded walk-forward training rows whose triple-barrier horizon crosses into the test window.
+- Rejected neutral backtest predictions instead of recording them as positions with direction zero.
+- Corrected live short-position exit comparisons and bearish/short P&L inversion; unknown persisted directions now fail closed for automatic exits.
+
+## Verification — Pass 10
+
+- Replay isolation regression: passed.
+- Focused persistence, replay, setup/API regressions: 27 passed.
+- Full Python suite: 98 passed with one pandas-ta compatibility warning.
+- Complete Python compilation: passed.
+
 - Swagger UI: loaded at `http://127.0.0.1:5173/docs` through the Vite proxy.
 - Training, Strategy Builder, and AI Journal: rendered with live API and no error boundary.
 - Frontend production build: passed.

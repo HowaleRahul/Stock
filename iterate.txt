@@ -148,9 +148,12 @@ Your priority is correctness over speed.
 ----
 
 check for all edge cases and each thing also keep attention to detail check for each small detail and all things
+------------------
 
-
-
+Real broker adapter and fill reconciliation are not implemented.
+Live options exit handling still requires broker/contract-specific pricing.
+Docker Compose still requires POSTGRES_PASSWORD in .env.
+Frontend bundle sizes remain high, especially the legacy client.
 
 
 -------------------------------------------
