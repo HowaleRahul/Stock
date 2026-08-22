@@ -12,7 +12,7 @@ from ml.trade_logger import TradeLogger
 from ml.journal_analyzer import JournalAnalyzer
 from ml.reinforcement_learner import ReinforcementLearner
 from api.db import async_session_factory
-from models.models import Account, Trade
+from models.models import Account, JournalEvent, Trade
 from api.auth import get_api_key, rate_limiter
 
 logger = logging.getLogger("trading.api.dashboard")
@@ -153,9 +153,23 @@ async def get_analytics():
 
 @router.get("/trades")
 async def get_trades():
-    """Get all open and closed trades."""
-    entries = TradeLogger.get_all_entries()
-    exits = TradeLogger.get_all_exits()
+    """Get persisted journal events, with legacy JSON fallback."""
+    async with async_session_factory() as session:
+        result = await session.execute(select(JournalEvent).order_by(JournalEvent.timestamp.asc()))
+        events = result.scalars().all()
+
+    if events:
+        records = []
+        for event in events:
+            try:
+                records.append(json.loads(event.payload))
+            except (TypeError, json.JSONDecodeError):
+                logger.warning("Skipping malformed journal event %s", event.id)
+        entries = [record for record in records if record.get("event") == "ENTRY"]
+        exits = [record for record in records if record.get("event") == "EXIT"]
+    else:
+        entries = TradeLogger.get_all_entries()
+        exits = TradeLogger.get_all_exits()
     return {
         "entries": entries,
         "exits": exits

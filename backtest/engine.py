@@ -44,7 +44,8 @@ class Backtester:
         trades_lost = 0
         total_trades = 0
         
-        # Pre-calculate Triple-Barrier Labels for the entire dataframe to use in training windows
+        # Pre-calculate labels once, but exclude training rows whose forward
+        # horizon would cross into the test window below.
         triple_barrier_labels = generate_triple_barrier_labels(
             df,
             tp_atr_mult=self.tp_atr_mult,
@@ -56,7 +57,8 @@ class Backtester:
             train_end = start + train_size
             test_end = train_end + test_size
             
-            X_train = X.iloc[start:train_end]
+            label_safe_end = max(start, train_end - 20)
+            X_train = X.iloc[start:label_safe_end]
             X_test = X.iloc[train_end:test_end]
             
             # Target generation for training: Use Triple-Barrier Labels
@@ -135,6 +137,13 @@ class Backtester:
                     max_prob = max(probs)
                     if max_prob > self.threshold:
                         pred = classes[list(probs).index(max_prob)]
+                        if pred not in (1, -1):
+                            equity_curve.append(current_equity)
+                            positions.append(0)
+                            bench_ret = (df['close'].iloc[idx+1] - df['close'].iloc[idx]) / df['close'].iloc[idx]
+                            current_bench *= (1 + bench_ret)
+                            benchmark_equity.append(current_bench)
+                            continue
                         in_position = True
                         trade_dir = pred
                         entry_price = current_bar['close'] # Enter at close

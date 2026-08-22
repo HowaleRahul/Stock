@@ -22,6 +22,8 @@ from __future__ import annotations
 import logging
 import uuid
 import time
+import os
+import tempfile
 from typing import Dict, Any, List, Optional
 
 import numpy as np
@@ -153,7 +155,11 @@ class ReplayEngine:
         self.broker = VirtualBroker(starting_capital=starting_capital)
         self.engine = SetupEngine()
         self.ai_brain = EnsembleModel(timeframe="1d")
-        self.learner = ReinforcementLearner()
+        self._replay_workspace = tempfile.TemporaryDirectory(prefix="trading-replay-")
+        self._journal_file = os.path.join(self._replay_workspace.name, "trade_journal.jsonl")
+        self.learner = ReinforcementLearner(
+            weights_file=os.path.join(self._replay_workspace.name, "setup_weights.json")
+        )
         self.risk_engine = RiskEngine()
         self.log_callback = log_callback
         self._trade_counter = 0
@@ -182,6 +188,19 @@ class ReplayEngine:
         Returns:
             Dict with replay results and statistics.
         """
+        log_token = TradeLogger.use_log_file(self._journal_file)
+        try:
+            return self._replay(ticker, period, timeframe, asset_class)
+        finally:
+            TradeLogger.reset_log_file(log_token)
+
+    def _replay(
+        self,
+        ticker: str,
+        period: str,
+        timeframe: str,
+        asset_class: str,
+    ) -> Dict[str, Any]:
         # A replay run is an isolated experiment even when an engine instance
         # is reused by a caller or test harness.
         self.broker = VirtualBroker(starting_capital=self.broker.starting_capital)

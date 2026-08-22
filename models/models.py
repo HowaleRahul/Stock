@@ -102,3 +102,20 @@ class Trade(Base):
     pnl_pct = Column(Float, nullable=True)
     entry_time = Column(DateTime(timezone=True), default=func.now())
     exit_time = Column(DateTime(timezone=True), nullable=True)
+
+
+class TradeContext(Base):
+    __tablename__ = 'trade_context'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(String(64), unique=True, index=True, nullable=False)
+    payload = Column(Text, nullable=False, default='{}')
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class JournalEvent(Base):
+    __tablename__ = 'journal_events'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event = Column(String(32), index=True, nullable=False)
+    trade_id = Column(String(64), index=True, nullable=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    payload = Column(Text, nullable=False, default='{}')

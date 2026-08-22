@@ -62,7 +62,7 @@ async def close_trade(trade_id, exit_price):
             trade.exit_time = datetime.datetime.utcnow()
             
             pnl = (exit_price - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
-            if trade.direction == "bearish":
+            if str(trade.direction).upper() in {"BEARISH", "SHORT", "SELL"}:
                 pnl = -pnl
             trade.pnl_pct = pnl * 100
             
@@ -126,7 +126,15 @@ async def run_live_loop_async():
                 for trade in active_live_orders:
                     if trade.ticker == ticker or trade.ticker.startswith(ticker):
                         if trade.stop_loss is not None and trade.take_profit is not None:
-                            if current_price <= trade.stop_loss or current_price >= trade.take_profit:
+                            direction = str(trade.direction).upper()
+                            if direction in {"LONG", "BULLISH", "BUY"}:
+                                should_exit = current_price <= trade.stop_loss or current_price >= trade.take_profit
+                            elif direction in {"SHORT", "BEARISH", "SELL"}:
+                                should_exit = current_price >= trade.stop_loss or current_price <= trade.take_profit
+                            else:
+                                logger.error("Unknown persisted trade direction %r; refusing automatic exit.", trade.direction)
+                                should_exit = False
+                            if should_exit:
                                 logger.info(f"Closing live position: {trade.ticker}")
                                 await close_trade(trade.id, current_price)
                                 notifier.send_exit_alert({"ticker": trade.ticker}, is_live=True)

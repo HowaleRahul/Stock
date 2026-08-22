@@ -118,6 +118,28 @@
 
 ## Verification — Pass 7
 
+## Pass 8 — Paper persistence transaction hardening
+
+- Added durable `trade_context` and `journal_events` tables for complete paper-trade context and audit events.
+- Paper trading now reads account/open positions from PostgreSQL and persists account, trade state, and scan journal events through a shared transaction boundary.
+- Added database audit records for ENTRY, EXIT, REJECTION, KILL_SWITCH, and RL self-review decisions; JSONL remains a compatibility export.
+- Dashboard trade retrieval prefers database journal events and falls back to legacy JSON history when the database has no events.
+
+## Verification — Pass 8
+
+- Changed Python files compile successfully.
+- `git diff --check` passes.
+- Full database-backed verification remains blocked until PostgreSQL is running; Docker also requires `POSTGRES_PASSWORD` in `.env`.
+
+## Pass 9 — Database online validation
+
+- Added a persistence integration regression test covering trade/context round-trip, ENTRY/EXIT journal events, close-state updates, and persisted P&L.
+- Confirmed the healthy `trading_timescaledb` container contains `accounts`, `trades`, `trade_context`, and `journal_events`.
+- Confirmed the paper persistence and setup/API regression slice passes: 26 tests passed.
+- Full Python suite passes: 97 tests passed with one pandas-ta compatibility warning.
+- Both frontend clients build and lint successfully. The active bundle is approximately 501 kB; the legacy bundle is approximately 4.9 MB. These remain performance follow-ups.
+- Compose management still fails closed because `.env` has no `POSTGRES_PASSWORD` key, even though the existing container is healthy. No default password was added.
+
 - Swagger UI: loaded at `http://127.0.0.1:5173/docs` through the Vite proxy.
 - Training, Strategy Builder, and AI Journal: rendered with live API and no error boundary.
 - Frontend production build: passed.

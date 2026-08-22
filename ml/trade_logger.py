@@ -16,6 +16,7 @@ import os
 import csv
 import logging
 import datetime
+from contextvars import ContextVar
 from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger("trading.trade_logger")
@@ -23,6 +24,7 @@ logger = logging.getLogger("trading.trade_logger")
 TRADE_LOG_DIR = "logs"
 TRADE_LOG_FILE = os.path.join(TRADE_LOG_DIR, "trade_journal.jsonl")
 TRADE_LOG_CSV = os.path.join(TRADE_LOG_DIR, "trade_journal.csv")
+_active_log_file = ContextVar("active_trade_log_file", default=TRADE_LOG_FILE)
 
 os.makedirs(TRADE_LOG_DIR, exist_ok=True)
 
@@ -35,6 +37,18 @@ class TradeLogger:
     of context needed to reconstruct why the system took the trade.
     This is the audit trail that makes the system's decisions traceable.
     """
+
+    @staticmethod
+    def use_log_file(path: str):
+        return _active_log_file.set(path)
+
+    @staticmethod
+    def reset_log_file(token) -> None:
+        _active_log_file.reset(token)
+
+    @staticmethod
+    def _current_log_file() -> str:
+        return _active_log_file.get()
 
     @staticmethod
     def log_entry(
@@ -61,7 +75,7 @@ class TradeLogger:
         setup_weights: Dict[str, float],
         config_version: str,
         capital_at_entry: float,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Log a new trade entry to the journal."""
         record = {
             "event": "ENTRY",
@@ -92,6 +106,7 @@ class TradeLogger:
         }
         TradeLogger._append(record)
         logger.info(f"[JOURNAL] Logged ENTRY for {trade_id} ({ticker} {direction})")
+        return record
 
     @staticmethod
     def log_exit(
@@ -106,7 +121,7 @@ class TradeLogger:
         regime_at_exit: str,
         capital_after_exit: float,
         setup_signals_at_entry: Optional[List[Dict[str, Any]]] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Log a trade exit to the journal."""
         record = {
             "event": "EXIT",
@@ -129,6 +144,7 @@ class TradeLogger:
             f"[JOURNAL] Logged EXIT for {trade_id} ({exit_reason}, "
             f"PnL: {pnl_pct*100:+.2f}%)"
         )
+        return record
 
     @staticmethod
     def log_rejection(
@@ -138,7 +154,7 @@ class TradeLogger:
         ai_probability: float,
         regime: str,
         config_version: str,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Log a rejected trade for analysis."""
         record = {
             "event": "REJECTION",
@@ -151,6 +167,7 @@ class TradeLogger:
             "config_version": config_version,
         }
         TradeLogger._append(record)
+        return record
 
     @staticmethod
     def log_kill_switch(
@@ -159,7 +176,7 @@ class TradeLogger:
         peak_capital: float,
         weekly_pnl: float,
         config_version: str,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Log a kill-switch activation."""
         record = {
             "event": "KILL_SWITCH",
@@ -172,15 +189,17 @@ class TradeLogger:
         }
         TradeLogger._append(record)
         logger.error(f"[JOURNAL] KILL SWITCH: {reason}")
+        return record
 
     @staticmethod
     def get_all_exits() -> List[Dict[str, Any]]:
         """Read all EXIT records from the journal."""
         exits = []
-        if not os.path.exists(TRADE_LOG_FILE):
+        log_file = TradeLogger._current_log_file()
+        if not os.path.exists(log_file):
             return exits
         try:
-            with open(TRADE_LOG_FILE, "r", encoding="utf-8") as f:
+            with open(log_file, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -196,10 +215,11 @@ class TradeLogger:
     def get_all_entries() -> List[Dict[str, Any]]:
         """Read all ENTRY records from the journal."""
         entries = []
-        if not os.path.exists(TRADE_LOG_FILE):
+        log_file = TradeLogger._current_log_file()
+        if not os.path.exists(log_file):
             return entries
         try:
-            with open(TRADE_LOG_FILE, "r", encoding="utf-8") as f:
+            with open(log_file, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -229,7 +249,7 @@ class TradeLogger:
     def _append(record: Dict[str, Any]) -> None:
         """Append a single JSON record to the journal file."""
         try:
-            with open(TRADE_LOG_FILE, "a", encoding="utf-8") as f:
+            with open(TradeLogger._current_log_file(), "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, default=str) + "\n")
         except Exception as e:
             logger.error(f"Failed to write trade journal: {e}")

@@ -47,14 +47,15 @@ class ReinforcementLearner:
     expected value from its Beta posterior.
     """
 
-    def __init__(self):
+    def __init__(self, weights_file: Optional[str] = None):
+        self.weights_file = weights_file or WEIGHTS_FILE
         self._state = self._load_state()
 
     def _load_state(self) -> Dict[str, Any]:
         """Load learned weights from disk."""
-        if os.path.exists(WEIGHTS_FILE):
+        if os.path.exists(self.weights_file):
             try:
-                with open(WEIGHTS_FILE, "r", encoding="utf-8") as f:
+                with open(self.weights_file, "r", encoding="utf-8") as f:
                     state = json.load(f)
                 logger.info(f"Loaded RL state with {len(state.get('weights', {}))} setup-regime pairs")
                 return state
@@ -70,11 +71,11 @@ class ReinforcementLearner:
 
     def _save_state(self) -> None:
         """Persist learned weights to disk."""
-        os.makedirs(os.path.dirname(WEIGHTS_FILE), exist_ok=True)
+        os.makedirs(os.path.dirname(self.weights_file) or ".", exist_ok=True)
         try:
             import datetime
             self._state["last_update"] = datetime.datetime.now().isoformat()
-            with open(WEIGHTS_FILE, "w", encoding="utf-8") as f:
+            with open(self.weights_file, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, indent=2, default=str)
         except Exception as e:
             logger.error(f"Failed to save RL state: {e}")

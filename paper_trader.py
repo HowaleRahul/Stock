@@ -13,6 +13,7 @@ Simulates live trading with full Risk Engine integration:
 
 import time
 import datetime
+import asyncio
 import json
 import os
 import yfinance as yf
@@ -32,6 +33,12 @@ from ml.reinforcement_learner import ReinforcementLearner
 from ml.drift_detector import DriftDetector
 from ml.options_engine import OptionsEngine
 from api.notifier import notifier
+from papertrade.persistence import (
+    ensure_schema,
+    load_account as load_account_db,
+    load_open_trades as load_open_trades_db,
+    persist_portfolio,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("paper_trader")
@@ -134,12 +141,14 @@ def fetch_and_enrich(ticker: str) -> pd.DataFrame:
 # Main Trading Loop
 # ---------------------------------------------------------------------------
 
-def run_loop():
+async def run_loop():
     engine = SetupEngine()
     ai_brain = EnsembleModel(timeframe=TIMEFRAME)
     learner = ReinforcementLearner()
     detector = DriftDetector()
     opt_engine = OptionsEngine()
+
+    await ensure_schema()
     
     last_drift_check = 0.0
     last_retrain = 0.0
@@ -152,6 +161,7 @@ def run_loop():
         logger.info(f"--- Waking up for {TIMEFRAME} scan ---")
         
         now = time.time()
+        journal_events = []
         
         # Periodic Concept Drift Check
         if now - last_drift_check > CONFIG.get("drift_check_interval_hours", 24) * 3600:
@@ -163,13 +173,18 @@ def run_loop():
         if now - last_retrain > CONFIG.get("retrain_interval_days", 7) * 86400:
             logger.info("Running scheduled batch RL self-review...")
             review_report = learner.full_self_review()
+            journal_events.append({
+                "event": "RL_DECISIONS",
+                "timestamp": datetime.datetime.now().isoformat(),
+                "payload": review_report,
+            })
             actions = review_report.get("actions_taken", [])
             if actions:
                 logger.info(f"🧠 Self-Review applied {len(actions)} weight adjustments.")
             last_retrain = now
             
-        all_trades = load_open_trades()
-        account = load_account()
+        all_trades = await load_open_trades_db()
+        account = await load_account_db(STARTING_CAPITAL)
 
         if account['status'] == 'SUSPENDED':
             logger.warning("ACCOUNT SUSPENDED DUE TO MAX DRAWDOWN. Stopping trader.")
@@ -276,7 +291,7 @@ def run_loop():
                 if account['capital'] > account['peak_capital']:
                     account['peak_capital'] = account['capital']
 
-                TradeLogger.log_exit(
+                exit_record = TradeLogger.log_exit(
                     trade_id=trade['id'],
                     ticker=ticker,
                     direction=trade['direction'],
@@ -289,6 +304,7 @@ def run_loop():
                     capital_after_exit=account['capital'],
                     setup_signals_at_entry=trade.get("setup_signals", [])
                 )
+                journal_events.append(exit_record)
                 
                 notifier.send_exit_alert(trade, is_live=False)
                 # Update RL loop
@@ -309,18 +325,21 @@ def run_loop():
             updated_trades.append(trade)
 
         save_trades(updated_trades)
+        await persist_portfolio(account, updated_trades, journal_events)
+        journal_events.clear()
 
         # --- Drawdown Check (Kill-Switch) ---
         max_drawdown = float(CONFIG.get('max_portfolio_drawdown_pct', 0.10))
         if account['capital'] <= account['peak_capital'] * (1 - max_drawdown):
             account['status'] = 'SUSPENDED'
-            TradeLogger.log_kill_switch(
+            kill_switch_record = TradeLogger.log_kill_switch(
             reason=f"{max_drawdown * 100}% PORTFOLIO DRAWDOWN REACHED",
                 capital=account['capital'],
                 peak_capital=account['peak_capital'],
                 weekly_pnl=0.0,  # Not strictly tracked here, using total drawdown
                 config_version=CONFIG.get("version", "v1.0")
             )
+            journal_events.append(kill_switch_record)
             
             notifier.send_system_alert(
                 f"Portfolio drawdown reached {max_drawdown * 100:.2f}%. Trading suspended.",
@@ -329,6 +348,8 @@ def run_loop():
             logger.error(f"🚨 EMERGENCY STOP: {max_drawdown * 100:.2f}% PORTFOLIO DRAWDOWN REACHED!")
 
         save_account(account)
+        await persist_portfolio(account, updated_trades, journal_events)
+        journal_events.clear()
 
         if account['status'] == 'SUSPENDED':
             break
@@ -384,7 +405,7 @@ def run_loop():
                 opt_plan = opt_engine.generate_options_plan(trade_plan, iv=iv)
                 
                 if not opt_plan.is_approved:
-                    TradeLogger.log_rejection(
+                    rejection_record = TradeLogger.log_rejection(
                         ticker=opt_plan.option_symbol,
                         direction=opt_plan.option_type,
                         reasons=opt_plan.rejection_reasons,
@@ -392,6 +413,7 @@ def run_loop():
                         regime=trade_plan.regime,
                         config_version=CONFIG.get("version", "v1.0")
                     )
+                    journal_events.append(rejection_record)
                     logger.warning(
                         f"[REJECTED OPTION] {opt_plan.option_symbol} — "
                         f"{'; '.join(opt_plan.rejection_reasons)}"
@@ -400,7 +422,7 @@ def run_loop():
                 logger.info(f"\n{opt_plan.reasoning}")
             else:
                 if not trade_plan.is_approved:
-                    TradeLogger.log_rejection(
+                    rejection_record = TradeLogger.log_rejection(
                         ticker=ticker,
                         direction=trade_plan.direction,
                         reasons=trade_plan.rejection_reasons,
@@ -408,6 +430,7 @@ def run_loop():
                         regime=trade_plan.regime,
                         config_version=CONFIG.get("version", "v1.0")
                     )
+                    journal_events.append(rejection_record)
                     logger.warning(
                         f"[REJECTED] {ticker} {trade_plan.direction} — "
                         f"{'; '.join(trade_plan.rejection_reasons)}"
@@ -456,7 +479,7 @@ def run_loop():
                     "opt_theta": opt_plan.theta
                 })
             
-            TradeLogger.log_entry(
+            entry_record = TradeLogger.log_entry(
                 trade_id=new_trade["id"],
                 ticker=new_trade["ticker"],
                 direction=trade_plan.direction if not is_options_trade else "LONG", # we always BUY options
@@ -481,6 +504,7 @@ def run_loop():
                 config_version=CONFIG.get("version", "v1.0"),
                 capital_at_entry=account['capital']
             )
+            journal_events.append(entry_record)
 
             logger.info(
                 f"[NEW ENTRY {trade_plan.direction}] {ticker} | "
@@ -493,7 +517,9 @@ def run_loop():
                 f"P(Ruin): {trade_plan.probability_of_ruin*100:.4f}%"
             )
             updated_trades.append(new_trade)
-            save_trades(updated_trades)
+
+        await persist_portfolio(account, updated_trades, journal_events)
+        journal_events.clear()
 
         # --- Summary ---
         open_count = sum(1 for t in updated_trades if t.get('status') == 'OPEN')
@@ -510,8 +536,8 @@ def run_loop():
         )
 
         # Wait an hour before next scan
-        time.sleep(3600)
+        await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
-    run_loop()
+    asyncio.run(run_loop())
