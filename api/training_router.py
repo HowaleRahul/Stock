@@ -1,8 +1,12 @@
 import threading
 import collections
+import json
+import logging
+import os
+import tempfile
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Literal, Optional
 
 from ml.continuous_trainer import run_training_loop, get_training_telemetry
 from data.market_hours import get_market_status
@@ -21,27 +25,31 @@ stop_event = threading.Event()
 training_logs = collections.deque(maxlen=200)
 is_training = False
 current_training_mode = "auto"
+CONFIG_PATH = "config.json"
+logger = logging.getLogger("trading.api.training")
 
 
 class StartTrainingRequest(BaseModel):
-    mode: Optional[str] = Field(
+    mode: Optional[Literal["auto", "simulate_live", "offline_only", "force_live", "live_only"]] = Field(
         default="auto",
         description="Training mode: 'auto' (live during NSE hours, replay when closed), 'simulate_live' (force live execution), 'offline_only' (historical only)"
     )
     capital: Optional[float] = Field(
         default=None,
         gt=0,
+        le=1_000_000_000,
+        allow_inf_nan=False,
         description="Custom trading capital in INR (e.g. 10000 for 10k, 50000, 100000, etc.)"
     )
-    target_index: Optional[str] = Field(
+    target_index: Optional[Literal["NIFTY", "BANKNIFTY", "FINNIFTY", "ALL"]] = Field(
         default="ALL",
         description="Target index: 'NIFTY', 'BANKNIFTY', 'FINNIFTY', or 'ALL'"
     )
-    derivative_type: Optional[str] = Field(
+    derivative_type: Optional[Literal["AUTO", "OPTIONS", "FUTURES", "EQUITY"]] = Field(
         default="AUTO",
         description="Derivative instrument: 'AUTO' (budget-optimized), 'OPTIONS' (CE/PE), 'FUTURES', 'EQUITY'"
     )
-    strike_preference: Optional[str] = Field(
+    strike_preference: Optional[Literal["AUTO", "ITM", "ATM", "OTM"]] = Field(
         default="AUTO",
         description="Strike selection preference: 'AUTO' (AI learned), 'ITM', 'ATM', 'OTM'"
     )
@@ -89,6 +97,47 @@ def _training_worker(
             is_training = False
 
 
+def _persist_training_config(
+    capital: Optional[float],
+    target_index: str,
+    derivative_type: str,
+    strike_preference: str,
+) -> None:
+    config: Dict[str, Any] = {}
+    temp_path: Optional[str] = None
+    try:
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
+                config = json.load(config_file)
+            if not isinstance(config, dict):
+                raise ValueError("Training configuration must be a JSON object.")
+
+        if capital is not None:
+            config["capital"] = capital
+        config["target_index"] = target_index
+        config["derivative_type"] = derivative_type
+        config["strike_preference"] = strike_preference
+
+        config_dir = os.path.dirname(os.path.abspath(CONFIG_PATH))
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=config_dir, prefix=".config-", suffix=".tmp", delete=False
+        ) as config_file:
+            temp_path = config_file.name
+            json.dump(config, config_file, indent=4)
+        os.replace(temp_path, CONFIG_PATH)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.exception("Unable to persist training configuration.")
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                logger.warning("Unable to remove temporary training configuration file: %s", temp_path)
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to persist training configuration; training was not started.",
+        ) from exc
+
+
 @router.post("/start")
 async def start_training(
     payload: Optional[StartTrainingRequest] = None,
@@ -103,27 +152,13 @@ async def start_training(
     chosen_derivative_type = payload.derivative_type if payload and payload.derivative_type else "AUTO"
     chosen_strike_pref = payload.strike_preference if payload and payload.strike_preference else "AUTO"
 
-    # Persist choices to config
-    try:
-        import json, os
-        cfg = {}
-        if os.path.exists("config.json"):
-            with open("config.json", "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-        if chosen_capital is not None:
-            cfg["capital"] = chosen_capital
-        cfg["target_index"] = chosen_target_index
-        cfg["derivative_type"] = chosen_derivative_type
-        cfg["strike_preference"] = chosen_strike_pref
-        with open("config.json.tmp", "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=4)
-        os.replace("config.json.tmp", "config.json")
-    except Exception:
-        pass
-
     with _lock:
         if is_training or (training_thread is not None and training_thread.is_alive()):
             return {"status": "already_running", "mode": current_training_mode}
+
+        _persist_training_config(
+            chosen_capital, chosen_target_index, chosen_derivative_type, chosen_strike_pref
+        )
 
         stop_event.clear()
         training_logs.clear()
@@ -139,7 +174,6 @@ async def start_training(
             training_thread.start()
         except Exception as e:
             is_training = False
-            logger = __import__("logging").getLogger("trading.api.training")
             logger.error(f"Failed to start training thread: {e}")
             raise HTTPException(status_code=500, detail="Failed to start training thread.")
 

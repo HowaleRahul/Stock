@@ -68,18 +68,26 @@ async def test_api_lifespan_startup_and_shutdown():
     async def mock_init(seed_watchlist=True):
         return {"tables_created": True}
 
-    with patch("api.main.check_database_connection", side_effect=lambda: mock_status_connected):
-        with patch("api.main.init_database", side_effect=mock_init) as mock_init_call:
-            with patch("api.main.engine", mock_engine):
-                async with lifespan(app):
-                    assert mock_init_call.call_count == 1
-                assert mock_engine.dispose.call_count == 1
+    with patch("api.main.settings.environment", "development"):
+        with patch("api.main.settings.api_host", "127.0.0.1"):
+            with patch("api.main.settings.api_key", None):
+                with patch.dict("os.environ", {"API_KEY": ""}):
+                    with patch("api.main.check_database_connection", side_effect=lambda: mock_status_connected):
+                        with patch("api.main.init_database", side_effect=mock_init) as mock_init_call:
+                            with patch("api.main.engine", mock_engine):
+                                async with lifespan(app):
+                                    assert mock_init_call.call_count == 1
+                                assert mock_engine.dispose.call_count == 1
 
     # Case 2: DB Disconnected / Error
     mock_engine.dispose.reset_mock()
     mock_status_error = {"status": "error", "latency_ms": 0.0, "error": "connection refused"}
-    with patch("api.main.check_database_connection", side_effect=lambda: mock_status_error):
-        with patch("api.main.engine", mock_engine):
-            async with lifespan(app):
-                pass
-            assert mock_engine.dispose.call_count == 1
+    with patch("api.main.settings.environment", "development"):
+        with patch("api.main.settings.api_host", "127.0.0.1"):
+            with patch("api.main.settings.api_key", None):
+                with patch.dict("os.environ", {"API_KEY": ""}):
+                    with patch("api.main.check_database_connection", side_effect=lambda: mock_status_error):
+                        with patch("api.main.engine", mock_engine):
+                            async with lifespan(app):
+                                pass
+                            assert mock_engine.dispose.call_count == 1

@@ -11,7 +11,7 @@ from api.db import get_db, check_database_connection, engine, Base
 from models.init_db import init_database
 from api.router import router as data_router
 from api.dashboard_router import router as dashboard_router
-from api.auth import get_api_key
+from api.auth import get_api_key, validate_auth_configuration
 
 # Configure logging
 logging.basicConfig(
@@ -24,6 +24,7 @@ logger = logging.getLogger("trading.api")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle events for startup and shutdown of the FastAPI server."""
+    validate_auth_configuration()
     logger.info(f"🚀 Starting Personal AI-Assisted Trading System API in [{settings.environment}] mode...")
     logger.info(f"Target Focus Symbols: {settings.target_symbols}")
     

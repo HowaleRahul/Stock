@@ -6,7 +6,6 @@ import {
   Terminal,
   Activity,
   BrainCircuit,
-  Clock3,
   RefreshCw,
   Wallet,
   Sparkles,
@@ -16,12 +15,10 @@ import {
   ArrowDownRight,
   ShieldCheck,
   CheckCircle2,
-  SlidersHorizontal,
   Coins,
   TrendingUp,
   Cpu,
   Zap,
-  Percent,
   Compass
 } from 'lucide-react';
 import { OptionChartViewer } from '../components/OptionChartViewer';

@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     Never hardcode secrets in source code.
     """
     # App Environment
-    environment: str = Field(default="development", alias="ENVIRONMENT")
+    environment: str = Field(default="production", alias="ENVIRONMENT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     api_port: int = Field(default=8000, alias="API_PORT")
     api_host: str = Field(default="127.0.0.1", alias="API_HOST")

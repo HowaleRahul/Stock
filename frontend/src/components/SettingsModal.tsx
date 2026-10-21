@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { KeyRound, Shield, Save, X, CheckCircle2, AlertTriangle } from 'lucide-react';
 
@@ -8,14 +8,80 @@ interface SettingsModalProps {
   initialAuthError?: boolean;
 }
 
+interface ApiKeyStorageState {
+  apiKey: string;
+  error: string | null;
+}
+
+const readStoredApiKey = (): ApiKeyStorageState => {
+  try {
+    return { apiKey: localStorage.getItem('signal_desk_api_key') || '', error: null };
+  } catch (error) {
+    console.error('Unable to read the saved API key from browser storage.', error);
+    return {
+      apiKey: '',
+      error: 'Browser storage is unavailable. The API key will need to be entered again after reload.',
+    };
+  }
+};
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
   initialAuthError = false,
 }) => {
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('signal_desk_api_key') || '');
+  const [keyStorage, setKeyStorage] = useState(readStoredApiKey);
+  const apiKey = keyStorage.apiKey;
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [authError, setAuthError] = useState(initialAuthError);
+  const storageError = keyStorage.error;
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const focusable = () => Array.from(
+      dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    const initialFocus = dialog.querySelector<HTMLElement>('#api-key-input');
+    initialFocus?.focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
+      const elements = focusable();
+      if (elements.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = elements[0];
+      const last = elements[elements.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -23,12 +89,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     e.preventDefault();
     const cleanKey = apiKey.trim();
     if (cleanKey) {
-      localStorage.setItem('signal_desk_api_key', cleanKey);
       axios.defaults.headers.common['X-API-Key'] = cleanKey;
     } else {
-      localStorage.removeItem('signal_desk_api_key');
       delete axios.defaults.headers.common['X-API-Key'];
     }
+
+    try {
+      if (cleanKey) {
+        localStorage.setItem('signal_desk_api_key', cleanKey);
+      } else {
+        localStorage.removeItem('signal_desk_api_key');
+      }
+      setKeyStorage({ apiKey: cleanKey, error: null });
+    } catch (error) {
+      console.error('Unable to save the API key to browser storage.', error);
+      setKeyStorage({
+        apiKey: cleanKey,
+        error: 'Could not save the API key. It remains active for this tab only.',
+      });
+      setSavedSuccess(false);
+      setAuthError(false);
+      return;
+    }
+
     setSavedSuccess(true);
     setAuthError(false);
     setTimeout(() => {
@@ -38,6 +121,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   return (
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
@@ -74,6 +158,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         )}
 
+        {storageError && (
+          <div className="bg-amber-950/70 border border-amber-800 p-3 rounded-lg text-xs text-amber-200" role="alert">
+            {storageError}
+          </div>
+        )}
+
         {savedSuccess && (
           <div className="bg-emerald-950/70 border border-emerald-800 p-3 rounded-lg flex items-center gap-2 text-xs text-emerald-300">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
@@ -90,12 +180,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               id="api-key-input"
               type="password"
               value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
+              onChange={(e) => setKeyStorage(current => ({ ...current, apiKey: e.target.value }))}
               placeholder="Enter your secret API key..."
               className="w-full px-3.5 py-2.5 rounded-lg bg-gray-950 border border-gray-800 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono"
             />
             <span className="text-[11px] text-gray-500 mt-1 block">
-              Stored locally in browser storage and securely transmitted in the <code>X-API-Key</code> request header.
+              Stored in browser storage and sent in the <code>X-API-Key</code> header. Use HTTPS for remote access.
             </span>
           </div>
 

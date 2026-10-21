@@ -78,6 +78,7 @@ const SwingToolkit: React.FC = () => {
   const [orbPlan, setOrbPlan] = useState<ORBPlan | null>(null);
   const [scanning, setScanning] = useState(false);
   const [loadingWatchlist, setLoadingWatchlist] = useState(false);
+  const [watchlistError, setWatchlistError] = useState<string | null>(null);
   const [evaluatingOrb, setEvaluatingOrb] = useState<string | null>(null);
   const [notification, setNotification] = useState<string>('');
 
@@ -88,8 +89,9 @@ const SwingToolkit: React.FC = () => {
       if (res.data?.watchlist) {
         setWatchlist(res.data.watchlist);
       }
+      setWatchlistError(null);
     } catch {
-      // ignore
+      setWatchlistError('Unable to load the approved watchlist.')
     } finally {
       setLoadingWatchlist(false);
     }
@@ -305,7 +307,14 @@ const SwingToolkit: React.FC = () => {
           </span>
         </div>
 
-        {watchlist.length === 0 ? (
+        {loadingWatchlist ? (
+          <div className="text-center py-8 text-gray-400" role="status">Loading approved watchlist...</div>
+        ) : watchlistError ? (
+          <div className="flex items-center justify-center gap-3 py-8 text-sm text-red-300" role="alert">
+            <span>{watchlistError}</span>
+            <button type="button" className="underline" onClick={fetchWatchlist}>Retry</button>
+          </div>
+        ) : watchlist.length === 0 ? (
           <div className="text-center py-8 text-gray-500 text-sm">
             Watchlist is empty. Run the 3 scanners above and approve qualifying candidates.
           </div>

@@ -4,20 +4,26 @@ import axios from 'axios'
 import './index.css'
 import App from './App.tsx'
 
-// Intercept axios requests to attach API Key for production environments
+const currentUrl = new URL(window.location.href)
+const hasLegacyApiKey = currentUrl.searchParams.has('api_key') || currentUrl.searchParams.has('apiKey')
+if (hasLegacyApiKey) {
+  currentUrl.searchParams.delete('api_key')
+  currentUrl.searchParams.delete('apiKey')
+  window.history.replaceState(
+    window.history.state,
+    '',
+    `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`,
+  )
+}
+
 axios.interceptors.request.use((config) => {
   try {
-    const urlParams = new URLSearchParams(window.location.search);
-    const apiKeyFromUrl = urlParams.get('api_key') || urlParams.get('apiKey');
-    if (apiKeyFromUrl) {
-      localStorage.setItem('signal_desk_api_key', apiKeyFromUrl);
-    }
     const token = localStorage.getItem('signal_desk_api_key');
     if (token && !config.headers['X-API-Key']) {
       config.headers['X-API-Key'] = token;
     }
-  } catch {
-    // Ignore storage errors in restricted contexts
+  } catch (error) {
+    console.error('Unable to read the saved API key from browser storage.', error)
   }
   return config;
 });

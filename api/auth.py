@@ -2,8 +2,8 @@ import time
 import os
 import secrets
 import threading
+import ipaddress
 from typing import Dict, List, Optional
-from collections import defaultdict
 from fastapi import Request, HTTPException, status, Depends
 from fastapi.security import APIKeyHeader
 from api.config import settings
@@ -45,22 +45,51 @@ def rate_limiter(requests_per_minute: int = 60):
         return True
     return dependency
 
-# Optional API Key Authentication
+# API key authentication with a loopback-only local development exception.
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _configured_api_key() -> Optional[str]:
+    configured_key = settings.api_key.get_secret_value() if settings.api_key else None
+    return configured_key or os.getenv("API_KEY")
+
+
+def _allows_keyless_development() -> bool:
+    return (
+        settings.environment.lower() == "development"
+        and _is_loopback_host(settings.api_host)
+    )
+
+
+def validate_auth_configuration() -> None:
+    if not _configured_api_key() and not _allows_keyless_development():
+        raise RuntimeError(
+            "API authentication is not configured. Set API_KEY, or explicitly use "
+            "development mode on a loopback bind for local-only access."
+        )
+
+
 async def get_api_key(request: Request, api_key: Optional[str] = Depends(api_key_header)):
     """
-    Validates API key if it's set in the environment.
-    Development can run without a key for local use. Production must always
-    provide one; silently disabling authentication there exposes every
-    state-changing endpoint.
+    Validates the configured API key. Keyless access is limited to explicit
+    development mode on a loopback bind.
     Supports both X-API-Key header and Authorization: Bearer <key>.
     """
-    configured_key = settings.api_key.get_secret_value() if settings.api_key else None
-    expected_api_key = configured_key or os.getenv("API_KEY")
+    expected_api_key = _configured_api_key()
     if not expected_api_key:
-        if settings.environment.lower() != "development":
+        if not _allows_keyless_development():
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="API authentication is not configured."

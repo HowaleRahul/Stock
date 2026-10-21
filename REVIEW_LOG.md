@@ -225,3 +225,44 @@
 - Live/paper execution remains Indian-specific by design; non-Indian execution must stay blocked until exchange, currency, calendar, fee, lot-size, and broker support are implemented.
 - Rate limiting remains process-local in memory; distributed deployment with multiple Uvicorn workers requires a Redis-backed token bucket.
 - Compose provisions TimescaleDB; multi-service container orchestration for API, frontend, paper trader, and continuous trainer requires a unified production compose profile.
+
+## Pass 12 — Current-source production revalidation
+
+### Functional correctness
+
+- Training startup previously swallowed malformed/unwritable `config.json` errors and still returned a successful start response. Configuration writes now use a unique same-directory temporary file and atomic replace; a persistence error is logged and returns HTTP 500 before the training thread starts.
+- Training request fields now reject unsupported modes, indices, instruments, and strike preferences. Capital must be finite, positive, and at most INR 1,000,000,000.
+- Option chart requests are aborted when instrument parameters change or the component unmounts, preventing stale responses from replacing the current contract. Open position entry/target/stop-loss values are now shown as chart price lines.
+- Option-chart failures and Swing Toolkit watchlist loading/failure are surfaced with retryable, accessible states instead of silent failure or a misleading empty state.
+- Browser-storage errors for API-key entry are reported; the UI states that a key which could not be persisted is available only for the current tab. Settings dialog focus is moved into the dialog, trapped while open, restored on close, and Escape closes it.
+- Fixed TypeScript diagnostics: unused imports/state, unused option-chart props (now used), and a type-only `ReactNode` import.
+
+### Security and abuse
+
+- The environment default is now `production`. Startup fails when no API key is configured except for explicitly configured development mode bound to loopback; protected requests also fail closed. This prevents the implicit-development default from silently disabling auth on exposed binds/proxies.
+- API keys are no longer accepted from URL query parameters or copied to local storage from the URL. Legacy `api_key`/`apiKey` parameters are removed from the visible URL/history on app initialization. Rotate any key previously shared in a URL; the original request may already exist in upstream logs.
+- The read-only security review reported no additional actionable DOM injection issue in the reviewed legacy/web UI paths. No external or production target was contacted.
+- Browser-stored API keys remain accessible to same-origin JavaScript. Remote deployments must use HTTPS and should move to per-user, scoped credentials or an HttpOnly session design before serving untrusted users.
+
+### Performance, architecture, UX, and accessibility
+
+- The frontend production build splits routes and vendors; the chart vendor is still about 166 kB uncompressed (55 kB gzip), so chart loading remains a bundle-size follow-up.
+- The maintained frontend has a skip link, navigation landmarks, labeled settings input, modal semantics, and accessible loading/error announcements. No automated screen-reader, contrast, keyboard-browser, or cross-browser run was available; those are not claimed as verified.
+- `frontend_legacy` and `web` remain parallel/legacy interfaces; `web` hardcodes the local API origin and does not implement the current API-key flow. Do not treat either as a production frontend without consolidation and deployment-specific testing.
+- Existing architectural risks remain: continuous-training artifacts are not unified with inference deployment; feature construction is duplicated; execution is India-specific; rate limits and training state are process-local; Compose only provisions the database; the TimescaleDB image builds from a floating upstream `latest` branch.
+
+### Remaining report and readiness assessment
+
+- Confirmed issues addressed in this pass: implicit keyless default authentication (HIGH), URL credential persistence/leakage (MEDIUM), training configuration write failure reported as success (MEDIUM), unsupported training input acceptance (MEDIUM), stale option-chart responses/hidden chart errors (LOW), and ambiguous watchlist loading/failure (LOW).
+- Production readiness: **5/10**. The reviewed application paths have useful validation and automated checks, but deployment, distributed state/rate limits, model artifact lifecycle, shared browser credentials, and live-market integration remain material release blockers for a multi-user or multi-instance production deployment.
+- Review confidence: **7/10**. Static review, focused regression tests, build, type-check, and lint were completed; live database, live market/broker, browser automation, and production deployment behavior were intentionally not exercised.
+
+## Verification — Pass 12
+
+- Deterministic offline Python regression selection: **108 passed**, 2 dependency/deprecation warnings.
+- Python compilation across API, backtest, data, ML, models, setups, paper trader, and live trader modules: passed.
+- Frontend TypeScript check (`tsc --noEmit -p tsconfig.app.json`): passed.
+- Frontend production build: passed. Largest route vendor chunks: React 234.19 kB uncompressed; charts 166.45 kB uncompressed.
+- Frontend lint: passed with 16 non-blocking React hook/Fast Refresh warnings in existing UI code.
+- `git diff --check`: passed.
+- Not run by design: database persistence/health integration, live quote/news/search tests that can call external providers, live broker/trading flows, browser automation, and deployment/proxy integration.

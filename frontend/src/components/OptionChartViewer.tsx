@@ -1,17 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
-import { createChart, CandlestickSeries, LineSeries } from 'lightweight-charts';
+import { createChart, CandlestickSeries, LineSeries, LineStyle } from 'lightweight-charts';
 import type { Time } from 'lightweight-charts';
 import {
-  TrendingUp,
-  Activity,
-  Layers,
   Zap,
-  Percent,
-  RefreshCw,
-  Compass,
-  ArrowUpRight,
-  ArrowDownRight
+  RefreshCw
 } from 'lucide-react';
 
 interface OptionChartProps {
@@ -46,6 +39,8 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
   const chartRef = useRef<any>(null);
   const candleSeriesRef = useRef<any>(null);
   const vwapSeriesRef = useRef<any>(null);
+  const priceLinesRef = useRef<any[]>([]);
+  const optionRequestRef = useRef<AbortController | null>(null);
 
   // Sync state if props change
   useEffect(() => {
@@ -54,7 +49,10 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
     if (initialOptionType) setOptionType(initialOptionType);
   }, [initialUnderlying, initialStrike, initialOptionType]);
 
-  const fetchOptionData = async () => {
+  const fetchOptionData = useCallback(async () => {
+    optionRequestRef.current?.abort();
+    const controller = new AbortController();
+    optionRequestRef.current = controller;
     setLoading(true);
     setError(null);
     try {
@@ -66,30 +64,46 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
           timeframe,
           limit: 100,
         },
+        signal: controller.signal,
       });
-      setChartData(res.data);
-    } catch {
-      setError('Option chart data currently unavailable.');
+      if (!controller.signal.aborted) setChartData(res.data);
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        console.error('Unable to load option chart data.', error);
+        setError('Option chart data currently unavailable.');
+      }
     } finally {
-      setLoading(false);
+      if (optionRequestRef.current === controller) {
+        optionRequestRef.current = null;
+        setLoading(false);
+      }
     }
-  };
+  }, [underlying, strike, optionType, timeframe]);
 
   useEffect(() => {
-    fetchOptionData();
-    const interval = setInterval(fetchOptionData, 12000); // 12s full candle history refresh
-    return () => clearInterval(interval);
-  }, [underlying, strike, optionType, timeframe]);
+    void fetchOptionData();
+    const interval = setInterval(() => void fetchOptionData(), 12000);
+    return () => {
+      clearInterval(interval);
+      optionRequestRef.current?.abort();
+      optionRequestRef.current = null;
+    };
+  }, [fetchOptionData]);
 
   // Live 2s Option Tick Loop: moves the option candle & Greeks in real time
   useEffect(() => {
     let isMounted = true;
+    let tickController: AbortController | null = null;
     const fetchOptionTick = async () => {
+      tickController?.abort();
+      const controller = new AbortController();
+      tickController = controller;
       try {
         const res = await axios.get('/api/v1/market/option-tick', {
-          params: { underlying, strike, option_type: optionType }
+          params: { underlying, strike, option_type: optionType },
+          signal: controller.signal,
         });
-        if (!isMounted || !res.data) return;
+        if (!isMounted || controller.signal.aborted || !res.data) return;
 
         // Update live Greeks and indicators in chartData state
         setChartData((prev: any) => {
@@ -121,14 +135,17 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
             close: res.data.premium,
           });
         }
-      } catch {
-        // Silently ignore tick timeout
+      } catch (error) {
+        if (isMounted && !controller.signal.aborted) {
+          console.warn('Unable to refresh live option tick.', error);
+        }
       }
     };
 
     const tickInterval = setInterval(fetchOptionTick, 2000);
     return () => {
       isMounted = false;
+      tickController?.abort();
       clearInterval(tickInterval);
     };
   }, [underlying, strike, optionType, chartData?.candles]);
@@ -195,12 +212,14 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
       chartRef.current = null;
       candleSeriesRef.current = null;
       vwapSeriesRef.current = null;
+      priceLinesRef.current = [];
     };
   }, [height]);
 
   // Update chart series data
   useEffect(() => {
-    if (!candleSeriesRef.current || !chartData?.candles) return;
+    const candleSeries = candleSeriesRef.current;
+    if (!candleSeries || !chartData?.candles) return;
 
     const formattedCandles = chartData.candles.map((c: any) => ({
       time: (new Date(c.time).getTime() / 1000) as Time,
@@ -215,11 +234,33 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
       value: c.vwap,
     }));
 
-    candleSeriesRef.current.setData(formattedCandles);
+    candleSeries.setData(formattedCandles);
     if (vwapSeriesRef.current) {
       vwapSeriesRef.current.setData(formattedVwap);
     }
   }, [chartData]);
+
+  useEffect(() => {
+    const candleSeries = candleSeriesRef.current;
+    if (!candleSeries) return;
+    priceLinesRef.current.forEach(line => candleSeries.removePriceLine(line));
+    priceLinesRef.current = [
+      { price: entryPrice, color: '#60a5fa', title: 'Entry' },
+      { price: targetPrice, color: '#34d399', title: 'Target' },
+      { price: stopLossPrice, color: '#f87171', title: 'Stop Loss' },
+    ]
+      .filter((level): level is { price: number; color: string; title: string } =>
+        typeof level.price === 'number' && Number.isFinite(level.price) && level.price > 0
+      )
+      .map(level => candleSeries.createPriceLine({
+        price: level.price,
+        color: level.color,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: level.title,
+      }));
+  }, [entryPrice, targetPrice, stopLossPrice, height]);
 
   const intervalStep = underlying === 'BANKNIFTY' ? 100 : 50;
 
@@ -394,6 +435,14 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
       )}
 
       {/* Main Lightweight Option Candlestick Chart */}
+      {error && (
+        <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-red-800 bg-red-950/50 p-3 text-sm text-red-200" role="alert">
+          <span>{error}</span>
+          <button type="button" onClick={fetchOptionData} className="shrink-0 underline">
+            Retry
+          </button>
+        </div>
+      )}
       <div className="relative">
         <div ref={chartContainerRef} className="w-full rounded-lg overflow-hidden border border-gray-800/80" />
         {loading && (
