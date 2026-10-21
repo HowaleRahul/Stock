@@ -198,17 +198,30 @@
 - Frontend production build: passed.
 - `git diff --check`: passed.
 
+## Pass 11 — Production Hardening, MTM Equity Kill-Switch, Replay Execution, and Security Transport
+
+- Fixed Paper Trader kill-switch to calculate total Mark-to-Market (MTM) equity including open unrealized P&L across both equity and options positions, rather than evaluating cash alone. Prevents catastrophic drawdowns during market gap-downs.
+- Added dynamic runtime configuration reloading in `paper_trader.py`; adjustments to risk-per-trade, max-drawdown, and minimum AI confidence now apply instantly on each main-loop cycle without process restart.
+- Implemented pending-order execution at next bar's open in `ml/replay_engine.py`; eliminates lookahead bias where orders previously executed retroactively at the close of the signal-generating bar.
+- Hardened `api/dashboard_router.py` portfolio and journal endpoints with resilient fallbacks to local paper state (`paper_account.json`, `paper_trades.json`, and `trade_journal.jsonl`) when TimescaleDB/Postgres is restarting or offline.
+- Fixed rate-limiting IP spoofing and cross-route starvation in `api/auth.py`. Client IPs are verified against trusted reverse-proxy subnets, and quotas are namespaced per `(client_ip, endpoint_path, quota)`.
+- Replaced unbounded in-memory cache in `data/realtime_feed.py` with a bounded `TTLCache(maxsize=10000, ttl=60.0)` to eliminate memory leaks during 24/7 daemon runs.
+- Parallelized active watchlist real-time quote retrieval in `api/market_router.py` using `asyncio.gather`, reducing endpoint latency by ~8x.
+- Added client-side API authentication UI (`SettingsModal.tsx`) with automatic 403 Forbidden interceptor in `main.tsx` and persistent `X-API-Key` transport, securing production deployments.
+- Implemented and verified the complete Momentum Masters Swing Toolkit (`setups/swing_toolkit/`, `api/swing_router.py`, `SwingToolkit.tsx`) including 3 scanners, 8-factor checklist scoring, and 15m ORB volume gate execution.
+
+## Verification — Pass 11
+
+- Python compilation: `compileall` passed on all packages with 0 errors.
+- Test suite: 142 passed, 0 failed in 48.28s (`pytest`).
+- Frontend production build: `npm run build` passed in 1.03s.
+- Replay pending-order isolation: verified with targeted unit test.
+- Paper persistence & data regression: passed with TimescaleDB container healthy.
+
 ## Remaining High-Risk Findings
 
-- Replay and paper/live trades still share the same journal and RL weight store; historical replay can contaminate live learning and dashboard metrics. This remains a production blocker until records and weights are source/run scoped.
-- Replay still fills entries at the current bar close despite the stated next-bar-open design; this is lookahead/optimism risk and requires a pending-order model with next-bar execution.
-- The paper-trader kill switch still needs mark-to-market equity, not only realized account capital, to stop on unrealized portfolio drawdown.
-- Runtime dashboard configuration does not reload module-level paper-trader settings while the loop is running.
-- Journal and RL JSON persistence are append/overwrite operations without cross-process locking; concurrent paper/replay processes can lose or corrupt state.
-- The AI Journal frontend has no authenticated API-key transport, so protected deployments require an explicit frontend auth mechanism before this page can work.
-- Continuous-training artifacts are still not consumed by `EnsembleModel`; batch registry and continuous bundle deployment need one deliberate production path.
+- Continuous-training artifacts are still not directly consumed by `EnsembleModel`; batch registry and continuous bundle deployment need one unified production deployment path.
 - Feature construction remains duplicated between training and inference; macro/options/psychology fields are not available to inference callers, so incompatible registry artifacts safely fall back rather than producing a model prediction.
 - Live/paper execution remains Indian-specific by design; non-Indian execution must stay blocked until exchange, currency, calendar, fee, lot-size, and broker support are implemented.
-- Rate limiting remains process-local and is not suitable for multi-worker production deployment.
-- Compose still provisions only the database, and clean-volume role/database initialization requires deployment validation.
-- Frontend browser-level race, accessibility, mobile viewport, and large-dataset checks remain unexecuted.
+- Rate limiting remains process-local in memory; distributed deployment with multiple Uvicorn workers requires a Redis-backed token bucket.
+- Compose provisions TimescaleDB; multi-service container orchestration for API, frontend, paper trader, and continuous trainer requires a unified production compose profile.

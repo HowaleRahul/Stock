@@ -53,10 +53,16 @@ def start_services():
         print("\n🛑 Shutting down all services...")
         for name, proc in processes:
             print(f"Terminating {name}...")
-            proc.terminate()
+            if os.name == "nt":
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+                except Exception:
+                    proc.terminate()
+            else:
+                proc.terminate()
             
         # Give them a moment to terminate gracefully
-        time.sleep(2)
+        time.sleep(1)
         print("✅ Shutdown complete.")
         sys.exit(0)
 

@@ -25,16 +25,21 @@ class FundamentalsSetup(BaseSetup):
         try:
             info = get_fundamentals(ticker)
             
-            if not info or "trailingPE" not in info:
+            pe_raw = info.get("trailingPE")
+            if not info or pe_raw is None:
                 return SetupSignal(self.name, "neutral", 0.0, "Fundamental data not available.")
                 
-            pe = info.get("trailingPE")
+            try:
+                pe = float(pe_raw)
+            except (ValueError, TypeError):
+                return SetupSignal(self.name, "neutral", 0.0, "Fundamental data not available.")
+                
             fwd_pe = info.get("forwardPE")
             peg = info.get("pegRatio")
             industry_pe = info.get("industryPE")  # Sometimes missing
             
-            reason = f"Trailing P/E: {pe}."
-            if fwd_pe:
+            reason = f"Trailing P/E: {pe:.2f}."
+            if fwd_pe is not None:
                 reason += f" Forward P/E: {fwd_pe}."
                 
             # Basic value heuristic

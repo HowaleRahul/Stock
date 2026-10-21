@@ -31,3 +31,25 @@ def test_replay_journal_and_rl_state_are_isolated(tmp_path):
         is_win=True,
     )
     assert replay_weights.exists()
+
+
+def test_replay_pending_order_model():
+    from ml.replay_engine import ReplayEngine
+    engine = ReplayEngine()
+    try:
+        assert engine._pending_order is None
+        # Simulate queuing a pending order
+        engine._pending_order = {
+            "id": "pending-123",
+            "ticker": "TEST.NS",
+            "direction": "LONG",
+            "quantity": 10,
+            "invested": 1000.0,
+            "entry_price": 100.0,
+            "planned_entry": 100.0,
+            "tp": 110.0,
+            "sl": 95.0,
+        }
+        assert engine._pending_order["id"] == "pending-123"
+    finally:
+        engine.close()

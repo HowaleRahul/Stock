@@ -38,15 +38,21 @@ class OptionsSetup(BaseSetup):
             if calls.empty or puts.empty:
                 return SetupSignal(self.name, "neutral", 0.0, "Incomplete options data.")
                 
-            total_call_oi = calls['openInterest'].sum()
-            total_put_oi = puts['openInterest'].sum()
+            if 'openInterest' not in calls.columns or 'openInterest' not in puts.columns:
+                return SetupSignal(self.name, "neutral", 0.0, "Open Interest data not found in option chain.")
+
+            total_call_oi = float(calls['openInterest'].fillna(0).sum())
+            total_put_oi = float(puts['openInterest'].fillna(0).sum())
             
-            if total_call_oi == 0:
+            import math
+            if math.isnan(total_call_oi) or total_call_oi <= 0:
                 return SetupSignal(self.name, "neutral", 0.0, "No Call Open Interest.")
                 
             pcr = total_put_oi / total_call_oi
+            if math.isnan(pcr):
+                return SetupSignal(self.name, "neutral", 0.0, "Could not calculate Put-Call Ratio.")
             
-            reason = f"PCR for {nearest_exp} expiry is {pcr:.2f}. (Puts OI: {total_put_oi}, Calls OI: {total_call_oi})"
+            reason = f"PCR for {nearest_exp} expiry is {pcr:.2f}. (Puts OI: {total_put_oi:,.0f}, Calls OI: {total_call_oi:,.0f})"
             
             # PCR > 1 typically implies heavy put buying (bearish sentiment)
             if pcr > 1.2:

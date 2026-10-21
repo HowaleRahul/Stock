@@ -95,3 +95,44 @@ async def create_strategy(
                 os.unlink(temp_path)
 
     return {"status": "success", "strategy": strategy}
+
+
+@router.delete("/{name}")
+async def delete_strategy(
+    name: str,
+    _api_key: str = Depends(get_api_key),
+    _rate_limit: bool = Depends(rate_limiter(10))
+):
+    """Delete a custom strategy by name."""
+    clean_name = name.strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Strategy name cannot be empty.")
+    
+    async with _file_lock:
+        if not os.path.exists(STRATEGY_FILE):
+            raise HTTPException(status_code=404, detail=f"Strategy '{clean_name}' not found.")
+        try:
+            with open(STRATEGY_FILE, "r", encoding="utf-8") as f:
+                strategies = json.load(f)
+            if not isinstance(strategies, list):
+                raise ValueError("strategy store is not a list")
+        except (OSError, ValueError, json.JSONDecodeError):
+            raise HTTPException(status_code=503, detail="Strategy store is unavailable.")
+
+        new_strategies = [s for s in strategies if str(s.get("name", "")).casefold() != clean_name.casefold()]
+        if len(new_strategies) == len(strategies):
+            raise HTTPException(status_code=404, detail=f"Strategy '{clean_name}' not found.")
+
+        directory = os.path.dirname(os.path.abspath(STRATEGY_FILE))
+        fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".strategies-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(new_strategies, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, STRATEGY_FILE)
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    return {"status": "success", "message": f"Strategy '{clean_name}' deleted."}

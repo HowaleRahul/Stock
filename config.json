@@ -18,5 +18,8 @@
         "FibonacciSetup",
         "RsiDivergenceSetup",
         "MeanReversionSetup"
-    ]
+    ],
+    "target_index": "ALL",
+    "derivative_type": "AUTO",
+    "strike_preference": "AUTO"
 }

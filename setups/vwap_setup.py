@@ -32,16 +32,20 @@ class VWAPSetup(BaseSetup):
             vs = vol_sma.values
             vw = vwap.values
             
-            last_close = c[-1]
-            last_vwap = vw[-1]
-            prev_close = c[-2]
-            prev_vwap = vw[-2]
+            last_close = float(c[-1])
+            last_vwap = float(vw[-1])
+            prev_close = float(c[-2])
+            prev_vwap = float(vw[-2])
             
-            last_vol = v[-1]
-            last_vol_sma = vs[-1]
+            import numpy as np
+            if np.isnan(last_vwap) or np.isnan(prev_vwap) or np.isnan(last_close) or np.isnan(prev_close):
+                return SetupSignal(self.name, "neutral", 0.0, "VWAP values contain NaN.")
+
+            last_vol = float(v[-1])
+            last_vol_sma = float(vs[-1]) if not np.isnan(vs[-1]) else last_vol
             
             # Identify volume spike (> 1.5x average)
-            vol_spike = last_vol > (1.5 * last_vol_sma)
+            vol_spike = last_vol > (1.5 * last_vol_sma) and last_vol_sma > 0
             
             # Crossover logic
             cross_up = prev_close < prev_vwap and last_close > last_vwap

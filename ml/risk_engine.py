@@ -58,6 +58,8 @@ class TradePlan:
     kelly_fraction: float = 0.0
     probability_of_ruin: float = 0.0
     win_rate: float = 0.5  # Historical win rate used
+    capital: float = 100000.0  # Available user capital
+    capital_tier: str = "STANDARD"  # MICRO, SMALL, or GROWTH
 
     # Context
     atr_at_entry: float = 0.0
@@ -90,6 +92,8 @@ class TradePlan:
             "kelly_fraction": round(self.kelly_fraction, 4),
             "probability_of_ruin": round(self.probability_of_ruin, 6),
             "win_rate": round(self.win_rate, 4),
+            "capital": round(self.capital, 2),
+            "capital_tier": self.capital_tier,
             "atr_at_entry": round(self.atr_at_entry, 4),
             "regime": self.regime,
             "sl_method": self.sl_method,
@@ -178,6 +182,49 @@ class RiskEngine:
                   if t.get("status") == "CLOSED_LOSS" and t.get("pnl_pct", 0) < 0]
         return float(np.mean(losses)) if losses else 0.005
 
+    @staticmethod
+    def get_capital_tier(capital: float) -> Dict[str, Any]:
+        """
+        Dynamically classifies capital and adjusts risk limits, allocation caps,
+        and prediction confidence thresholds.
+        
+        - MICRO (<= ₹25,000): e.g. ₹10k user. Ultra-tight risk, high confidence standard (68%+),
+          early breakeven ratchet to ensure capital preservation.
+        - SMALL (₹25,000 to ₹1 Lakh): Standard 2% risk, 65%+ confidence.
+        - GROWTH (> ₹1 Lakh): Standard growth parameters.
+        """
+        cap = max(100.0, float(capital or 100000.0))
+        if cap <= 25000.0:
+            return {
+                "tier": "MICRO",
+                "label": "Micro Capital Tier (₹10k - ₹25k)",
+                "max_risk_pct": 0.015,         # Max 1.5% risk per trade (e.g. ₹150 on ₹10k)
+                "max_allocation_pct": 0.35,     # Max 35% of capital in a single stock
+                "min_ai_confidence": 0.68,      # Strict confluence gate: never take weak trades
+                "min_rr_ratio": 1.8,            # Demand minimum 1.8:1 edge
+                "early_breakeven_atr": 0.8,     # Move to breakeven after 0.8× ATR move
+            }
+        elif cap <= 100000.0:
+            return {
+                "tier": "SMALL",
+                "label": "Small Capital Tier (₹25k - ₹1 Lakh)",
+                "max_risk_pct": 0.02,          # Max 2% risk per trade
+                "max_allocation_pct": 0.30,
+                "min_ai_confidence": 0.65,
+                "min_rr_ratio": 1.5,
+                "early_breakeven_atr": 1.0,
+            }
+        else:
+            return {
+                "tier": "GROWTH",
+                "label": "Standard/Growth Capital Tier (> ₹1 Lakh)",
+                "max_risk_pct": 0.02,
+                "max_allocation_pct": 0.25,
+                "min_ai_confidence": 0.60,
+                "min_rr_ratio": 1.5,
+                "early_breakeven_atr": 1.0,
+            }
+
     # -----------------------------------------------------------------------
     # Core: Generate a complete trade plan
     # -----------------------------------------------------------------------
@@ -213,8 +260,8 @@ class RiskEngine:
         close = float(df["close"].iloc[-1])
         atr = float(df["atr"].iloc[-1]) if "atr" in df.columns else self._calculate_atr(df)
 
-        # Prevent zero ATR
-        if atr <= 0:
+        # Prevent zero or NaN ATR
+        if math.isnan(atr) or atr <= 0:
             atr = close * 0.01
 
         max_hold = TIMEFRAME_HOLD_LIMITS.get(timeframe, 20)
@@ -240,23 +287,27 @@ class RiskEngine:
 
         rr_ratio = tp_distance / sl_distance if sl_distance > 0 else 0.0
 
-        # 5. Position Sizing (Kelly Criterion, capped at 2%)
+        # 5. Position Sizing adapted dynamically to User Capital Tier
+        tier = self.get_capital_tier(capital)
         kelly_f = self._kelly_criterion(ai_probability, rr_ratio)
-        risk_pct = min(kelly_f, MAX_RISK_PER_TRADE_PCT)
+        risk_pct = min(kelly_f, tier["max_risk_pct"])
         risk_pct = max(risk_pct, 0.001)  # Floor at 0.1% to avoid zero positions
 
         capital_at_risk = capital * risk_pct
-        qty = int(capital_at_risk / sl_distance) if sl_distance > 0 else 0
+        raw_qty = int(capital_at_risk / sl_distance) if sl_distance > 0 else 0
 
-        # Cap quantity so position value doesn't exceed capital
-        if qty > 0:
-            position_val = qty * entry
-            if position_val > capital:
-                qty = int(capital / entry)
-                position_val = qty * entry
-        else:
-            position_val = 0.0
+        # Max allocation cap (e.g. max 35% of total capital in any single instrument)
+        max_position_val = capital * tier["max_allocation_pct"]
+        alloc_qty = int(max_position_val / entry) if entry > 0 else 0
+        qty = min(raw_qty, alloc_qty)
 
+        # Micro-Capital Adaptation (e.g. ₹10,000 capital):
+        # If integer truncation resulted in qty == 0, but user has enough capital
+        # to safely buy 1 share without risking more than 2.5% of their capital, allow 1 share!
+        if qty <= 0 and entry <= max_position_val and sl_distance <= (capital * 0.025):
+            qty = 1
+
+        position_val = qty * entry if qty > 0 else 0.0
         max_loss = qty * sl_distance
         max_profit = qty * tp_distance
 
@@ -287,6 +338,8 @@ class RiskEngine:
             kelly_fraction=kelly_f,
             probability_of_ruin=p_ruin,
             win_rate=self._win_rate,
+            capital=capital,
+            capital_tier=tier["tier"],
             atr_at_entry=atr,
             regime=regime,
             sl_method=sl_method,
@@ -526,33 +579,44 @@ class RiskEngine:
         Returns:
             Updated trade dict with new trailing_stop value
         """
-        entry = trade["entry_price"]
-        atr = trade["atr_at_entry"]
-        current_trail = trade.get("trailing_stop", trade["sl"])
+        entry = float(trade.get("entry_price", 0.0))
+        atr = trade.get("atr_at_entry")
+        if atr is None or math.isnan(atr) or atr <= 0 or entry <= 0:
+            return trade
 
-        if trade["direction"] == "LONG":
+        current_trail = trade.get("trailing_stop")
+        if current_trail is None:
+            current_trail = trade.get("sl")
+        if current_trail is None:
+            current_trail = entry
+
+        is_micro = trade.get("capital_tier") == "MICRO" or trade.get("invested", 0) <= 25000
+        be_thresh = 0.8 if is_micro else TRAIL_BREAKEVEN_THRESHOLD
+
+        if trade.get("direction") == "LONG":
             # How far has price moved in our favor?
             favorable_move = current_high - entry
 
             if favorable_move >= TRAIL_LOCK_PROFIT_THRESHOLD * atr:
                 # Lock in 0.5× ATR profit
                 new_trail = entry + (TRAIL_LOCK_AMOUNT * atr)
-            elif favorable_move >= TRAIL_BREAKEVEN_THRESHOLD * atr:
-                # Move to breakeven
-                new_trail = entry
+            elif favorable_move >= be_thresh * atr:
+                # Move to breakeven (+ minor buffer for STT friction)
+                new_trail = entry * 1.0005
             else:
                 new_trail = current_trail
 
             # Never move trailing stop downward
             trade["trailing_stop"] = max(current_trail, new_trail)
 
-        elif trade["direction"] == "SHORT":
+        elif trade.get("direction") == "SHORT":
             favorable_move = entry - current_low
 
             if favorable_move >= TRAIL_LOCK_PROFIT_THRESHOLD * atr:
                 new_trail = entry - (TRAIL_LOCK_AMOUNT * atr)
-            elif favorable_move >= TRAIL_BREAKEVEN_THRESHOLD * atr:
-                new_trail = entry
+            elif favorable_move >= be_thresh * atr:
+                # Move to breakeven (- minor buffer for STT friction)
+                new_trail = entry * 0.9995
             else:
                 new_trail = current_trail
 
@@ -638,26 +702,35 @@ class RiskEngine:
         If any gate fails, mark the plan as rejected with reasons.
         """
         rejections = []
+        tier = self.get_capital_tier(plan.capital)
 
-        # Gate 1: Risk:Reward minimum
-        if plan.risk_reward_ratio < MIN_RISK_REWARD_RATIO:
+        # Gate 0: Capital Affordability Check
+        if plan.entry_price > plan.capital:
             rejections.append(
-                f"R:R ratio {plan.risk_reward_ratio:.2f}:1 is below minimum "
-                f"{MIN_RISK_REWARD_RATIO}:1. The potential reward does not justify the risk."
+                f"Capital Insufficiency: Instrument spot price ₹{plan.entry_price:,.2f} exceeds "
+                f"available capital ₹{plan.capital:,.2f}. Trade affordable constituent equities (e.g. SBIN, TATAMOTORS, ITC) or Options instead."
+            )
+
+        # Gate 1: Risk:Reward minimum (Dynamically strict for Micro accounts)
+        min_rr = tier["min_rr_ratio"]
+        if plan.risk_reward_ratio < min_rr:
+            rejections.append(
+                f"R:R ratio {plan.risk_reward_ratio:.2f}:1 is below {min_rr}:1 minimum required for "
+                f"{tier['tier']} capital tier. High-precision rule requires asymmetric reward to risk."
             )
 
         # Gate 2: Position size must be positive
         if plan.position_size_qty <= 0:
             rejections.append(
-                "Position size calculated as 0 units. Capital may be insufficient "
-                "or ATR-based stop distance is too wide."
+                f"Position size calculated as 0 units. Capital (₹{plan.capital:,.2f}) is insufficient "
+                f"for 1 share at ₹{plan.entry_price:,.2f} within the safe risk allocation limits."
             )
 
-        # Gate 3: Probability of Ruin
-        if plan.probability_of_ruin > 0.10:
+        # Gate 3: Probability of Ruin (Strict 8% cap)
+        if plan.probability_of_ruin > 0.08:
             rejections.append(
                 f"Probability of Ruin is {plan.probability_of_ruin*100:.2f}% — "
-                f"exceeds 10% safety threshold. Reduce position size or improve edge."
+                f"exceeds 8% safety threshold. Skipping trade to guarantee capital preservation."
             )
 
         # Gate 4: Correlation check
@@ -667,11 +740,12 @@ class RiskEngine:
         if is_correlated:
             rejections.append(corr_reason)
 
-        # Gate 5: AI confidence floor
-        if plan.ai_probability < 0.55:
+        # Gate 5: AI confidence floor (Dynamically calibrated to Capital Tier)
+        min_conf = tier["min_ai_confidence"]
+        if plan.ai_probability < min_conf:
             rejections.append(
-                f"AI confidence {plan.ai_probability*100:.1f}% is below 55% minimum. "
-                f"Edge is too thin for a swing trade."
+                f"AI confidence {plan.ai_probability*100:.1f}% is below {min_conf*100:.1f}% requirement "
+                f"for {tier['tier']} capital tier. High-precision confluence standard not met."
             )
 
         if rejections:
@@ -719,5 +793,11 @@ class RiskEngine:
         low_close = np.abs(df["low"] - df["close"].shift())
         ranges = pd.concat([high_low, high_close, low_close], axis=1)
         true_range = np.max(ranges, axis=1)
-        atr = true_range.rolling(period).mean().iloc[-1]
-        return float(atr) if not np.isnan(atr) else float(true_range.mean())
+        atr_series = true_range.rolling(period, min_periods=1).mean()
+        if len(atr_series) == 0:
+            return 1.0
+        atr = float(atr_series.iloc[-1])
+        if math.isnan(atr) or atr <= 0:
+            close = float(df["close"].iloc[-1]) if "close" in df else 100.0
+            return float(close * 0.01)
+        return float(atr)

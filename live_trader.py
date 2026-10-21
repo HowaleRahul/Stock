@@ -51,22 +51,58 @@ async def get_active_trades():
         res = await session.execute(stmt)
         return list(res.scalars().all())
 
-async def close_trade(trade_id, exit_price):
+async def close_trade(trade_id, exit_price, broker=None):
     async with async_session_factory() as session:
         stmt = select(Trade).where(Trade.id == trade_id)
         res = await session.execute(stmt)
         trade = res.scalar_one_or_none()
         if trade:
+            is_option = " " in (trade.ticker or "")
+            # If a live broker is connected, submit the closing order
+            if broker and getattr(broker, "is_connected", False):
+                try:
+                    # For options, long premium positions are always closed by selling.
+                    # For equities, exit is SELL for LONG, BUY for SHORT.
+                    if is_option:
+                        exit_dir = "SELL"
+                        exchange = "NFO"
+                    else:
+                        exit_dir = "SELL" if str(trade.direction).upper() in {"LONG", "BULLISH", "BUY"} else "BUY"
+                        exchange = "NSE"
+
+                    broker.place_order(
+                        ticker=trade.ticker,
+                        quantity=trade.quantity,
+                        direction=exit_dir,
+                        exchange=exchange,
+                    )
+                    logger.info(f"Submitted live exit order ({exit_dir}) to broker for {trade.ticker}")
+                except Exception as broker_err:
+                    logger.error(f"Failed to submit broker exit order for {trade.ticker}: {broker_err}")
+
             trade.is_open = False
             trade.exit_price = exit_price
-            trade.exit_time = datetime.datetime.utcnow()
+            trade.exit_time = datetime.datetime.now(datetime.timezone.utc)
             
             pnl = (exit_price - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
-            if str(trade.direction).upper() in {"BEARISH", "SHORT", "SELL"}:
+            # For options, profit is always (exit - entry). Only invert for short equity trades.
+            if not is_option and str(trade.direction).upper() in {"BEARISH", "SHORT", "SELL"}:
                 pnl = -pnl
             trade.pnl_pct = pnl * 100
+            cash_pnl = trade.invested * pnl if trade.invested else 0.0
             
             await session.commit()
+            return {
+                "id": trade.id,
+                "ticker": trade.ticker,
+                "direction": trade.direction,
+                "entry_price": trade.entry_price,
+                "exit_price": exit_price,
+                "status": "CLOSED_TP" if pnl > 0 else "CLOSED_SL",
+                "pnl_pct": pnl,
+                "cash_pnl": cash_pnl,
+            }
+        return None
 
 async def open_trade(trade_record):
     async with async_session_factory() as session:
@@ -110,11 +146,17 @@ async def run_live_loop_async():
     while True:
         try:
             active_live_orders = await get_active_trades()
+            config = load_config()
+            min_ai_confidence = float(config.get("min_ai_confidence", 0.65))
+            configured_capital = float(config.get("capital", 100000.0))
             
             for ticker in TICKERS:
-                df = yf.download(ticker, period="1mo", interval=TIMEFRAME, progress=False)
+                clean_sym = ticker.replace("^", "")
+                df = await asyncio.to_thread(
+                    yf.download, ticker, period="1mo", interval=TIMEFRAME, progress=False
+                )
                 
-                if df.empty or len(df) < 50:
+                if df is None or df.empty or len(df) < 50:
                     continue
                     
                 if isinstance(df.columns, pd.MultiIndex):
@@ -124,7 +166,8 @@ async def run_live_loop_async():
                 current_price = float(df['close'].iloc[-1])
                 
                 for trade in active_live_orders:
-                    if trade.ticker == ticker or trade.ticker.startswith(ticker):
+                    is_match = (trade.ticker == ticker) or trade.ticker.startswith(ticker) or trade.ticker.startswith(clean_sym)
+                    if is_match:
                         if trade.stop_loss is not None and trade.take_profit is not None:
                             direction = str(trade.direction).upper()
                             if direction in {"LONG", "BULLISH", "BUY"}:
@@ -136,20 +179,40 @@ async def run_live_loop_async():
                                 should_exit = False
                             if should_exit:
                                 logger.info(f"Closing live position: {trade.ticker}")
-                                await close_trade(trade.id, current_price)
-                                notifier.send_exit_alert({"ticker": trade.ticker}, is_live=True)
+                                parts = (trade.ticker or "").split()
+                                is_option = len(parts) == 3 and parts[2] in ("CE", "PE")
+                                if is_option:
+                                    try:
+                                        strike = float(parts[1])
+                                        opt_type = parts[2]
+                                        iv = (df['macro_vix'].iloc[-1] / 100.0) if 'macro_vix' in df.columns else 0.15
+                                        entry_t = trade.entry_time if trade.entry_time else datetime.datetime.now(datetime.timezone.utc)
+                                        if entry_t.tzinfo is None:
+                                            entry_t = entry_t.replace(tzinfo=datetime.timezone.utc)
+                                        days_held = max(0.0, (datetime.datetime.now(datetime.timezone.utc) - entry_t).total_seconds() / 86400.0)
+                                        days_to_expiry = max(0.5, 7.0 - days_held)
+                                        T = days_to_expiry / 365.0
+                                        bs_res = opt_engine._black_scholes(S=current_price, K=strike, T=T, r=0.06, sigma=iv, option_type=opt_type)
+                                        opt_exit_price = max(0.05, bs_res["premium"])
+                                    except Exception as calc_err:
+                                        logger.error(f"Error calculating option exit premium: {calc_err}")
+                                        opt_exit_price = trade.entry_price
+                                    closed_rec = await close_trade(trade.id, opt_exit_price, broker=broker)
+                                else:
+                                    closed_rec = await close_trade(trade.id, current_price, broker=broker)
+                                if closed_rec:
+                                    notifier.send_exit_alert(closed_rec, is_live=True)
 
-                config = load_config()
                 regime, setups = engine.evaluate_with_regime(df, ticker)
                 prediction_dict = ai_brain.predict(regime, setups)
                 ai_signal = prediction_dict.get("signal", "neutral")
                 confidence = prediction_dict.get("probability", 0.0)
                 
-                if ai_signal in ["bullish", "bearish"] and confidence >= 0.55:
-                    actual_capital = broker.get_balance() if hasattr(broker, 'get_balance') else 1000000.0
+                if ai_signal in ["bullish", "bearish"] and confidence >= min_ai_confidence:
+                    actual_capital = broker.get_balance() if hasattr(broker, 'get_balance') else configured_capital
                     trade_plan = risk_engine.generate_trade_plan(
                         ticker=ticker, direction=ai_signal, ai_probability=confidence,
-                        df=df, capital=actual_capital, regime=regime, timeframe=TIMEFRAME
+                        df=df, capital=actual_capital, regime=regime.get('regime', 'unknown'), timeframe=TIMEFRAME
                     )
                     
                     if trade_plan.is_approved:

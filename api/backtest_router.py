@@ -82,9 +82,25 @@ def _calculate_bollinger_breakout(df: pd.DataFrame) -> pd.DataFrame:
 def _download_and_backtest(ticker: str, timeframe: str, setup: str) -> dict:
     """Blocking function that runs in a thread pool."""
     period = "5y" if timeframe == "1d" else "60d"
-    df = yf.download(ticker, period=period, interval=timeframe, progress=False)
+
+    # Normalize Indian ticker symbol for Yahoo Finance
+    clean_sym = ticker.upper().strip()
+    yf_ticker = clean_sym
+    if clean_sym in ("NIFTY", "NIFTY 50"):
+        yf_ticker = "^NSEI"
+    elif clean_sym in ("BANKNIFTY", "NIFTY BANK"):
+        yf_ticker = "^NSEBANK"
+    elif clean_sym in ("SENSEX", "^BSESN"):
+        yf_ticker = "^BSESN"
+    elif not clean_sym.startswith("^") and not clean_sym.endswith((".NS", ".BO")) and clean_sym not in ("BTC-USD", "SPY"):
+        yf_ticker = f"{clean_sym}.NS"
+
+    df = yf.download(yf_ticker, period=period, interval=timeframe, progress=False)
     if df.empty:
-        raise ValueError("No data found for ticker.")
+        # Fallback to direct ticker if suffixed symbol returned empty
+        df = yf.download(clean_sym, period=period, interval=timeframe, progress=False)
+        if df.empty:
+            raise ValueError(f"No data found for ticker {ticker}.")
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0] for col in df.columns]
@@ -93,6 +109,28 @@ def _download_and_backtest(ticker: str, timeframe: str, setup: str) -> dict:
         'Open': 'open', 'High': 'high', 'Low': 'low',
         'Close': 'close', 'Volume': 'volume'
     }, inplace=True)
+
+    # Drop any bars with missing price data
+    df = df.dropna(subset=['close', 'high', 'low', 'open'])
+
+    # In live market hours, update latest bar with real-time LTP
+    try:
+        from data.realtime_feed import RealTimeDataFeed
+        quote = RealTimeDataFeed.get_realtime_quote_sync(clean_sym)
+        if quote and quote.get("ltp", 0.0) > 0 and not df.empty:
+            ltp = float(quote["ltp"])
+            idx_last = df.index[-1]
+            if ltp > df.at[idx_last, "high"]:
+                df.at[idx_last, "high"] = ltp
+            if ltp < df.at[idx_last, "low"]:
+                df.at[idx_last, "low"] = ltp
+            df.at[idx_last, "close"] = ltp
+    except Exception:
+        pass
+
+    if len(df) < 50:
+        raise ValueError(f"Insufficient historical data for {ticker} (only {len(df)} bars returned, at least 50 required).")
+
 
     setup_map = {
         "sma_crossover": (_calculate_sma_crossover, "sma_signal"),
@@ -118,13 +156,19 @@ def _download_and_backtest(ticker: str, timeframe: str, setup: str) -> dict:
     max_dd = 0.0
 
     for idx, row in df.iterrows():
+        close_val = row.get('close')
+        if pd.isna(close_val):
+            continue
+        price = float(close_val)
+
         if in_trade:
-            price = row['close']
-            # Guard division by zero
-            if entry_price == 0:
+            # Guard division by zero or invalid entry price
+            if entry_price <= 0 or not math.isfinite(entry_price):
                 in_trade = False
                 continue
             pnl = (price - entry_price) / entry_price if direction == "bullish" else (entry_price - price) / entry_price
+            if not math.isfinite(pnl):
+                pnl = 0.0
 
             exit_signal = (direction == "bullish" and row.get(signal_col) == -1) or \
                           (direction == "bearish" and row.get(signal_col) == 1) or \
@@ -132,7 +176,7 @@ def _download_and_backtest(ticker: str, timeframe: str, setup: str) -> dict:
 
             if exit_signal:
                 in_trade = False
-                capital *= (1 + pnl)
+                capital = max(0.0, capital * (1 + pnl))
                 if capital > peak_capital:
                     peak_capital = capital
                 dd = (peak_capital - capital) / peak_capital if peak_capital > 0 else 0
@@ -143,31 +187,32 @@ def _download_and_backtest(ticker: str, timeframe: str, setup: str) -> dict:
                     "entry_time": str(entry_time),
                     "exit_time": str(idx),
                     "direction": direction,
-                    "entry_price": float(entry_price),
-                    "exit_price": float(price),
-                    "pnl_pct": float(pnl * 100)
+                    "entry_price": round(float(entry_price), 2),
+                    "exit_price": round(float(price), 2),
+                    "pnl_pct": round(float(pnl * 100), 2)
                 })
         else:
-            if row.get(signal_col) == 1:
-                in_trade = True
-                direction = "bullish"
-                entry_price = row['close']
-                entry_time = idx
-            elif row.get(signal_col) == -1:
-                in_trade = True
-                direction = "bearish"
-                entry_price = row['close']
-                entry_time = idx
+            if price > 0 and math.isfinite(price):
+                if row.get(signal_col) == 1:
+                    in_trade = True
+                    direction = "bullish"
+                    entry_price = price
+                    entry_time = idx
+                elif row.get(signal_col) == -1:
+                    in_trade = True
+                    direction = "bearish"
+                    entry_price = price
+                    entry_time = idx
 
     wins = len([t for t in trades if t["pnl_pct"] > 0])
     win_rate = (wins / len(trades) * 100) if trades else 0.0
     total_pnl = ((capital - 10000.0) / 10000.0) * 100
 
     return {
-        "win_rate": win_rate,
+        "win_rate": round(win_rate, 2),
         "total_trades": len(trades),
-        "total_pnl_pct": total_pnl,
-        "max_drawdown_pct": max_dd * 100,
+        "total_pnl_pct": round(total_pnl, 2),
+        "max_drawdown_pct": round(max_dd * 100, 2),
         "trades": trades
     }
 

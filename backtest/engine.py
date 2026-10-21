@@ -140,7 +140,7 @@ class Backtester:
                         if pred not in (1, -1):
                             equity_curve.append(current_equity)
                             positions.append(0)
-                            bench_ret = (df['close'].iloc[idx+1] - df['close'].iloc[idx]) / df['close'].iloc[idx]
+                            bench_ret = ((df['close'].iloc[idx+1] - df['close'].iloc[idx]) / df['close'].iloc[idx]) if (idx + 1 < len(df) and df['close'].iloc[idx] != 0) else 0.0
                             current_bench *= (1 + bench_ret)
                             benchmark_equity.append(current_bench)
                             continue
@@ -154,7 +154,7 @@ class Backtester:
                 positions.append(trade_dir)
                 
                 # Benchmark (Buy and hold)
-                bench_ret = (df['close'].iloc[idx+1] - df['close'].iloc[idx]) / df['close'].iloc[idx]
+                bench_ret = ((df['close'].iloc[idx+1] - df['close'].iloc[idx]) / df['close'].iloc[idx]) if (idx + 1 < len(df) and df['close'].iloc[idx] != 0) else 0.0
                 current_bench *= (1 + bench_ret)
                 benchmark_equity.append(current_bench)
 
@@ -163,7 +163,8 @@ class Backtester:
             
         # Close any open position at end of backtest
         if in_position:
-            last_close = df['close'].iloc[train_end + len(X_test) - 1]
+            last_idx = min(train_end + len(X_test) - 1, len(df) - 1)
+            last_close = df['close'].iloc[last_idx]
             gross_trade_ret = (last_close - entry_price) / entry_price if trade_dir == 1 else (entry_price - last_close) / entry_price
             trade_net_ret = gross_trade_ret - (self.fee * 2) - (self.slippage * 2)
             current_equity *= (1 + trade_net_ret)
@@ -184,15 +185,19 @@ class Backtester:
         
         gross_profits = strat_returns[strat_returns > 0].sum()
         gross_losses = abs(strat_returns[strat_returns < 0].sum())
-        profit_factor = gross_profits / gross_losses if gross_losses != 0 else float('inf')
+        profit_factor = float(gross_profits / gross_losses) if gross_losses != 0 else (999.0 if gross_profits > 0 else 0.0)
         
         daily_rf = 0.05 / 252 
         excess_returns = strat_returns - daily_rf
-        sharpe = (excess_returns.mean() / excess_returns.std()) * np.sqrt(252) if excess_returns.std() > 0 else 0
+        sharpe = (excess_returns.mean() / excess_returns.std()) * np.sqrt(252) if (len(excess_returns) > 1 and excess_returns.std() > 0) else 0.0
+        if np.isnan(sharpe) or np.isinf(sharpe):
+            sharpe = 0.0
         
         rolling_max = results_df["Strategy_Equity"].cummax()
         drawdown = (results_df["Strategy_Equity"] - rolling_max) / rolling_max
-        max_drawdown = drawdown.min()
+        max_drawdown = float(drawdown.min()) if not drawdown.empty else 0.0
+        if np.isnan(max_drawdown) or np.isinf(max_drawdown):
+            max_drawdown = 0.0
         
         metrics = {
             "Total_Return": (current_equity - 1.0) * 100,

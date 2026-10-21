@@ -44,22 +44,26 @@ async def migrate():
                 trades = json.load(f)
                 
             for t in trades:
+                order_id = t.get("order_id") or t.get("id")
+                if not order_id:
+                    continue
+
                 # Check if it already exists
-                stmt = select(Trade).where(Trade.order_id == t["order_id"])
+                stmt = select(Trade).where(Trade.order_id == order_id)
                 res = await session.execute(stmt)
                 existing = res.scalar_one_or_none()
                 
                 if not existing:
                     new_trade = Trade(
-                        order_id=t.get("order_id", t.get("id")),
+                        order_id=order_id,
                         ticker=t["ticker"],
                         direction=t["direction"],
-                        entry_price=t["entry_price"],
-                        quantity=t["quantity"],
-                        invested=t["invested"],
-                        take_profit=t["take_profit"],
-                        stop_loss=t["stop_loss"],
-                        is_open=True, # In JSON, only open trades are stored
+                        entry_price=float(t["entry_price"]),
+                        quantity=int(t["quantity"]),
+                        invested=float(t["invested"]),
+                        take_profit=float(t["take_profit"]) if t.get("take_profit") is not None else (float(t["tp"]) if t.get("tp") is not None else None),
+                        stop_loss=float(t["stop_loss"]) if t.get("stop_loss") is not None else (float(t["sl"]) if t.get("sl") is not None else None),
+                        is_open=t.get("status", "OPEN") == "OPEN",
                     )
                     session.add(new_trade)
                     

@@ -21,13 +21,17 @@ def calculate_black_scholes_greeks(S, K, T, r, sigma):
     if sigma <= 0 or T <= 0 or S <= 0 or K <= 0:
         return 0.5, 0.0
         
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    denom = sigma * np.sqrt(T)
+    if denom <= 1e-9:
+        return 0.5, 0.0
+
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / denom
     # d2 = d1 - sigma * np.sqrt(T)
     
     delta = si.norm.cdf(d1, 0.0, 1.0)
-    gamma = si.norm.pdf(d1, 0.0, 1.0) / (S * sigma * np.sqrt(T))
+    gamma = si.norm.pdf(d1, 0.0, 1.0) / (S * denom)
     
-    return delta, gamma
+    return float(delta), float(gamma)
 
 def _close_or_volume(data: pd.DataFrame, symbol: str, field: str) -> pd.Series | None:
     """Extract a Yahoo series from single- or multi-ticker response shapes."""
@@ -179,7 +183,7 @@ def enrich_with_psychology_features(df: pd.DataFrame) -> pd.DataFrame:
     
     # 2. Panic Capitulation Index (Large lower wicks with high relative volume)
     # Smart Money buys when retail panics.
-    vol_sma_20 = df['volume'].rolling(20).mean().fillna(1)
+    vol_sma_20 = df['volume'].rolling(20, min_periods=1).mean().replace(0, 1).fillna(1)
     rel_vol = df['volume'] / vol_sma_20
     
     lower_wick = np.minimum(df['open'], df['close']) - df['low']
@@ -191,7 +195,8 @@ def enrich_with_psychology_features(df: pd.DataFrame) -> pd.DataFrame:
     # 3. Distance to Round Number Proximity (Retail places stops at '00' levels)
     # e.g., 25000, 1000, 500. We'll find distance to nearest 100 level.
     nearest_100 = (df['close'] / 100).round() * 100
-    df['psych_dist_to_round'] = np.abs(df['close'] - nearest_100) / df['close']
+    safe_close = df['close'].replace(0, np.nan)
+    df['psych_dist_to_round'] = (np.abs(df['close'] - nearest_100) / safe_close).fillna(0.0)
     
     # 4. Session Phase (Morning=1, Mid-day=2, Closing=3, Daily/Unknown=0)
     # Morning is emotional/retail. Mid-day is choppy. Close is institutional rebalancing.
@@ -234,7 +239,7 @@ def generate_triple_barrier_labels(df: pd.DataFrame, tp_atr_mult: float = 2.0, s
     low_close = np.abs(df['low'] - df['close'].shift())
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     true_range = np.max(ranges, axis=1)
-    atr = true_range.rolling(14).mean().fillna(true_range.mean())
+    atr = true_range.rolling(14, min_periods=1).mean()
     df['atr'] = atr # Save ATR as a potential feature
     
     for i in range(len(df)):

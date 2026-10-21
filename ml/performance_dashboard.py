@@ -23,6 +23,19 @@ from ml.trade_logger import TradeLogger
 logger = logging.getLogger("trading.dashboard")
 
 
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """Safely convert any value to float, guarding against None, NaN, Inf, and TypeErrors."""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (ValueError, TypeError):
+        return default
+
+
 class PerformanceDashboard:
     """
     Analyzes the trade journal to produce real-time performance metrics.
@@ -52,15 +65,15 @@ class PerformanceDashboard:
             return {"total_trades": 0, "message": "No closed trades yet."}
 
         total = len(self._exits)
-        wins = [e for e in self._exits if e.get("pnl_pct", 0) > 0]
-        losses = [e for e in self._exits if e.get("pnl_pct", 0) <= 0]
+        wins = [e for e in self._exits if _safe_float(e.get("pnl_pct")) > 0]
+        losses = [e for e in self._exits if _safe_float(e.get("pnl_pct")) <= 0]
 
         win_rate = len(wins) / total if total > 0 else 0.0
-        pnl_list = [e.get("pnl_pct", 0) for e in self._exits]
-        cash_pnl_list = [e.get("cash_pnl", 0) for e in self._exits]
+        pnl_list = [_safe_float(e.get("pnl_pct")) for e in self._exits]
+        cash_pnl_list = [_safe_float(e.get("cash_pnl")) for e in self._exits]
 
-        avg_win = float(np.mean([e["pnl_pct"] for e in wins])) if wins else 0.0
-        avg_loss = float(np.mean([abs(e["pnl_pct"]) for e in losses])) if losses else 0.0
+        avg_win = float(np.mean([_safe_float(e.get("pnl_pct")) for e in wins])) if wins else 0.0
+        avg_loss = float(np.mean([abs(_safe_float(e.get("pnl_pct"))) for e in losses])) if losses else 0.0
         avg_rr = avg_win / avg_loss if avg_loss > 0 else 0.0
 
         # Sharpe Ratio (annualized, assuming 252 trading days)
@@ -81,9 +94,9 @@ class PerformanceDashboard:
                 current_streak = 0
 
         # Profit Factor
-        gross_profit = sum(e["cash_pnl"] for e in wins) if wins else 0.0
-        gross_loss = sum(abs(e["cash_pnl"]) for e in losses) if losses else 0.0
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+        gross_profit = sum(_safe_float(e.get("cash_pnl")) for e in wins) if wins else 0.0
+        gross_loss = sum(abs(_safe_float(e.get("cash_pnl"))) for e in losses) if losses else 0.0
+        profit_factor = round(gross_profit / gross_loss, 4) if gross_loss > 0 else (round(gross_profit, 4) if gross_profit > 0 else 0.0)
 
         return {
             "total_trades": total,
@@ -94,7 +107,7 @@ class PerformanceDashboard:
             "avg_loss_pct": round(avg_loss * 100, 4),
             "avg_rr": round(avg_rr, 2),
             "sharpe_ratio": round(sharpe, 4),
-            "profit_factor": round(profit_factor, 4),
+            "profit_factor": profit_factor,
             "total_cash_pnl": round(sum(cash_pnl_list), 2),
             "max_consecutive_losses": max_consec_loss,
         }
@@ -119,7 +132,7 @@ class PerformanceDashboard:
             entry_rec = self._entry_map.get(trade_id, {})
             setup_signals = entry_rec.get("setup_signals", [])
 
-            pnl = exit_rec.get("pnl_pct", 0)
+            pnl = _safe_float(exit_rec.get("pnl_pct"))
             is_win = pnl > 0
 
             for setup in setup_signals:
@@ -171,7 +184,7 @@ class PerformanceDashboard:
             entry_rec = self._entry_map.get(trade_id, {})
             regime = entry_rec.get("regime", "unknown")
 
-            pnl = exit_rec.get("pnl_pct", 0)
+            pnl = _safe_float(exit_rec.get("pnl_pct"))
             is_win = pnl > 0
 
             stats = regime_stats[regime]
@@ -207,7 +220,7 @@ class PerformanceDashboard:
         if len(self._exits) < window:
             return []
 
-        pnl_list = [1 if e.get("pnl_pct", 0) > 0 else 0 for e in self._exits]
+        pnl_list = [1 if _safe_float(e.get("pnl_pct")) > 0 else 0 for e in self._exits]
         rolling = []
         for i in range(window, len(pnl_list) + 1):
             w = pnl_list[i - window:i]

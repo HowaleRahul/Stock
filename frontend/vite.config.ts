@@ -12,4 +12,25 @@ export default defineConfig({
       '/openapi.json': 'http://127.0.0.1:8000',
     },
   },
+  build: {
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('react-router-dom') || id.includes('react-dom') || id.includes('react')) {
+              return 'vendor-react';
+            }
+            if (id.includes('lightweight-charts')) {
+              return 'vendor-charts';
+            }
+            if (id.includes('lucide-react')) {
+              return 'vendor-icons';
+            }
+            return 'vendor';
+          }
+        },
+      },
+    },
+  },
 })

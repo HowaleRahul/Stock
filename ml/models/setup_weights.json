@@ -1,0 +1,17 @@
+{
+  "weights": {
+    "rsi_setup": {
+      "trending": {
+        "alpha": 1.0,
+        "beta": 17.0,
+        "ewma_reward": -0.007813694273419373,
+        "n": 16
+      }
+    }
+  },
+  "global_weights": {
+    "rsi_setup": 0.05555555555555555
+  },
+  "version": 16,
+  "last_update": "2026-10-21T23:56:28.702065"
+}

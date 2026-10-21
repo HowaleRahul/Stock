@@ -56,10 +56,17 @@ async def save_account(account_data: Dict[str, Any]) -> None:
 async def load_open_trades() -> List[Dict[str, Any]]:
     async with async_session_factory() as session:
         rows = (await session.execute(select(Trade).where(Trade.is_open.is_(True)))).scalars().all()
-        contexts = {
-            context.order_id: json.loads(context.payload)
-            for context in (await session.execute(select(TradeContext))).scalars().all()
-        }
+        order_ids = [row.order_id for row in rows]
+        contexts = {}
+        if order_ids:
+            context_rows = (await session.execute(
+                select(TradeContext).where(TradeContext.order_id.in_(order_ids))
+            )).scalars().all()
+            for context in context_rows:
+                try:
+                    contexts[context.order_id] = json.loads(context.payload)
+                except Exception:
+                    contexts[context.order_id] = {}
         trades = []
         for row in rows:
             trade = contexts.get(row.order_id, {})
@@ -146,11 +153,23 @@ async def persist_portfolio(
             account.peak_capital = account_data['peak_capital']
             account.status = account_data['status']
 
+        order_ids = [str(trade_data['id']) for trade_data in trades]
+        existing_trades_map = {}
+        existing_contexts_map = {}
+        if order_ids:
+            t_rows = (await session.execute(
+                select(Trade).where(Trade.order_id.in_(order_ids))
+            )).scalars().all()
+            existing_trades_map = {t.order_id: t for t in t_rows}
+
+            c_rows = (await session.execute(
+                select(TradeContext).where(TradeContext.order_id.in_(order_ids))
+            )).scalars().all()
+            existing_contexts_map = {c.order_id: c for c in c_rows}
+
         for trade_data in trades:
             order_id = str(trade_data['id'])
-            row = (await session.execute(
-                select(Trade).where(Trade.order_id == order_id)
-            )).scalar_one_or_none()
+            row = existing_trades_map.get(order_id)
             if row is None:
                 row = Trade(
                     order_id=order_id,
@@ -165,18 +184,19 @@ async def persist_portfolio(
                     entry_time=_timestamp(trade_data.get('opened_at')),
                 )
                 session.add(row)
+                existing_trades_map[order_id] = row
             else:
                 row.is_open = trade_data.get('status') == 'OPEN'
                 row.exit_price = trade_data.get('exit_price')
                 row.pnl_pct = (trade_data.get('pnl_pct') or 0.0) * 100 if trade_data.get('pnl_pct') is not None else None
                 row.exit_time = _timestamp(trade_data.get('closed_at')) if trade_data.get('closed_at') else None
 
-            context = (await session.execute(
-                select(TradeContext).where(TradeContext.order_id == order_id)
-            )).scalar_one_or_none()
             payload = json.dumps(trade_data, default=str)
+            context = existing_contexts_map.get(order_id)
             if context is None:
-                session.add(TradeContext(order_id=order_id, payload=payload))
+                context = TradeContext(order_id=order_id, payload=payload)
+                session.add(context)
+                existing_contexts_map[order_id] = context
             else:
                 context.payload = payload
         for record in journal_events or []:

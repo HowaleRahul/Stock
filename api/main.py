@@ -69,7 +69,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=_allow_creds,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
     allow_headers=["*"],
 )
 
@@ -86,7 +86,15 @@ async def add_security_headers(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     if settings.environment.lower() == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:;"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://unpkg.com https://s3.tradingview.com https://*.tradingview.com; "
+            "frame-src 'self' https://*.tradingview.com https://s3.tradingview.com; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src https://fonts.gstatic.com; "
+            "connect-src 'self' https://*.tradingview.com wss://*.tradingview.com; "
+            "img-src 'self' data: https://*.tradingview.com;"
+        )
     return response
 
 from fastapi.responses import JSONResponse
@@ -112,6 +120,8 @@ async def global_exception_handler(request: Request, exc: Exception):
 from api.backtest_router import router as backtest_router
 from api.training_router import router as training_router
 from api.strategy_router import router as strategy_router
+from api.market_router import router as market_router
+from api.swing_router import router as swing_router
 
 # Include API routes
 app.include_router(data_router)
@@ -119,11 +129,25 @@ app.include_router(dashboard_router)
 app.include_router(backtest_router)
 app.include_router(training_router)
 app.include_router(strategy_router)
+app.include_router(market_router)
+app.include_router(swing_router)
+
+class SPAStaticFiles(StaticFiles):
+    """Custom StaticFiles handler providing SPA fallback to index.html for client-side routing."""
+    async def get_response(self, path: str, scope):
+        try:
+            response = await super().get_response(path, scope)
+            if response.status_code == 404:
+                return await super().get_response("index.html", scope)
+            return response
+        except Exception:
+            return await super().get_response("index.html", scope)
+
 
 # Serve frontend static files (Phase 2 Chart UI)
 _frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
 if os.path.isdir(_frontend_dir):
-    app.mount("/app", StaticFiles(directory=_frontend_dir, html=True), name="frontend")
+    app.mount("/app", SPAStaticFiles(directory=_frontend_dir, html=True), name="frontend")
 
 
 @app.get("/", tags=["General"])

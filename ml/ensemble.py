@@ -180,11 +180,21 @@ class EnsembleModel:
         if bull_score > bear_score:
             direction = "bullish"
             prob = bull_score / total
-            driver = sorted(setups_list, key=lambda s: features[f"{s}_conf"] if features[f"{s}_sig"] == 1 else 0, reverse=True)[0]
-        else:
+            sorted_drivers = sorted(setups_list, key=lambda s: features[f"{s}_conf"] if features[f"{s}_sig"] == 1 else 0, reverse=True)
+            driver = sorted_drivers[0] if sorted_drivers else "Unknown"
+        elif bear_score > bull_score:
             direction = "bearish"
             prob = bear_score / total
-            driver = sorted(setups_list, key=lambda s: features[f"{s}_conf"] if features[f"{s}_sig"] == -1 else 0, reverse=True)[0]
+            sorted_drivers = sorted(setups_list, key=lambda s: features[f"{s}_conf"] if features[f"{s}_sig"] == -1 else 0, reverse=True)
+            driver = sorted_drivers[0] if sorted_drivers else "Unknown"
+        else:
+            return {
+                "signal": "neutral",
+                "probability": 0.5,
+                "drivers": [],
+                "alternative_scenario": "Bullish and bearish setup signals are equally balanced.",
+                "model_version": "fallback_heuristic"
+            }
             
         return {
             "signal": direction,

@@ -36,7 +36,17 @@ class BrokerAPI:
         This checks if our current public IP matches the whitelisted one.
         """
         try:
-            current_ip = requests.get("https://api.ipify.org", timeout=5).text
+            resp = requests.get("https://api.ipify.org", timeout=5)
+            if resp.status_code != 200:
+                logger.error(f"IP check returned status {resp.status_code}")
+                return False
+            current_ip = resp.text.strip()
+            import ipaddress
+            try:
+                ipaddress.ip_address(current_ip)
+            except ValueError:
+                logger.error(f"Invalid IP address format returned from lookup: {current_ip[:50]}")
+                return False
             whitelisted_ip = os.getenv("WHITELISTED_IP")
             if not whitelisted_ip:
                 logger.error("WHITELISTED_IP is not configured; refusing broker connection.")

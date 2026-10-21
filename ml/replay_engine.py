@@ -163,6 +163,27 @@ class ReplayEngine:
         self.risk_engine = RiskEngine()
         self.log_callback = log_callback
         self._trade_counter = 0
+        self._pending_order: Optional[Dict[str, Any]] = None
+
+    def __del__(self):
+        """Clean up the temporary workspace on garbage collection."""
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    def close(self):
+        """Explicitly clean up temporary workspace."""
+        if hasattr(self, '_replay_workspace') and self._replay_workspace:
+            try:
+                self._replay_workspace.cleanup()
+            except Exception:
+                pass
+            self._replay_workspace = None
 
     def _log(self, msg: str) -> None:
         logger.info(msg)
@@ -205,6 +226,7 @@ class ReplayEngine:
         # is reused by a caller or test harness.
         self.broker = VirtualBroker(starting_capital=self.broker.starting_capital)
         self._trade_counter = 0
+        self._pending_order: Optional[Dict[str, Any]] = None
         self._log(f"📥 Downloading {ticker} ({period}, {timeframe})...")
 
         df = yf.download(ticker, period=period, interval=timeframe, progress=False)
@@ -230,8 +252,8 @@ class ReplayEngine:
         high_close = np.abs(df["high"] - df["close"].shift())
         low_close = np.abs(df["low"] - df["close"].shift())
         ranges = pd.concat([high_low, high_close, low_close], axis=1)
-        true_range = np.max(ranges, axis=1)
-        df["atr"] = true_range.rolling(14).mean().fillna(true_range.mean())
+        true_range = ranges.max(axis=1)
+        df["atr"] = true_range.rolling(14, min_periods=1).mean()
 
         total_bars = len(df)
         self._log(
@@ -244,23 +266,70 @@ class ReplayEngine:
         for bar_idx in range(self.MIN_WARMUP_BARS, total_bars):
             if self.broker.is_suspended:
                 self._log("🚨 KILL SWITCH: 10% drawdown reached. Stopping replay.")
+                TradeLogger.log_kill_switch(
+                    reason="10% DRAWDOWN REACHED",
+                    capital=self.broker.capital,
+                    peak_capital=self.broker.peak_capital,
+                    weekly_pnl=self.broker.capital - self.broker.starting_capital,
+                    config_version="replay_v1",
+                )
                 break
 
             # The AI can only see data up to (and including) the current bar
             visible_df = df.iloc[: bar_idx + 1]
             current_bar = df.iloc[bar_idx]
+            bar_open = float(current_bar["open"])
             current_price = float(current_bar["close"])
             bar_high = float(current_bar["high"])
             bar_low = float(current_bar["low"])
             bar_time = str(df.index[bar_idx])
 
+            # --- Phase 0: Execute pending order at this bar's OPEN (next-bar execution) ---
+            if self._pending_order is not None and ticker == self._pending_order.get("ticker"):
+                pending = self._pending_order
+                self._pending_order = None
+                direction = pending["direction"]
+                slip = self.broker.STT_SLIPPAGE_PCT
+                fill_price = bar_open * (1.0 + slip) if direction == "LONG" else bar_open * (1.0 - slip)
+                planned = pending.get("planned_entry", fill_price)
+                entry_delta = fill_price - planned
+                pending["entry_price"] = fill_price
+                pending["sl"] = pending["sl"] + entry_delta
+                pending["tp"] = pending["tp"] + entry_delta
+                pending["trailing_stop"] = pending["sl"]
+                pending["opened_at"] = bar_time
+                self.broker.open_trade(pending)
+
+                TradeLogger.log_entry(
+                    trade_id=pending["id"],
+                    ticker=ticker,
+                    direction=direction,
+                    entry_price=fill_price,
+                    stop_loss=pending["sl"],
+                    take_profit=pending["tp"],
+                    quantity=pending.get("quantity", 1),
+                    invested=pending.get("invested", 0.0),
+                    risk_pct=pending.get("risk_pct", 0.0),
+                    risk_reward=pending.get("risk_reward", 0.0),
+                    ai_probability=pending.get("probability", 0.0),
+                    kelly_fraction=pending.get("kelly_fraction", 0.0),
+                    probability_of_ruin=pending.get("probability_of_ruin", 0.0),
+                    sl_method=pending.get("sl_method", "atr"),
+                    tp_method=pending.get("tp_method", "atr"),
+                    setup_signals=pending.get("setup_signals", []),
+                    regime=pending.get("regime", "unknown"),
+                    setup_weights=pending.get("setup_weights", {}),
+                    config_version="replay_v1",
+                )
+
             # --- Phase 1: Check open trades for exits ---
             self._check_exits(bar_high, bar_low, current_price, bar_time, ticker)
 
-            # --- Phase 2: Look for new entries ---
-            # Only if no open trade for this ticker
+            # --- Phase 2: Look for new entries (pending next-bar execution) ---
+            # Only if no open trade and no pending order for this ticker
             open_tickers = [t["ticker"] for t in self.broker.open_trades]
-            if ticker not in open_tickers:
+            has_pending = (self._pending_order is not None and self._pending_order.get("ticker") == ticker)
+            if ticker not in open_tickers and not has_pending:
                 self._check_entry(
                     visible_df, ticker, current_price, bar_time,
                     timeframe, asset_class
@@ -277,7 +346,30 @@ class ReplayEngine:
         final_price = float(df["close"].iloc[-1])
         final_time = str(df.index[-1])
         for trade in list(self.broker.open_trades):
-            self.broker.close_trade(trade["id"], final_price, "REPLAY_END", final_time)
+            closed = self.broker.close_trade(trade["id"], final_price, "REPLAY_END", final_time)
+            if closed:
+                self._trade_counter += 1
+                pnl = closed.get("pnl_pct", 0)
+                TradeLogger.log_exit(
+                    trade_id=closed["id"],
+                    ticker=ticker,
+                    direction=closed["direction"],
+                    exit_price=final_price,
+                    exit_reason="REPLAY_END",
+                    pnl_pct=pnl,
+                    cash_pnl=closed.get("cash_pnl", 0),
+                    bars_held=closed.get("bars_held", 0),
+                    regime_at_exit=closed.get("regime", "unknown"),
+                    capital_after_exit=self.broker.capital,
+                    setup_signals_at_entry=closed.get("setup_signals", []),
+                )
+                if closed.get("setup_signals"):
+                    self.learner.update_from_trade(
+                        setup_signals=closed["setup_signals"],
+                        regime=closed.get("regime", "unknown"),
+                        pnl_pct=pnl,
+                        is_win=pnl > 0,
+                    )
 
         # Final RL review
         if self._trade_counter > 0:
@@ -407,7 +499,7 @@ class ReplayEngine:
             capital=self.broker.capital,
             regime=regime_str,
             timeframe=timeframe,
-            open_positions=[],
+            open_positions=self.broker.open_trades,
         )
 
         if not trade_plan.is_approved:
@@ -450,36 +542,13 @@ class ReplayEngine:
             "opened_at": bar_time,
             "setup_signals": setup_signals_list,
             "setup_weights": setup_weights,
+            "planned_entry": trade_plan.entry_price,
+            "regime_adx": regime.get("adx", 0.0),
+            "timeframe": timeframe,
         }
 
-        self.broker.open_trade(new_trade)
-
-        # Log to journal
-        TradeLogger.log_entry(
-            trade_id=trade_id,
-            ticker=ticker,
-            direction=direction,
-            entry_price=trade_plan.entry_price,
-            stop_loss=trade_plan.stop_loss,
-            take_profit=trade_plan.take_profit,
-            quantity=trade_plan.position_size_qty,
-            invested=trade_plan.position_value,
-            risk_pct=trade_plan.risk_per_trade_pct,
-            risk_reward=trade_plan.risk_reward_ratio,
-            ai_probability=prob,
-            kelly_fraction=trade_plan.kelly_fraction,
-            probability_of_ruin=trade_plan.probability_of_ruin,
-            regime=regime_str,
-            regime_adx=regime.get("adx", 0.0),
-            sl_method=trade_plan.sl_method,
-            tp_method=trade_plan.tp_method,
-            timeframe=timeframe,
-            atr_at_entry=trade_plan.atr_at_entry,
-            setup_signals=setup_signals_list,
-            setup_weights=setup_weights,
-            config_version="replay_v1",
-            capital_at_entry=self.broker.capital,
-        )
+        # Queue order for execution at next bar open (eliminates lookahead optimism)
+        self._pending_order = new_trade
 
     def _run_self_review(self) -> None:
         """The AI reviews its own trade journal and updates its beliefs."""

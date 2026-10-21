@@ -52,6 +52,10 @@ class OHLCVBar(Base):
     # Relationship
     symbol = relationship("Symbol", back_populates="candles")
 
+    __table_args__ = (
+        Index("ix_ohlcv_symbol_tf_time", "symbol_id", "timeframe", "time"),
+    )
+
     def __repr__(self) -> str:
         return f"<OHLCVBar(symbol_id={self.symbol_id}, time={self.time}, timeframe='{self.timeframe}', close={self.close})>"
 
@@ -97,11 +101,11 @@ class Trade(Base):
     invested = Column(Float, nullable=False)
     take_profit = Column(Float, nullable=True)
     stop_loss = Column(Float, nullable=True)
-    is_open = Column(Boolean, default=True)
+    is_open = Column(Boolean, default=True, index=True)
     exit_price = Column(Float, nullable=True)
     pnl_pct = Column(Float, nullable=True)
     entry_time = Column(DateTime(timezone=True), default=func.now())
-    exit_time = Column(DateTime(timezone=True), nullable=True)
+    exit_time = Column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class TradeContext(Base):
@@ -117,5 +121,5 @@ class JournalEvent(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     event = Column(String(32), index=True, nullable=False)
     trade_id = Column(String(64), index=True, nullable=True)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
     payload = Column(Text, nullable=False, default='{}')

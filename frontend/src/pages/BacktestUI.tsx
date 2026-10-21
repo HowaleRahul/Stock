@@ -1,5 +1,22 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
+
+interface BacktestTrade {
+  entry_time: string;
+  exit_time: string;
+  direction: string;
+  entry_price: number;
+  exit_price: number;
+  pnl_pct: number;
+}
+
+interface BacktestResults {
+  win_rate: number;
+  total_trades: number;
+  total_pnl_pct: number;
+  max_drawdown_pct: number;
+  trades: BacktestTrade[];
+}
 
 const BacktestUI = () => {
   const [ticker, setTicker] = useState('^NSEI');
@@ -7,29 +24,62 @@ const BacktestUI = () => {
   const [setup, setSetup] = useState('macd_cross');
   
   const [loading, setLoading] = useState(false);
-  const [results, setResults] = useState<any>(null);
+  const [results, setResults] = useState<BacktestResults | null>(null);
   const [error, setError] = useState('');
+  const abortRef = useRef<AbortController | null>(null);
 
-  const runBacktest = async () => {
+  useEffect(() => {
+    return () => {
+      if (abortRef.current) {
+        abortRef.current.abort();
+      }
+    };
+  }, []);
+
+  const runBacktest = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const cleanTicker = ticker.trim().toUpperCase();
+    if (!cleanTicker) {
+      setError('Please enter a valid ticker symbol.');
+      return;
+    }
+
+    if (abortRef.current) {
+      abortRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setLoading(true);
     setError('');
     setResults(null);
+
     try {
       // Run backtest — the backend provides both stats and trade data
       const res = await axios.get('/api/v1/backtest/run', {
-        params: { ticker, timeframe, setup }
+        params: { ticker: cleanTicker, timeframe, setup },
+        signal: controller.signal,
       });
       setResults(res.data);
     } catch (err: any) {
-      setError(err.response?.data?.detail || err.response?.data?.message || err.message);
+      if (axios.isCancel(err)) return;
+      setError(err.response?.data?.detail || err.response?.data?.message || err.message || 'Backtest failed.');
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) {
+        setLoading(false);
+      }
     }
   };
 
+  const trades = Array.isArray(results?.trades) ? results.trades : [];
+  const winRate = Number(results?.win_rate ?? 0);
+  const totalTrades = Number(results?.total_trades ?? 0);
+  const totalPnlPct = Number(results?.total_pnl_pct ?? 0);
+  const maxDrawdown = Math.abs(Number(results?.max_drawdown_pct ?? 0));
+
   return (
     <div className="space-y-6">
-      <div className="bg-gray-900 p-6 rounded-lg border border-gray-800 flex flex-wrap gap-4 items-end">
+      <form onSubmit={runBacktest} className="bg-gray-900 p-6 rounded-lg border border-gray-800 flex flex-wrap gap-4 items-end">
         <div>
           <label htmlFor="bt-ticker" className="block text-sm text-gray-400 mb-1">Ticker</label>
           <input
@@ -37,6 +87,7 @@ const BacktestUI = () => {
             type="text"
             value={ticker}
             onChange={e => setTicker(e.target.value.toUpperCase())}
+            placeholder="e.g. ^NSEI or RELIANCE.NS"
             className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
           />
         </div>
@@ -67,13 +118,13 @@ const BacktestUI = () => {
           </select>
         </div>
         <button
-          onClick={runBacktest}
-          disabled={loading}
+          type="submit"
+          disabled={loading || !ticker.trim()}
           className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-6 py-2 rounded text-white font-medium transition-colors"
         >
           {loading ? 'Running...' : 'Run Backtest'}
         </button>
-      </div>
+      </form>
 
       {error && (
         <div className="bg-red-900/50 border border-red-500 text-red-200 p-4 rounded" role="alert">
@@ -86,29 +137,29 @@ const BacktestUI = () => {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="bg-gray-900 p-4 rounded-lg border border-gray-800">
               <div className="text-gray-400 text-sm">Win Rate</div>
-              <div className={`text-2xl font-bold ${results.win_rate > 50 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {results.win_rate.toFixed(1)}%
+              <div className={`text-2xl font-bold ${winRate >= 50 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {winRate.toFixed(1)}%
               </div>
             </div>
             <div className="bg-gray-900 p-4 rounded-lg border border-gray-800">
               <div className="text-gray-400 text-sm">Total Trades</div>
-              <div className="text-2xl font-bold text-white">{results.total_trades}</div>
+              <div className="text-2xl font-bold text-white">{totalTrades}</div>
             </div>
             <div className="bg-gray-900 p-4 rounded-lg border border-gray-800">
               <div className="text-gray-400 text-sm">Total P&L</div>
-              <div className={`text-2xl font-bold ${results.total_pnl_pct > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {results.total_pnl_pct > 0 ? '+' : ''}{results.total_pnl_pct.toFixed(2)}%
+              <div className={`text-2xl font-bold ${totalPnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {totalPnlPct >= 0 ? '+' : ''}{totalPnlPct.toFixed(2)}%
               </div>
             </div>
             <div className="bg-gray-900 p-4 rounded-lg border border-gray-800">
               <div className="text-gray-400 text-sm">Max Drawdown</div>
               <div className="text-2xl font-bold text-red-400">
-                -{results.max_drawdown_pct.toFixed(2)}%
+                -{maxDrawdown.toFixed(2)}%
               </div>
             </div>
           </div>
 
-          {results.trades.length > 0 && (
+          {trades.length > 0 ? (
             <div className="bg-gray-900 p-4 rounded-lg border border-gray-800">
               <h3 className="text-lg font-medium mb-4">Trade Results</h3>
               <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
@@ -125,19 +176,35 @@ const BacktestUI = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-800">
-                    {results.trades.map((trade: any, idx: number) => (
-                      <tr key={`${trade.entry_time}-${trade.exit_time}-${idx}`}>
-                        <td className="p-3 text-gray-400 whitespace-nowrap">{trade.entry_time}</td>
-                        <td className="p-3 text-gray-400 whitespace-nowrap">{trade.exit_time}</td>
-                        <td className={`p-3 font-semibold ${trade.direction === 'bullish' ? 'text-emerald-400' : 'text-red-400'}`}>{trade.direction}</td>
-                        <td className="p-3 text-right">{Number(trade.entry_price).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
-                        <td className="p-3 text-right">{Number(trade.exit_price).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</td>
-                        <td className={`p-3 text-right font-semibold ${trade.pnl_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{trade.pnl_pct >= 0 ? '+' : ''}{Number(trade.pnl_pct).toFixed(2)}%</td>
-                      </tr>
-                    ))}
+                    {trades.map((trade: BacktestTrade, idx: number) => {
+                      const isBullish = String(trade.direction).toLowerCase() === 'bullish';
+                      const pnl = Number(trade.pnl_pct || 0);
+                      const cleanSym = (ticker || '').toUpperCase().trim();
+                      const isIndian = cleanSym.endsWith('.NS') || cleanSym.endsWith('.BO') || cleanSym.includes('NSE') || cleanSym.includes('NIFTY') || cleanSym.includes('BANKNIFTY') || cleanSym.includes('SENSEX') || cleanSym === '^BSESN' || cleanSym === '^NSEI';
+                      const currSym = isIndian ? '₹' : '$';
+                      const loc = isIndian ? 'en-IN' : 'en-US';
+                      return (
+                        <tr key={`${trade.entry_time}-${trade.exit_time}-${idx}`}>
+                          <td className="p-3 text-gray-400 whitespace-nowrap">{trade.entry_time}</td>
+                          <td className="p-3 text-gray-400 whitespace-nowrap">{trade.exit_time}</td>
+                          <td className={`p-3 font-semibold ${isBullish ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {trade.direction}
+                          </td>
+                          <td className="p-3 text-right">{currSym}{Number(trade.entry_price || 0).toLocaleString(loc, { maximumFractionDigits: 2 })}</td>
+                          <td className="p-3 text-right">{currSym}{Number(trade.exit_price || 0).toLocaleString(loc, { maximumFractionDigits: 2 })}</td>
+                          <td className={`p-3 text-right font-semibold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}%
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
+            </div>
+          ) : (
+            <div className="bg-gray-900 p-8 rounded-lg border border-gray-800 text-center text-gray-400">
+              No trade signals were triggered by this setup for the selected timeframe and ticker.
             </div>
           )}
         </>

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import axios from 'axios';
 import { CandlestickSeries, createChart, createSeriesMarkers } from 'lightweight-charts';
 import type { Time } from 'lightweight-charts';
 
@@ -6,9 +7,17 @@ interface ChartWidgetProps {
   data: any[];
   trades?: any[];
   height?: number;
+  ticker?: string;
+  timeframe?: string;
 }
 
-const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 400 }) => {
+const ChartWidget: React.FC<ChartWidgetProps> = ({
+  data,
+  trades = [],
+  height = 400,
+  ticker,
+  timeframe = '1h'
+}) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<any>(null);
   const seriesRef = useRef<any>(null);
@@ -20,24 +29,32 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
     const chart = createChart(chartContainerRef.current, {
       height,
       layout: {
-        background: { color: '#fffdfa' },
-        textColor: '#68757a',
+        background: { color: '#090d16' },
+        textColor: '#94a3b8',
       },
       grid: {
-        vertLines: { color: '#eeeae1' },
-        horzLines: { color: '#eeeae1' },
+        vertLines: { color: '#1e293b55' },
+        horzLines: { color: '#1e293b55' },
       },
-      rightPriceScale: { borderColor: '#dfdcd3' },
-      timeScale: { borderColor: '#dfdcd3' },
-      localization: { priceFormatter: (price: number) => price.toLocaleString('en-IN', { maximumFractionDigits: 2 }) },
+      rightPriceScale: {
+        borderColor: '#334155',
+        scaleMargins: { top: 0.1, bottom: 0.1 },
+      },
+      timeScale: {
+        borderColor: '#334155',
+        timeVisible: true,
+      },
+      localization: {
+        priceFormatter: (price: number) => `₹${price.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`,
+      },
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#4a9b70',
-      downColor: '#e06a57',
+      upColor: '#10b981',
+      downColor: '#ef4444',
       borderVisible: false,
-      wickUpColor: '#4a9b70',
-      wickDownColor: '#e06a57',
+      wickUpColor: '#10b981',
+      wickDownColor: '#ef4444',
     });
 
     chartRef.current = chart;
@@ -65,60 +82,113 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({ data, trades = [], height = 4
   }, [height]);
 
   useEffect(() => {
-    if (seriesRef.current && data.length > 0) {
-      // Format data for lightweight-charts
-      const formattedData = data.map(d => {
-        const parsedTime = new Date(d.time).getTime();
-        const time = (parsedTime / 1000) as Time;
-        return {
-          time,
-          open: Number(d.open),
-          high: Number(d.high),
-          low: Number(d.low),
-          close: Number(d.close),
-        };
-      });
-      // Sort and remove duplicates based on time
-      const uniqueData = formattedData
-        .filter(v => Number.isFinite(v.time as number) && [v.open, v.high, v.low, v.close].every(Number.isFinite))
-        .filter((v, i, a) => a.findIndex(t => (t.time === v.time)) === i)
-        .sort((a, b) => (a.time as number) - (b.time as number));
-      
-      seriesRef.current.setData(uniqueData);
+    if (!seriesRef.current) return;
 
-      if (trades.length > 0) {
-        const markers: any[] = [];
-        trades.forEach(trade => {
-            const entryTime = (new Date(trade.entry_time).getTime() / 1000) as Time;
-          const exitTime = (new Date(trade.exit_time).getTime() / 1000) as Time;
+    if (data.length === 0) {
+      seriesRef.current.setData([]);
+      markersRef.current?.setMarkers([]);
+      return;
+    }
 
-          if (!Number.isFinite(entryTime as number) || !Number.isFinite(exitTime as number)) return;
+    // Format data for lightweight-charts
+    const formattedData = data.map(d => {
+      const parsedTime = typeof d.time === 'number' && d.time < 2000000000
+        ? d.time
+        : new Date(d.time).getTime() / 1000;
+      const time = parsedTime as Time;
+      return {
+        time,
+        open: Number(d.open),
+        high: Number(d.high),
+        low: Number(d.low),
+        close: Number(d.close),
+      };
+    });
 
-            markers.push({
-                time: entryTime,
-                position: trade.direction === 'bullish' ? 'belowBar' : 'aboveBar',
-                color: trade.direction === 'bullish' ? '#26a69a' : '#ef5350',
-                shape: trade.direction === 'bullish' ? 'arrowUp' : 'arrowDown',
-                text: 'ENTRY'
-            });
+    // Sort and remove duplicates
+    const seenTimes = new Set<number>();
+    const uniqueData = formattedData
+      .filter(v => {
+        const timeNum = v.time as number;
+        if (!Number.isFinite(timeNum) || ![v.open, v.high, v.low, v.close].every(Number.isFinite)) {
+          return false;
+        }
+        if (seenTimes.has(timeNum)) {
+          return false;
+        }
+        seenTimes.add(timeNum);
+        return true;
+      })
+      .sort((a, b) => (a.time as number) - (b.time as number));
 
-            markers.push({
-                time: exitTime,
-                position: trade.direction === 'bullish' ? 'aboveBar' : 'belowBar',
-                color: trade.pnl_pct > 0 ? '#26a69a' : '#ef5350',
-                shape: trade.direction === 'bullish' ? 'arrowDown' : 'arrowUp',
-                text: `EXIT (${trade.pnl_pct.toFixed(2)}%)`
-            });
+    seriesRef.current.setData(uniqueData);
+
+    if (trades.length > 0) {
+      const markers: any[] = [];
+      trades.forEach(trade => {
+        const entryTime = (new Date(trade.entry_time).getTime() / 1000) as Time;
+        const exitTime = (new Date(trade.exit_time).getTime() / 1000) as Time;
+
+        if (!Number.isFinite(entryTime as number) || !Number.isFinite(exitTime as number)) return;
+
+        markers.push({
+          time: entryTime,
+          position: trade.direction === 'bullish' ? 'belowBar' : 'aboveBar',
+          color: trade.direction === 'bullish' ? '#10b981' : '#ef4444',
+          shape: trade.direction === 'bullish' ? 'arrowUp' : 'arrowDown',
+          text: 'ENTRY'
         });
-        
-        // Sort markers by time
-        markers.sort((a, b) => (a.time as number) - (b.time as number));
-        markersRef.current?.setMarkers(markers);
-      } else {
-        markersRef.current?.setMarkers([]);
-      }
+
+        const pnlText = trade.pnl_pct != null ? `${Number(trade.pnl_pct).toFixed(2)}%` : '0.00%';
+        markers.push({
+          time: exitTime,
+          position: trade.direction === 'bullish' ? 'aboveBar' : 'belowBar',
+          color: (trade.pnl_pct || 0) > 0 ? '#10b981' : '#ef4444',
+          shape: trade.direction === 'bullish' ? 'arrowDown' : 'arrowUp',
+          text: `EXIT (${pnlText})`
+        });
+      });
+
+      markers.sort((a, b) => (a.time as number) - (b.time as number));
+      markersRef.current?.setMarkers(markers);
+    } else {
+      markersRef.current?.setMarkers([]);
     }
   }, [data, trades]);
+
+  // Live Ticking Subscription: updates the last candle in real-time like broker charts
+  useEffect(() => {
+    if (!ticker) return;
+
+    let isMounted = true;
+    const fetchLiveTick = async () => {
+      try {
+        const res = await axios.get(`/api/v1/market/live-tick/${encodeURIComponent(ticker)}`, {
+          params: { timeframe }
+        });
+        if (!isMounted || !seriesRef.current || !res.data?.candle) return;
+        const c = res.data.candle;
+        const parsedTime = typeof c.time === 'number' && c.time < 2000000000
+          ? c.time
+          : new Date(c.time).getTime() / 1000;
+        seriesRef.current.update({
+          time: parsedTime as Time,
+          open: Number(c.open),
+          high: Number(c.high),
+          low: Number(c.low),
+          close: Number(c.close)
+        });
+      } catch {
+        // Fail silently on tick timeout
+      }
+    };
+
+    const intervalId = setInterval(fetchLiveTick, 2000); // 2s live candle movement
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+    };
+  }, [ticker, timeframe]);
 
   return <div ref={chartContainerRef} className="w-full rounded-lg overflow-hidden border border-gray-800" />;
 };

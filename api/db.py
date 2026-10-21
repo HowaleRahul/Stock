@@ -17,8 +17,8 @@ logger = logging.getLogger("trading.db")
 engine: AsyncEngine = create_async_engine(
     settings.database_url,
     echo=(settings.environment.lower() == "development" and settings.log_level.upper() == "DEBUG"),
-    pool_size=50,
-    max_overflow=100,
+    pool_size=20,
+    max_overflow=20,
     pool_pre_ping=True,
 )
 
@@ -82,9 +82,10 @@ async def check_database_connection() -> Dict[str, Any]:
             }
     except Exception as e:
         logger.error(f"Database connection check failed: {str(e)}")
+        error_detail = str(e) if settings.environment.lower() == "development" else "Database connection unavailable."
         return {
             "status": "disconnected",
-            "error": str(e),
+            "error": error_detail,
             "latency_ms": round((time.perf_counter() - start_time) * 1000, 2)
         }
 

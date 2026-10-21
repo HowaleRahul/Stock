@@ -39,12 +39,27 @@ class PsychologySetup(BaseSetup):
         cur_fomo = float(df['psych_fomo_streak'].iloc[-1])
         cur_panic = float(df['psych_panic_index'].iloc[-1])
         cur_dist = float(df['psych_dist_to_round'].iloc[-1])
+        if pd.isna(cur_fomo) or pd.isna(cur_panic) or pd.isna(cur_dist):
+            return SetupSignal(
+                name=self.name,
+                signal="neutral",
+                confidence=0.0,
+                reasoning="Psychological features contain NaN values.",
+            )
         
         # Calculate recent EMA to see if we are stretched
         ema_20 = df['close'].rolling(20).mean().iloc[-1]
         close = float(df['close'].iloc[-1])
         open_price = float(df['open'].iloc[-1])
         
+        if pd.isna(ema_20) or ema_20 <= 0:
+            return SetupSignal(
+                name=self.name,
+                signal="neutral",
+                confidence=0.0,
+                reasoning="Invalid or insufficient data for EMA calculation.",
+            )
+
         extension_pct = (close - ema_20) / ema_20
         
         # 1. FOMO Exhaustion (Smart Money Short)

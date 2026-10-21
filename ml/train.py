@@ -148,7 +148,9 @@ def train_and_evaluate(df: pd.DataFrame, ticker: str, timeframe: str):
             "timeframe": timeframe,
             "accuracy": acc
         }
-        joblib.dump(payload, model_path)
+        tmp_model_path = f"{model_path}.tmp"
+        joblib.dump(payload, tmp_model_path)
+        os.replace(tmp_model_path, model_path)
         logger.info(f"Deployed new Meta-Model to {model_path}")
 
 if __name__ == "__main__":

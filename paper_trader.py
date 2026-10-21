@@ -33,6 +33,7 @@ from ml.reinforcement_learner import ReinforcementLearner
 from ml.drift_detector import DriftDetector
 from ml.options_engine import OptionsEngine
 from api.notifier import notifier
+from data.market_hours import get_market_status, is_market_open
 from papertrade.persistence import (
     ensure_schema,
     load_account as load_account_db,
@@ -54,6 +55,23 @@ PERIOD = "60d"  # Enough context for EMAs, S/R, and Macro features
 TRADES_FILE = "paper_trades.json"
 ACCOUNT_FILE = "paper_account.json"
 REPORT_FILE = "paper_trades_report.csv"
+SWING_WATCHLIST_FILE = os.path.join("data", "swing_watchlist.json")
+
+
+def get_scanning_tickers():
+    """Returns base tickers plus any active candidates from the Swing Watchlist."""
+    tickers = list(TICKERS)
+    if os.path.exists(SWING_WATCHLIST_FILE):
+        try:
+            with open(SWING_WATCHLIST_FILE, "r", encoding="utf-8") as f:
+                wl = json.load(f)
+                for item in wl:
+                    sym = item.get("ticker")
+                    if sym and sym not in tickers:
+                        tickers.append(sym)
+        except Exception as e:
+            logger.debug(f"Could not read swing watchlist: {e}")
+    return tickers
 
 def load_config():
     if os.path.exists("config.json"):
@@ -90,22 +108,48 @@ def load_account():
     return {"capital": STARTING_CAPITAL, "peak_capital": STARTING_CAPITAL, "status": "ACTIVE"}
 
 def save_account(account):
-    with open(ACCOUNT_FILE, 'w') as f:
-        json.dump(account, f, indent=4)
+    tmp_path = f"{ACCOUNT_FILE}.tmp"
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(account, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, ACCOUNT_FILE)
+    except Exception as e:
+        logger.error(f"Failed to save account file atomically: {e}")
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 def load_open_trades():
     if os.path.exists(TRADES_FILE):
-        with open(TRADES_FILE, 'r') as f:
+        with open(TRADES_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return []
 
 def save_trades(trades):
-    with open(TRADES_FILE, 'w') as f:
-        json.dump(trades, f, indent=4)
-    if trades:
-        df = pd.DataFrame(trades)
-        df.to_csv(REPORT_FILE, index=False)
-        logger.info("Exported CSV report.")
+    tmp_path = f"{TRADES_FILE}.tmp"
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(trades, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, TRADES_FILE)
+        if trades:
+            df = pd.DataFrame(trades)
+            tmp_report = f"{REPORT_FILE}.tmp"
+            df.to_csv(tmp_report, index=False)
+            os.replace(tmp_report, REPORT_FILE)
+            logger.info("Exported CSV report.")
+    except Exception as e:
+        logger.error(f"Failed to save trades file atomically: {e}")
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 # ---------------------------------------------------------------------------
 # Data Fetching
@@ -132,8 +176,8 @@ def fetch_and_enrich(ticker: str) -> pd.DataFrame:
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = np.max(ranges, axis=1)
-    df['atr'] = true_range.rolling(14).mean().fillna(true_range.mean())
+    true_range = ranges.max(axis=1)
+    df['atr'] = true_range.rolling(14, min_periods=1).mean()
 
     return df
 
@@ -158,7 +202,8 @@ async def run_loop():
     logger.info("=" * 60)
 
     while True:
-        logger.info(f"--- Waking up for {TIMEFRAME} scan ---")
+        m_status = get_market_status("NSE")
+        logger.info(f"--- Waking up for {TIMEFRAME} scan | NSE Session: {m_status['session']} ({m_status['message']}) ---")
         
         now = time.time()
         journal_events = []
@@ -203,7 +248,7 @@ async def run_loop():
                 continue
 
             ticker = trade.get('underlying_ticker', trade['ticker'])
-            df = fetch_and_enrich(ticker)
+            df = await asyncio.to_thread(fetch_and_enrich, ticker)
             if df is None:
                 updated_trades.append(trade)
                 continue
@@ -250,8 +295,8 @@ async def run_loop():
                     # Options PnL: calculate exit premium via BS using exit spot price
                     exit_spot = trade['exit_price']
                     iv = (df['macro_vix'].iloc[-1] / 100.0) if 'macro_vix' in df.columns else 0.15
-                    # Approximate remaining time
-                    days_held = bars_held if TIMEFRAME == "1d" else bars_held / 6.0
+                    # Approximate remaining time (Indian NSE session is 6.25 hours: 9:15 - 15:30)
+                    days_held = bars_held if TIMEFRAME == "1d" else bars_held / 6.25
                     days_to_expiry = max(0.5, 7.0 - days_held)
                     T = days_to_expiry / 365.0
                     
@@ -321,6 +366,32 @@ async def run_loop():
                     f"PnL: {net_pnl_pct*100:+.2f}% | Cash: ₹{cash_pnl:+,.2f} | "
                     f"Bars Held: {bars_held}"
                 )
+            else:
+                # Calculate mark-to-market unrealized PnL for active trade
+                if trade.get("is_options", False):
+                    iv = (df['macro_vix'].iloc[-1] / 100.0) if 'macro_vix' in df.columns else 0.15
+                    days_held = bars_held if TIMEFRAME == "1d" else bars_held / 6.25
+                    days_to_expiry = max(0.5, 7.0 - days_held)
+                    T = days_to_expiry / 365.0
+                    bs_curr = opt_engine._black_scholes(
+                        S=current_price,
+                        K=trade.get("opt_strike", current_price),
+                        T=T,
+                        r=0.06,
+                        sigma=iv,
+                        option_type=trade.get("opt_type", "CE")
+                    )
+                    curr_prem = bs_curr["premium"]
+                    entry_prem = trade.get("opt_entry_premium", 0.0)
+                    gross = (curr_prem - entry_prem) / entry_prem if entry_prem > 0 else 0.0
+                    trade["unrealized_pnl"] = trade['invested'] * (gross - STT_SLIPPAGE_PCT)
+                else:
+                    entry_p = trade.get('entry_price', 0)
+                    if entry_p > 0:
+                        gross = (current_price - entry_p) / entry_p if trade['direction'] == 'LONG' else (entry_p - current_price) / entry_p
+                        trade["unrealized_pnl"] = trade['invested'] * (gross - STT_SLIPPAGE_PCT)
+                    else:
+                        trade["unrealized_pnl"] = 0.0
 
             updated_trades.append(trade)
 
@@ -328,21 +399,30 @@ async def run_loop():
         await persist_portfolio(account, updated_trades, journal_events)
         journal_events.clear()
 
-        # --- Drawdown Check (Kill-Switch) ---
-        max_drawdown = float(CONFIG.get('max_portfolio_drawdown_pct', 0.10))
-        if account['capital'] <= account['peak_capital'] * (1 - max_drawdown):
+        # Dynamically reload runtime configuration
+        current_config = load_config()
+
+        # --- Mark-to-Market Drawdown Check (Kill-Switch) ---
+        total_unrealized_pnl = sum(t.get("unrealized_pnl", 0.0) for t in updated_trades if t['status'] == 'OPEN')
+        mtm_equity = account['capital'] + total_unrealized_pnl
+
+        if mtm_equity > account['peak_capital']:
+            account['peak_capital'] = mtm_equity
+
+        max_drawdown = float(current_config.get('max_portfolio_drawdown_pct', 0.10))
+        if mtm_equity <= account['peak_capital'] * (1 - max_drawdown):
             account['status'] = 'SUSPENDED'
             kill_switch_record = TradeLogger.log_kill_switch(
-            reason=f"{max_drawdown * 100}% PORTFOLIO DRAWDOWN REACHED",
-                capital=account['capital'],
+                reason=f"{max_drawdown * 100:.1f}% PORTFOLIO MTM DRAWDOWN REACHED",
+                capital=mtm_equity,
                 peak_capital=account['peak_capital'],
-                weekly_pnl=0.0,  # Not strictly tracked here, using total drawdown
-                config_version=CONFIG.get("version", "v1.0")
+                weekly_pnl=0.0,
+                config_version=current_config.get("version", "v1.0")
             )
             journal_events.append(kill_switch_record)
             
             notifier.send_system_alert(
-                f"Portfolio drawdown reached {max_drawdown * 100:.2f}%. Trading suspended.",
+                f"Portfolio mark-to-market drawdown reached {max_drawdown * 100:.2f}%. Trading suspended.",
                 level="CRITICAL",
             )
             logger.error(f"🚨 EMERGENCY STOP: {max_drawdown * 100:.2f}% PORTFOLIO DRAWDOWN REACHED!")
@@ -357,13 +437,13 @@ async def run_loop():
         # =================================================================
         # PHASE 2: Scan for New Entries (with full Risk Engine)
         # =================================================================
-        open_tickers = [t['ticker'] for t in updated_trades if t['status'] == 'OPEN']
+        open_tickers = [t.get('underlying_ticker', t['ticker']) for t in updated_trades if t['status'] == 'OPEN']
 
-        for ticker in TICKERS:
+        for ticker in get_scanning_tickers():
             if ticker in open_tickers:
                 continue  # Already in a trade for this instrument
 
-            df = fetch_and_enrich(ticker)
+            df = await asyncio.to_thread(fetch_and_enrich, ticker)
             if df is None:
                 continue
 
@@ -378,7 +458,8 @@ async def run_loop():
             prob = prediction.get("probability", 0.0)
 
             # Only consider trades where AI is confident enough
-            if prob < MIN_AI_CONFIDENCE or signal not in ("bullish", "bearish"):
+            min_conf = float(current_config.get("min_ai_confidence", MIN_AI_CONFIDENCE))
+            if prob < min_conf or signal not in ("bullish", "bearish"):
                 continue
 
             # --- Generate Full Trade Plan via Risk Engine ---
@@ -441,8 +522,9 @@ async def run_loop():
             # Convert setup signals to serializable dicts
             setup_signals_list = [{"name": s.name, "signal": s.signal, "confidence": float(s.confidence)} for s in setups]
 
+            import uuid
             new_trade = {
-                "id": str(datetime.datetime.now().timestamp()),
+                "id": f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{ticker.replace('^', '')}_{uuid.uuid4().hex[:6]}",
                 "ticker": ticker if not is_options_trade else opt_plan.option_symbol,
                 "underlying_ticker": ticker,
                 "direction": trade_plan.direction,
@@ -517,6 +599,7 @@ async def run_loop():
                 f"P(Ruin): {trade_plan.probability_of_ruin*100:.4f}%"
             )
             updated_trades.append(new_trade)
+            notifier.send_entry_alert(new_trade, is_live=False)
 
         await persist_portfolio(account, updated_trades, journal_events)
         journal_events.clear()

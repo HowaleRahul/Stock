@@ -1,0 +1,40 @@
+[
+  {
+    "ticker": "HAL",
+    "sector": "Defense",
+    "source_scanners": [
+      "Momentum",
+      "ATH Contraction"
+    ],
+    "composite_score": 87.5,
+    "vcp_detected": true,
+    "stage_2": true,
+    "added_at": "2026-10-21",
+    "notes": "Tight contraction along 10 EMA near ATH, defense sector momentum leader."
+  },
+  {
+    "ticker": "TRENT",
+    "sector": "Retail",
+    "source_scanners": [
+      "Momentum",
+      "ATH Contraction"
+    ],
+    "composite_score": 92.0,
+    "vcp_detected": true,
+    "stage_2": true,
+    "added_at": "2026-10-21",
+    "notes": "Market leader at All-Time Highs, textbook Weinstein Stage 2 markup."
+  },
+  {
+    "ticker": "BEL",
+    "sector": "Defense",
+    "source_scanners": [
+      "DWIB Inside Bar"
+    ],
+    "composite_score": 82.5,
+    "vcp_detected": true,
+    "stage_2": true,
+    "added_at": "2026-10-21",
+    "notes": "Weekly inside bar squeeze on 50-day pivot base, early volume drying up."
+  }
+]

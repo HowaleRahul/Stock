@@ -70,15 +70,25 @@ class ReinforcementLearner:
         }
 
     def _save_state(self) -> None:
-        """Persist learned weights to disk."""
-        os.makedirs(os.path.dirname(self.weights_file) or ".", exist_ok=True)
+        """Persist learned weights to disk atomically."""
+        dir_name = os.path.dirname(self.weights_file) or "."
+        os.makedirs(dir_name, exist_ok=True)
+        tmp_file = f"{self.weights_file}.tmp"
         try:
             import datetime
             self._state["last_update"] = datetime.datetime.now().isoformat()
-            with open(self.weights_file, "w", encoding="utf-8") as f:
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, indent=2, default=str)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_file, self.weights_file)
         except Exception as e:
             logger.error(f"Failed to save RL state: {e}")
+            if os.path.exists(tmp_file):
+                try:
+                    os.unlink(tmp_file)
+                except Exception:
+                    pass
 
     # -------------------------------------------------------------------
     # Core: Learn from a completed trade
@@ -90,6 +100,7 @@ class ReinforcementLearner:
         regime: str,
         pnl_pct: float,
         is_win: bool,
+        save: bool = True,
     ) -> None:
         """
         Update the bandit's beliefs based on a completed trade outcome.
@@ -100,6 +111,7 @@ class ReinforcementLearner:
             regime: The market regime at entry time
             pnl_pct: The trade's P&L as a decimal (e.g., 0.02 = 2%)
             is_win: Whether the trade was a winner
+            save: Whether to persist state to disk immediately
         """
         weights = self._state["weights"]
         ewma_decay = 0.1  # How fast old observations decay (higher = faster)
@@ -141,7 +153,8 @@ class ReinforcementLearner:
         # Update global (regime-agnostic) weights
         self._update_global_weights()
         self._state["version"] += 1
-        self._save_state()
+        if save:
+            self._save_state()
 
     # -------------------------------------------------------------------
     # Compute Current Weights
@@ -177,14 +190,19 @@ class ReinforcementLearner:
                 state = {"alpha": avg_alpha, "beta": avg_beta}
 
             # Thompson Sample from Beta(alpha, beta)
-            alpha = max(state["alpha"], 0.1)
-            beta_val = max(state["beta"], 0.1)
-            sample = np.random.beta(alpha, beta_val)
+            alpha = float(state.get("alpha", 1.0))
+            if math.isnan(alpha) or alpha <= 0:
+                alpha = 1.0
+            beta_val = float(state.get("beta", 1.0))
+            if math.isnan(beta_val) or beta_val <= 0:
+                beta_val = 1.0
+            sample = float(np.random.beta(alpha, beta_val))
             sampled[setup_name] = sample
 
         # Normalize to [0, 1] range
         if sampled:
-            max_val = max(sampled.values())
+            valid_vals = [v for v in sampled.values() if not math.isnan(v)]
+            max_val = max(valid_vals) if valid_vals else 1.0
             if max_val > 0:
                 sampled = {k: v / max_val for k, v in sampled.items()}
 
@@ -211,8 +229,12 @@ class ReinforcementLearner:
                     "beta": np.mean([s["beta"] for s in all_states]),
                 }
 
-            alpha = state["alpha"]
-            beta_val = state["beta"]
+            alpha = float(state.get("alpha", 1.0))
+            if math.isnan(alpha) or alpha <= 0:
+                alpha = 1.0
+            beta_val = float(state.get("beta", 1.0))
+            if math.isnan(beta_val) or beta_val <= 0:
+                beta_val = 1.0
             result[setup_name] = alpha / (alpha + beta_val) if (alpha + beta_val) > 0 else 0.5
 
         return result
@@ -259,8 +281,11 @@ class ReinforcementLearner:
             is_win = pnl > 0
 
             if setup_signals:
-                self.update_from_trade(setup_signals, regime, pnl, is_win)
+                self.update_from_trade(setup_signals, regime, pnl, is_win, save=False)
                 count += 1
+
+        if count > 0:
+            self._save_state()
 
         logger.info(f"[RL] Batch re-learned from {count} completed trades")
         return count

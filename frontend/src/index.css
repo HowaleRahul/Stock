@@ -264,3 +264,46 @@ a { color: inherit; }
   .portfolio-summary { grid-template-columns: auto 1fr; }
   .portfolio-summary .grid { grid-column: 1 / -1; }
 }
+
+.skip-link {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  padding: 8px 14px;
+  background: #17212b;
+  color: #fff;
+  border-radius: 6px;
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+.sr-only.focus\:not-sr-only:focus {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1000;
+  width: auto;
+  height: auto;
+  padding: 8px 12px;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+  background: #f06c4e;
+  color: #fff;
+  border-radius: 6px;
+}
+

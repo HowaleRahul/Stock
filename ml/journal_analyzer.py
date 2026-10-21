@@ -23,6 +23,19 @@ from ml.trade_logger import TradeLogger
 logger = logging.getLogger("trading.journal_analyzer")
 
 
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """Safely convert any value to float, guarding against None, NaN, Inf, and TypeErrors."""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (ValueError, TypeError):
+        return default
+
+
 class JournalInsight:
     """A single actionable recommendation from the journal analysis."""
 
@@ -88,7 +101,7 @@ class JournalAnalyzer:
     def __init__(self):
         self._entries = TradeLogger.get_all_entries()
         self._exits = TradeLogger.get_all_exits()
-        self._entry_map = {e["trade_id"]: e for e in self._entries}
+        self._entry_map = {e["trade_id"]: e for e in self._entries if e.get("trade_id")}
 
     def analyze(self) -> Dict[str, Any]:
         """
@@ -150,8 +163,19 @@ class JournalAnalyzer:
             trade_id = exit_rec.get("trade_id")
             entry_rec = self._entry_map.get(trade_id, {})
             regime = entry_rec.get("regime", "unknown")
-            pnl = exit_rec.get("pnl_pct", 0)
-            bars = exit_rec.get("bars_held", 0)
+            raw_pnl = exit_rec.get("pnl_pct")
+            try:
+                pnl = float(raw_pnl) if raw_pnl is not None else 0.0
+                if math.isnan(pnl) or math.isinf(pnl):
+                    pnl = 0.0
+            except (ValueError, TypeError):
+                pnl = 0.0
+
+            raw_bars = exit_rec.get("bars_held")
+            try:
+                bars = int(raw_bars) if raw_bars is not None else 0
+            except (ValueError, TypeError):
+                bars = 0
 
             setup_signals = entry_rec.get("setup_signals", [])
             for sig in setup_signals:
@@ -278,7 +302,7 @@ class JournalAnalyzer:
         if len(self._exits) < self.MIN_TRADES_FOR_ANALYSIS:
             return insights
 
-        pnl_list = [e.get("pnl_pct", 0) for e in self._exits]
+        pnl_list = [_safe_float(e.get("pnl_pct")) for e in self._exits]
         wins = [p for p in pnl_list if p > 0]
         losses = [p for p in pnl_list if p <= 0]
 
@@ -312,8 +336,8 @@ class JournalAnalyzer:
 
         # Check probability of ruin from entries
         ruin_probs = [
-            e.get("probability_of_ruin", 0) for e in self._entries
-            if e.get("probability_of_ruin", 0) > 0
+            _safe_float(e.get("probability_of_ruin")) for e in self._entries
+            if _safe_float(e.get("probability_of_ruin")) > 0
         ]
         if ruin_probs:
             avg_ruin = np.mean(ruin_probs)
@@ -355,7 +379,7 @@ class JournalAnalyzer:
         max_streak = 0
         current_streak = 0
         for exit_rec in sorted_exits:
-            if exit_rec.get("pnl_pct", 0) <= 0:
+            if _safe_float(exit_rec.get("pnl_pct")) <= 0:
                 current_streak += 1
                 max_streak = max(max_streak, current_streak)
             else:
@@ -400,7 +424,7 @@ class JournalAnalyzer:
             trade_id = exit_rec.get("trade_id")
             entry_rec = self._entry_map.get(trade_id, {})
             ts_str = entry_rec.get("timestamp", "")
-            pnl = exit_rec.get("pnl_pct", 0)
+            pnl = _safe_float(exit_rec.get("pnl_pct"))
 
             if ts_str:
                 try:
@@ -479,18 +503,18 @@ class JournalAnalyzer:
             return {"total_trades": 0, "message": "No closed trades yet."}
 
         total = len(self._exits)
-        pnls = [e.get("pnl_pct", 0) for e in self._exits]
+        pnls = [_safe_float(e.get("pnl_pct")) for e in self._exits]
         wins = sum(1 for p in pnls if p > 0)
-        cash_pnls = [e.get("cash_pnl", 0) for e in self._exits]
+        cash_pnls = [_safe_float(e.get("cash_pnl")) for e in self._exits]
 
         win_rate = wins / total if total > 0 else 0.0
         total_cash_pnl = sum(cash_pnls)
-        avg_pnl = np.mean(pnls)
-        std_pnl = np.std(pnls) if total > 1 else 1.0
+        avg_pnl = float(np.mean(pnls)) if pnls else 0.0
+        std_pnl = float(np.std(pnls)) if total > 1 else 1.0
         sharpe = (avg_pnl / std_pnl) if std_pnl > 0 else 0.0
 
         # Max drawdown from capital curve
-        capitals = [e.get("capital_after_exit", 0) for e in self._exits if e.get("capital_after_exit")]
+        capitals = [_safe_float(e.get("capital_after_exit")) for e in self._exits if e.get("capital_after_exit") is not None]
         max_dd = 0.0
         if capitals:
             peak = capitals[0]

@@ -215,7 +215,10 @@ async def search_symbols_endpoint(
 
 
 @router.get("/symbols", response_model=List[SymbolResponse], summary="List all watchlist symbols")
-async def list_symbols(db: AsyncSession = Depends(get_db)):
+async def list_symbols(
+    db: AsyncSession = Depends(get_db),
+    _rate_limit: bool = Depends(rate_limiter(60))
+):
     """Retrieve all financial instruments currently configured in the database."""
     stmt = (
         select(Symbol)
@@ -342,7 +345,8 @@ async def get_candles(
     ticker: str,
     timeframe: str = Query("1d", description="Timeframe interval (e.g. 1d, 1h)"),
     limit: int = Query(500, ge=1, le=5000, description="Max bars to return"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    _rate_limit: bool = Depends(rate_limiter(60))
 ):
     """Query stored candlestick data from TimescaleDB hypertable."""
     ticker_clean = _clean_ticker_param(ticker)
@@ -372,7 +376,8 @@ async def get_candles(
 async def get_news(
     ticker: str,
     limit: int = Query(50, ge=1, le=500, description="Max news items to return"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    _rate_limit: bool = Depends(rate_limiter(60))
 ):
     """Retrieve raw financial news headlines from TimescaleDB hypertable."""
     ticker_clean = _clean_ticker_param(ticker)
@@ -522,7 +527,27 @@ async def _load_ohlcv_df(
             for b in bars
         ]
     )
+
+    # In live market hours or when real-time quote is available, inject live LTP into the latest candle
+    try:
+        from data.realtime_feed import RealTimeDataFeed
+        quote = RealTimeDataFeed.get_realtime_quote_sync(ticker_clean)
+        if quote and quote.get("ltp", 0.0) > 0 and not df.empty:
+            ltp = float(quote["ltp"])
+            idx_last = df.index[-1]
+            if ltp > df.at[idx_last, "high"]:
+                df.at[idx_last, "high"] = ltp
+            if ltp < df.at[idx_last, "low"]:
+                df.at[idx_last, "low"] = ltp
+            df.at[idx_last, "close"] = ltp
+            df.at[idx_last, "adjusted_close"] = ltp
+            if quote.get("volume", 0) > 0:
+                df.at[idx_last, "volume"] = max(float(df.at[idx_last, "volume"]), float(quote["volume"]))
+    except Exception:
+        pass
+
     return sym, bars, df
+
 
 
 @router.get(
@@ -536,6 +561,7 @@ async def evaluate_setups(
     timeframe: str = Query("1d", description="Candle timeframe"),
     period: int = Query(200, ge=10, le=5000, description="Number of bars to analyze"),
     db: AsyncSession = Depends(get_db),
+    _rate_limit: bool = Depends(rate_limiter(60)),
 ):
     """Run all 5 technical setups (MA Crossover, RSI, MACD, Bollinger Bands,
     S/R Breakout) against the stored OHLCV data and return signals."""
@@ -555,14 +581,13 @@ async def evaluate_setups(
         except Exception:
             pass
 
-    # Evaluate primary timeframe
-    regime_data = await run_in_threadpool(RegimeDetector.detect, df_primary.copy())
-    primary_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_primary.copy(), ticker)
+    # Evaluate primary timeframe (single pass for regime detection and setup evaluation)
+    regime_data, primary_signals = await run_in_threadpool(_setup_engine.evaluate_with_regime, df_primary.copy(), ticker)
 
     # Evaluate MTF and boost confidence
     for tf, df_tf in mtf_dfs.items():
         try:
-            tf_signals = await run_in_threadpool(_setup_engine.evaluate_all, df_tf.copy(), ticker)
+            _, tf_signals = await run_in_threadpool(_setup_engine.evaluate_with_regime, df_tf.copy(), ticker)
             tf_signal_map = {s.name: s.signal for s in tf_signals}
             
             for p_sig in primary_signals:
@@ -613,6 +638,7 @@ async def get_indicators(
     timeframe: str = Query("1d", description="Candle timeframe"),
     limit: int = Query(500, ge=10, le=5000, description="Max bars to return"),
     db: AsyncSession = Depends(get_db),
+    _rate_limit: bool = Depends(rate_limiter(60)),
 ):
     """Return OHLCV candles together with pre-computed indicator series
     (EMA, RSI, MACD, Bollinger Bands, S/R levels) for chart overlays."""

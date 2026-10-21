@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = Field(
-        default="",
+        default="postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/trading_db",
         alias="DATABASE_URL"
     )
 
@@ -54,9 +54,36 @@ class Settings(BaseSettings):
             return [str(item).strip().upper() for item in v if str(item).strip()]
         return v
 
+    # CORS Origins
+    cors_origins: List[str] = Field(
+        default=[
+            "http://localhost",
+            "http://localhost:8000",
+            "http://127.0.0.1",
+            "http://127.0.0.1:8000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173"
+        ],
+        alias="CORS_ORIGINS"
+    )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v_clean = v.strip()
+            if v_clean.startswith("[") and v_clean.endswith("]"):
+                import json
+                try:
+                    return [str(item).strip() for item in json.loads(v_clean) if str(item).strip()]
+                except Exception:
+                    pass
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
+
     # Broker API placeholders (for Phase 1+)
     kite_api_key: Optional[str] = Field(default=None, alias="KITE_API_KEY")
-    kite_api_secret: Optional[str] = Field(default=None, alias="KITE_API_SECRET")
+    kite_api_secret: Optional[SecretStr] = Field(default=None, alias="KITE_API_SECRET")
     angel_api_key: Optional[str] = Field(default=None, alias="ANGEL_API_KEY")
     upstox_api_key: Optional[str] = Field(default=None, alias="UPSTOX_API_KEY")
     polygon_api_key: Optional[str] = Field(default=None, alias="POLYGON_API_KEY")
