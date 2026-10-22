@@ -6,6 +6,10 @@ This document establishes operational directives, architectural constraints, and
 
 ## 1. Project-Specific Rules
 
+### 1.0 Compulsory Project Brain Synchronization (Strictly Enforced)
+* **Always Update the Brain Without Fail**: Whenever ANY change, bug fix, feature addition, refactoring, dependency update, file removal, or architectural adjustment is made to this codebase, the project brain files in `ai/` (`current-state.md`, `decisions.md`, `known-issues.md`, `instructions.md`) and `REVIEW_LOG.md` **MUST** be updated accordingly without fail.
+* **Definition of Done**: No coding task, audit, or refactoring is finished until the brain documentation has been verified and updated to mirror the exact current reality of the codebase.
+
 ### 1.1 Non-Negotiable Operational Safety
 * **Fail-Closed Financial Execution**: Never allow automated orders or broker connections without an explicit `ENVIRONMENT=LIVE` setting, valid authenticated broker adapters, and static IP whitelisting. By default, live order injection throws a `RuntimeError` (verified in `api/broker.py` line 131).
 * **Option Buying Only**: Under SEBI retail algo regulations and system policy, derivative strategies are restricted to long options (`CE` or `PE` buying). Naked option writing (short calls/puts) is prohibited to prevent unlimited tail risk (verified in `ml/options_engine.py` line 11).
