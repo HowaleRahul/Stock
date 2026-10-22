@@ -1,5 +1,12 @@
 {
-    "capital": 100020.0,
-    "peak_capital": 100020.0,
-    "status": "ACTIVE"
+  "account_id": "ACC_PAPER_DEFAULT",
+  "initial_capital": 100000.0,
+  "cash_balance": 100000.0,
+  "peak_capital": 100000.0,
+  "realized_pnl": 0.0,
+  "total_trades": 0,
+  "wins": 0,
+  "losses": 0,
+  "win_rate": 0.0,
+  "updated_at": "2026-10-23T00:00:00"
 }

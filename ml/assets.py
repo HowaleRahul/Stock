@@ -1,34 +1,94 @@
-"""Canonical asset-class policy shared by training and inference.
+"""Canonical asset-class policy for F&O-only Indian market trading.
 
-Keeping this classification in one module prevents a symbol from receiving
-different macro inputs or model flags in the batch and continuous pipelines.
+This module defines the ONLY supported instruments: NSE Index Futures
+and Options (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY).
+
+No equity/cash segment, no US markets, no crypto.
+Foreign market F&O support is reserved for future expansion.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-ASSET_CLASSES: Final[tuple[str, ...]] = ("IN_EQUITY", "US_EQUITY", "CRYPTO")
-TARGETS: Final[dict[str, tuple[str, ...]]] = {
-    "IN_EQUITY": ("^NSEI", "^NSEBANK"),
-    "US_EQUITY": ("^GSPC", "^DJI", "^IXIC"),
-    "CRYPTO": ("BTC-USD", "ETH-USD", "SOL-USD"),
+
+# ---------------------------------------------------------------------------
+# F&O Asset Classes
+# ---------------------------------------------------------------------------
+
+ASSET_CLASSES: Final[tuple[str, ...]] = ("IN_INDEX_FO",)
+
+# Supported F&O underlyings — these are Indian index tickers on Yahoo Finance
+# used for price-action analysis. Actual trading happens via F&O contracts.
+FO_UNDERLYINGS: Final[dict[str, str]] = {
+    "NIFTY":      "^NSEI",
+    "BANKNIFTY":  "^NSEBANK",
+    "SENSEX":     "^BSESN",
+    "FINNIFTY":   "^NSEI",      # FINNIFTY uses NIFTY as proxy on Yahoo
+    "MIDCPNIFTY": "^NSEI",      # MIDCPNIFTY uses NIFTY as proxy on Yahoo
 }
 
+# Lot sizes as per NSE/BSE (updated periodically)
+LOT_SIZES: Final[dict[str, int]] = {
+    "NIFTY":      25,
+    "BANKNIFTY":  15,
+    "SENSEX":     10,
+    "FINNIFTY":   25,
+    "MIDCPNIFTY": 50,
+}
+
+# Strike intervals for option chain
+STRIKE_INTERVALS: Final[dict[str, int]] = {
+    "NIFTY":      50,
+    "BANKNIFTY":  100,
+    "SENSEX":     100,
+    "FINNIFTY":   50,
+    "MIDCPNIFTY": 25,
+}
+
+# Futures margin rates (SPAN + Exposure, ~14-16%)
+FUTURES_MARGIN_RATES: Final[dict[str, float]] = {
+    "NIFTY":      0.15,
+    "BANKNIFTY":  0.16,
+    "SENSEX":     0.15,
+    "FINNIFTY":   0.15,
+    "MIDCPNIFTY": 0.16,
+}
+
+# Yahoo Finance ticker aliases for normalization
 TICKER_ALIASES: Final[dict[str, str]] = {
-    "NIFTY": "^NSEI",
-    "NIFTY50": "^NSEI",
-    "BANKNIFTY": "^NSEBANK",
+    "NIFTY":       "^NSEI",
+    "NIFTY50":     "^NSEI",
+    "BANKNIFTY":   "^NSEBANK",
+    "SENSEX":      "^BSESN",
+    "BSE":         "^BSESN",
+    "BSESN":       "^BSESN",
+    "FINNIFTY":    "^NSEI",
+    "MIDCPNIFTY":  "^NSEI",
+    "^NSEI":       "^NSEI",
+    "^NSEBANK":    "^NSEBANK",
+    "^BSESN":      "^BSESN",
 }
 
-# These symbols are present in the application catalog and are explicitly
-# supported for global price-action training. New symbols must be classified
-# deliberately instead of inheriting Indian-equity assumptions.
-US_EQUITY_SYMBOLS: Final[frozenset[str]] = frozenset({"AAPL", "NVDA", "MSFT"})
+# Reverse map: Yahoo ticker → F&O underlying name
+YAHOO_TO_FO: Final[dict[str, str]] = {
+    "^NSEI":     "NIFTY",
+    "^NSEBANK":  "BANKNIFTY",
+    "^BSESN":    "SENSEX",
+}
+
+# Weekly expiry days (0=Monday ... 6=Sunday)
+EXPIRY_DAYS: Final[dict[str, int]] = {
+    "NIFTY":      3,   # Thursday
+    "BANKNIFTY":  2,   # Wednesday
+    "SENSEX":     4,   # Friday
+    "FINNIFTY":   1,   # Tuesday
+    "MIDCPNIFTY": 0,   # Monday
+}
 
 
 def normalize_ticker(ticker: str) -> str:
-    """Return the canonical Yahoo symbol or reject malformed input."""
+    """Return the canonical Yahoo symbol for F&O underlying."""
     if not isinstance(ticker, str):
         raise ValueError("Ticker symbol must be a string")
     normalized = ticker.upper().strip()
@@ -36,49 +96,79 @@ def normalize_ticker(ticker: str) -> str:
         raise ValueError("Ticker symbol is empty or too long")
     if any(char.isspace() or ord(char) < 32 for char in normalized):
         raise ValueError("Ticker symbol contains whitespace or control characters")
-    return TICKER_ALIASES.get(normalized, normalized)
+    result = TICKER_ALIASES.get(normalized)
+    if result is None:
+        raise ValueError(
+            f"Unsupported ticker: {ticker}. "
+            f"Only F&O indices are supported: {list(FO_UNDERLYINGS.keys())}"
+        )
+    return result
 
 
 def classify_ticker(ticker: str) -> str:
-    """Return the supported asset class for a Yahoo Finance ticker.
+    """Return 'IN_INDEX_FO' for all supported tickers.
 
-    The explicit crypto allow-list intentionally avoids broad heuristics such
-    as ``"USD" in ticker`` which would misclassify FX symbols as crypto.
-    Unknown symbols fail closed because the asset class controls macro data,
-    labels, model flags, and execution assumptions.
+    Fails closed on anything not in the F&O universe.
     """
-    normalized = normalize_ticker(ticker)
-    for asset_class, symbols in TARGETS.items():
-        if normalized in symbols:
-            return asset_class
-    if normalized == "INR=X" or normalized.endswith((".NS", ".BO")):
-        return "IN_EQUITY"
-    if normalized in US_EQUITY_SYMBOLS:
-        return "US_EQUITY"
-    raise ValueError(f"Unsupported or unclassified ticker: {ticker}")
+    normalize_ticker(ticker)  # validates
+    return "IN_INDEX_FO"
+
+
+def get_fo_name(ticker: str) -> str:
+    """Return the F&O underlying name (NIFTY, BANKNIFTY, etc.) from any ticker format."""
+    normalized = ticker.upper().strip()
+    # Direct match
+    if normalized in FO_UNDERLYINGS:
+        return normalized
+    # Yahoo ticker reverse lookup
+    if normalized in YAHOO_TO_FO:
+        return YAHOO_TO_FO[normalized]
+    # Try alias → yahoo → reverse
+    yahoo = TICKER_ALIASES.get(normalized)
+    if yahoo and yahoo in YAHOO_TO_FO:
+        return YAHOO_TO_FO[yahoo]
+    raise ValueError(f"Cannot resolve F&O name for: {ticker}")
 
 
 def is_execution_supported(ticker: str) -> bool:
-    """Return whether the current live/paper execution scope supports ticker."""
-    return classify_ticker(ticker) == "IN_EQUITY"
+    """Return whether trading is supported for this ticker."""
+    try:
+        classify_ticker(ticker)
+        return True
+    except ValueError:
+        return False
 
 
 def asset_flags(asset_class: str) -> dict[str, float]:
-    """One-hot asset features used by every model-training path."""
-    if asset_class not in ASSET_CLASSES:
+    """One-hot asset features — simplified for F&O only."""
+    if asset_class != "IN_INDEX_FO":
         raise ValueError(f"Unsupported asset class: {asset_class}")
     return {
-        "feat_is_in_equity": float(asset_class == "IN_EQUITY"),
-        "feat_is_us_equity": float(asset_class == "US_EQUITY"),
-        "feat_is_crypto": float(asset_class == "CRYPTO"),
+        "feat_is_nifty": 0.0,
+        "feat_is_banknifty": 0.0,
+    }
+
+
+def fo_asset_flags(fo_name: str) -> dict[str, float]:
+    """F&O-specific one-hot features by underlying index."""
+    return {
+        "feat_is_nifty": float(fo_name in ("NIFTY", "FINNIFTY", "MIDCPNIFTY")),
+        "feat_is_banknifty": float(fo_name == "BANKNIFTY"),
+        "feat_is_sensex": float(fo_name == "SENSEX"),
     }
 
 
 def barrier_config(asset_class: str, timeframe: str) -> dict[str, float | int]:
-    """Return conservative, volatility-aware triple-barrier defaults."""
-    if asset_class not in ASSET_CLASSES:
+    """Return F&O-appropriate triple-barrier defaults.
+
+    F&O uses wider barriers than equity because index movements
+    are amplified through leverage (lot size * delta).
+    """
+    if asset_class != "IN_INDEX_FO":
         raise ValueError(f"Unsupported asset class: {asset_class}")
     daily = timeframe.lower() == "1d"
-    if asset_class == "CRYPTO":
-        return {"tp_atr": 3.0, "sl_atr": 1.5, "max_hold": 20 if daily else 40}
-    return {"tp_atr": 2.0, "sl_atr": 1.0, "max_hold": 20 if daily else 40}
+    return {
+        "tp_atr": 2.0,
+        "sl_atr": 1.0,
+        "max_hold": 10 if daily else 30,  # F&O weekly expiry constraint
+    }

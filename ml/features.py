@@ -59,19 +59,19 @@ def _align_daily_series(series: pd.Series, target_index: pd.Index) -> pd.Series:
     return source.reindex(dates, method="ffill").set_axis(target_index)
 
 
-def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "2y", interval: str = "1d", asset_class: str = "IN_EQUITY") -> pd.DataFrame:
+def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "2y", interval: str = "1d", asset_class: str = "IN_INDEX_FO") -> pd.DataFrame:
     """
     Downloads macro indicators and mathematically generates synthetic options Greeks.
     Merges them directly into the primary dataframe.
     """
     logger.info(f"Downloading Macro Features for {ticker} ({asset_class})...")
     
-    if asset_class not in ASSET_CLASSES:
+    if asset_class not in ASSET_CLASSES and asset_class != "IN_INDEX_FO":
         raise ValueError(f"Unsupported asset class: {asset_class}")
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError("Feature input must use a DatetimeIndex.")
 
-    if asset_class == "IN_EQUITY":
+    if asset_class in ("IN_INDEX_FO", "IN_EQUITY"):
         macro_tickers = {"VIX": "^INDIAVIX", "SPX": "^GSPC", "USDINR": "INR=X"}
     elif asset_class == "US_EQUITY":
         macro_tickers = {"VIX": "^VIX", "SPX": "^GSPC", "USDINR": "DX-Y.NYB"} # Using DXY as fiat currency proxy

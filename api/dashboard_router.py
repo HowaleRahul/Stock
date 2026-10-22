@@ -79,6 +79,16 @@ async def get_portfolio(_rate_limit: bool = Depends(rate_limiter(60))):
             
             trades_data = []
             for t in open_trades:
+                # Extract context if present for F&O Greeks
+                ctx = {}
+                try:
+                    ctx_stmt = select(TradeContext).where(TradeContext.order_id == t.order_id)
+                    ctx_row = (await session.execute(ctx_stmt)).scalar_one_or_none()
+                    if ctx_row:
+                        ctx = json.loads(ctx_row.payload)
+                except Exception:
+                    pass
+
                 trades_data.append({
                     "order_id": t.order_id,
                     "ticker": t.ticker,
@@ -87,7 +97,16 @@ async def get_portfolio(_rate_limit: bool = Depends(rate_limiter(60))):
                     "quantity": t.quantity,
                     "invested": t.invested,
                     "take_profit": t.take_profit,
-                    "stop_loss": t.stop_loss
+                    "stop_loss": t.stop_loss,
+                    "is_fo": ctx.get("is_fo", True),
+                    "instrument_type": ctx.get("instrument_type", "OPTION" if ("CE" in t.ticker or "PE" in t.ticker) else "FUTURE"),
+                    "opt_type": ctx.get("opt_type", "CE" if "CE" in t.ticker else ("PE" if "PE" in t.ticker else "FUT")),
+                    "opt_strike": ctx.get("opt_strike", 0.0),
+                    "opt_delta": ctx.get("opt_delta", 0.5),
+                    "opt_theta": ctx.get("opt_theta", 0.0),
+                    "unrealized_pnl": ctx.get("unrealized_pnl", 0.0),
+                    "strike_type": ctx.get("strike_type", "ATM"),
+                    "lot_size": ctx.get("lot_size", 25),
                 })
                 
             return {
@@ -120,6 +139,15 @@ async def get_portfolio(_rate_limit: bool = Depends(rate_limiter(60))):
                                 "invested": t.get("invested"),
                                 "take_profit": t.get("tp"),
                                 "stop_loss": t.get("sl"),
+                                "is_fo": t.get("is_fo", True),
+                                "instrument_type": t.get("instrument_type", "OPTION" if ("CE" in str(t.get("ticker")) or "PE" in str(t.get("ticker"))) else "FUTURE"),
+                                "opt_type": t.get("opt_type", "CE" if "CE" in str(t.get("ticker")) else "PE"),
+                                "opt_strike": t.get("opt_strike", 0.0),
+                                "opt_delta": t.get("opt_delta", 0.5),
+                                "opt_theta": t.get("opt_theta", 0.0),
+                                "unrealized_pnl": t.get("unrealized_pnl", 0.0),
+                                "strike_type": t.get("strike_type", "ATM"),
+                                "lot_size": t.get("lot_size", 25),
                             })
             except Exception:
                 pass

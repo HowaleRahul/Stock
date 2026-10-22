@@ -16,12 +16,19 @@ This document establishes operational directives, architectural constraints, and
 * **Risk Envelope Enforcement**: The risk engine strictly enforces maximum risk per trade ($\le 2\%$, configurable up to $5\%$ ceiling) and minimum Risk-to-Reward ratio ($\ge 1.5:1$). Trades violating these constraints must be rejected and logged to the journal with explicit rejection reasons (verified in `ml/risk_engine.py`).
 * **Kill-Switch Thresholds**: If total Mark-to-Market (MTM) drawdown reaches or exceeds `max_portfolio_drawdown_pct` (default 10%), all trading activity is locked, a critical alert is dispatched via `api/notifier.py`, and the status transitions to `HALTED_DRAWDOWN` (verified in `paper_trader.py`).
 
-### 1.2 Multi-Asset Policy Separation
-* **Explicit Asset Classification**: The system supports `IN_EQUITY`, `US_EQUITY`, and `CRYPTO`. Ticker classification is centralized in `ml/assets.py`. Do not introduce ad-hoc heuristics (e.g. searching for `"USD"` in ticker strings); unknown symbols must fail closed with a `ValueError`.
-* **Asset-Specific Barriers & Macro**: 
-  - Indian equities (`IN_EQUITY`): Macro context uses India VIX and USD/INR (`INR=X`). Barriers: 2.0 ATR target, 1.0 ATR stop.
-  - US equities (`US_EQUITY`): Macro context uses US VIX (`^VIX`) and Dollar Index (`DX-Y.NYB`). Barriers: 2.0 ATR target, 1.0 ATR stop.
-  - Crypto (`CRYPTO`): Macro context uses US VIX, DXY, and 24h volume. Barriers: 3.0 ATR target, 1.5 ATR stop. Crypto trades 24/7; macro series must be forward-filled from Friday closes without lookahead (verified in `ml/features.py`).
+### 1.2 Sole Specialization in Indian Stock Market Futures & Options (F&O)
+* **Exclusive F&O Asset Class**: The system is specialized WHOLE AND SOLE in Indian Stock Market Futures & Options (`IN_INDEX_FO`). Cash equities, foreign equities, and crypto have been permanently removed. Any attempt to classify or trade an unsupported asset class must fail closed with a `ValueError` (verified in `ml/assets.py`).
+* **Supported Underlyings & Lot Sizes**:
+  - `NIFTY 50` (`^NSEI`): Lot size 25, strike interval 50, expiry Thursday.
+  - `BANK NIFTY` (`^NSEBANK`): Lot size 15, strike interval 100, expiry Wednesday.
+  - `BSE SENSEX` (`^BSESN`): Lot size 10, strike interval 100, expiry Friday.
+  - `FIN NIFTY` (`FINNIFTY`): Lot size 25, strike interval 50, expiry Tuesday.
+  - `MIDCAP NIFTY` (`MIDCPNIFTY`): Lot size 50, strike interval 25, expiry Monday.
+* **Dual Scalp & Swing Framework**:
+  - Scalp trading operates on `5m` (hold $\le 15$ bars) and `15m` (hold $\le 25$ bars) with rapid momentum targets.
+  - Swing trading operates on `1h` (hold $\le 40$ bars) and `1d` (hold $\le 20$ bars) with wide trailing stops.
+* **F&O Execution Isolation**: All trade orders must pass through `DerivativeEngine.generate_derivative_plan()`. Under micro/small capital ($\le ₹1,00,000$), it buys Call/Put options (`CE`/`PE`) to strictly cap risk to premium invested; under growth capital ($\ge ₹5,00,000$) in strong trends, it allocates linear Index Futures.
+* **SEBI Compliance**: Naked options selling/writing is strictly prohibited. Only long options or defined futures risk are allowed.
 
 ---
 

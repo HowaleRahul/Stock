@@ -50,6 +50,8 @@ class RealTimeDataFeed:
         "NIFTY BANK": ("BANKNIFTY", "NSE", "india"),
         "^BSESN": ("SENSEX", "BSE", "india"),
         "SENSEX": ("SENSEX", "BSE", "india"),
+        "FINNIFTY": ("FINNIFTY", "NSE", "india"),
+        "MIDCPNIFTY": ("MIDCPNIFTY", "NSE", "india"),
         "RELIANCE": ("RELIANCE", "NSE", "india"),
         "RELIANCE.NS": ("RELIANCE", "NSE", "india"),
         "HDFCBANK": ("HDFCBANK", "NSE", "india"),

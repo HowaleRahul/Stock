@@ -10,7 +10,7 @@ import yfinance as yf
 from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 from ml.features import enrich_with_macro_and_options, enrich_with_psychology_features, generate_triple_barrier_labels
-from ml.assets import TARGETS, asset_flags, barrier_config
+from ml.assets import asset_flags, barrier_config
 from setups.engine import SetupEngine
 from data.market_hours import is_market_open, get_market_status
 from ml.live_market_learner import LiveMarketLearner
@@ -22,12 +22,16 @@ MODEL_PATH = "ml/models/continuous_brain.pkl"
 SCALER_PATH = "ml/models/scaler.pkl"
 BUNDLE_PATH = "ml/models/continuous_brain_bundle.pkl"
 
-TARGET_CLASSES = TARGETS
+TARGET_CLASSES = {
+    "IN_INDEX_FO": ("^NSEI", "^NSEBANK", "^BSESN")
+}
 
-# Configuration for multi-timeframe swing trading
-# We remove 5m and 15m as transaction friction (STT, slippage) kills scalping alpha in India.
-# We focus purely on Swing Trading (1h, 1d) with ATR-scaled targets.
+# Configuration for multi-timeframe F&O trading:
+# - Scalp trading (5m, 15m) for quick momentum captures
+# - Swing trading (1h, 1d) for multiday trend moves
 TIMEFRAME_CONFIGS = [
+    {"tf": "5m", "period": "60d", "tp_atr": 1.5, "sl_atr": 0.8, "max_hold": 15},
+    {"tf": "15m", "period": "60d", "tp_atr": 1.8, "sl_atr": 0.9, "max_hold": 25},
     {"tf": "1h", "period": "730d", "tp_atr": 2.0, "sl_atr": 1.0, "max_hold": 40},
     {"tf": "1d", "period": "5y", "tp_atr": 2.0, "sl_atr": 1.0, "max_hold": 20}
 ]
@@ -71,7 +75,7 @@ def _reset_if_feature_schema_changed(model, scaler, X, feature_names=None):
     )
     return SGDClassifier(loss="log_loss"), StandardScaler()
 
-def generate_features_for_ticker(ticker, tf_config, asset_class="IN_EQUITY"):
+def generate_features_for_ticker(ticker, tf_config, asset_class="IN_INDEX_FO"):
     logger.info(f"Downloading {ticker} history ({tf_config['period']} at {tf_config['tf']})...")
     df = yf.download(ticker, period=tf_config["period"], interval=tf_config["tf"], progress=False)
     if df.empty or len(df) < 100:
@@ -150,7 +154,7 @@ def generate_features_for_ticker(ticker, tf_config, asset_class="IN_EQUITY"):
         feats['psych_session_phase'] = df['psych_session_phase'].iloc[i]
         feats['atr'] = df['atr'].iloc[i]
         
-        tf_mapping = {"1h": 0.5, "1d": 1.0}
+        tf_mapping = {"5m": 0.1, "15m": 0.25, "1h": 0.5, "1d": 1.0}
         feats['tf_hint'] = tf_mapping.get(tf_config["tf"], 1.0)
         
         feats.update(asset_flags(asset_class))

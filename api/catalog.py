@@ -1,5 +1,13 @@
 INSTANT_CATALOG = [
-    # Indian Stocks (NSE/BSE)
+    # Indian F&O Indices (Core Trading Focus)
+    {"symbol": "NIFTY", "name": "Nifty 50 Index (F&O)", "exchange": "NSE", "market": "india"},
+    {"symbol": "BANKNIFTY", "name": "Bank Nifty Index (F&O)", "exchange": "NSE", "market": "india"},
+    {"symbol": "SENSEX", "name": "BSE Sensex Index (F&O)", "exchange": "BSE", "market": "india"},
+    {"symbol": "FINNIFTY", "name": "Nifty Financial Services Index (F&O)", "exchange": "NSE", "market": "india"},
+    {"symbol": "MIDCPNIFTY", "name": "Nifty Midcap Select Index (F&O)", "exchange": "NSE", "market": "india"},
+    {"symbol": "^NSEI", "name": "NIFTY 50 Spot", "exchange": "NSE", "market": "india"},
+    {"symbol": "^NSEBANK", "name": "BANK NIFTY Spot", "exchange": "NSE", "market": "india"},
+    {"symbol": "^BSESN", "name": "BSE SENSEX Spot", "exchange": "BSE", "market": "india"},
     {"symbol": "RELIANCE.NS", "name": "Reliance Industries Limited", "exchange": "NSE", "market": "india"},
     {"symbol": "TCS.NS", "name": "Tata Consultancy Services Limited", "exchange": "NSE", "market": "india"},
     {"symbol": "HDFCBANK.NS", "name": "HDFC Bank Limited", "exchange": "NSE", "market": "india"},

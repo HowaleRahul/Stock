@@ -26,14 +26,11 @@ router = APIRouter(
 )
 
 WATCHLIST_TICKERS = [
-    {"ticker": "NIFTY", "name": "Nifty 50 Index", "tv_symbol": "NSE:NIFTY"},
-    {"ticker": "BANKNIFTY", "name": "Bank Nifty Index", "tv_symbol": "NSE:BANKNIFTY"},
-    {"ticker": "RELIANCE", "name": "Reliance Industries", "tv_symbol": "NSE:RELIANCE"},
-    {"ticker": "HDFCBANK", "name": "HDFC Bank Ltd", "tv_symbol": "NSE:HDFCBANK"},
-    {"ticker": "TCS", "name": "Tata Consultancy Services", "tv_symbol": "NSE:TCS"},
-    {"ticker": "INFY", "name": "Infosys Ltd", "tv_symbol": "NSE:INFY"},
-    {"ticker": "ICICIBANK", "name": "ICICI Bank Ltd", "tv_symbol": "NSE:ICICIBANK"},
-    {"ticker": "SBIN", "name": "State Bank of India", "tv_symbol": "NSE:SBIN"},
+    {"ticker": "NIFTY", "name": "Nifty 50 Index (F&O)", "tv_symbol": "NSE:NIFTY"},
+    {"ticker": "BANKNIFTY", "name": "Bank Nifty Index (F&O)", "tv_symbol": "NSE:BANKNIFTY"},
+    {"ticker": "SENSEX", "name": "BSE Sensex Index (F&O)", "tv_symbol": "BSE:SENSEX"},
+    {"ticker": "FINNIFTY", "name": "FinNifty Index (F&O)", "tv_symbol": "NSE:FINNIFTY"},
+    {"ticker": "MIDCPNIFTY", "name": "Midcap Nifty Index (F&O)", "tv_symbol": "NSE:MIDCPNIFTY"},
 ]
 
 

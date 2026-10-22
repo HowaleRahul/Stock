@@ -16,12 +16,17 @@ class YFinanceFetcher:
         "NIFTY": "^NSEI",
         "NIFTY.NS": "^NSEI",
         "NIFTY 50": "^NSEI",
+        "^NSEI": "^NSEI",
         "BANKNIFTY": "^NSEBANK",
         "BANKNIFTY.NS": "^NSEBANK",
         "NIFTY BANK": "^NSEBANK",
+        "^NSEBANK": "^NSEBANK",
         "SENSEX": "^BSESN",
         "SENSEX.BO": "^BSESN",
         "BSE SENSEX": "^BSESN",
+        "^BSESN": "^BSESN",
+        "FINNIFTY": "^NSEI",
+        "MIDCPNIFTY": "^NSEI",
     }
 
     @classmethod

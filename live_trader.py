@@ -30,7 +30,7 @@ logger = logging.getLogger("live_trader")
 
 CONFIG_PATH = "config.json"
 TIMEFRAME = "1h"
-TICKERS = ["^NSEI", "^NSEBANK"]
+TICKERS = ["^NSEI", "^NSEBANK", "^BSESN"]
 
 def load_config() -> dict:
     if not os.path.exists(CONFIG_PATH):
@@ -207,7 +207,7 @@ async def run_live_loop_async():
                 prediction_dict = ai_brain.predict(
                     regime,
                     setups,
-                    asset_class="IN_EQUITY",
+                    asset_class="IN_INDEX_FO",
                     df=df,
                 )
                 ai_signal = prediction_dict.get("signal", "neutral")

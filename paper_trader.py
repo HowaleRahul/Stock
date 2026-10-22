@@ -1,14 +1,19 @@
 """
-Paper Trading Engine — Phase 6 Upgrade.
+F&O Paper Trading Engine — Futures & Options Only.
 
-Simulates live trading with full Risk Engine integration:
+ALL trades are executed as F&O contracts (Futures or Options) on NSE indices.
+No equity/cash segment trading.
+
+Features:
+- Index signal analysis → DerivativeEngine → F&O trade plan
 - Position sizing via Kelly Criterion (capped at 2% risk per trade)
-- ATR + S/R based Entry / Target / Stop Loss
-- Risk:Reward gating (rejects trades under 1.5:1)
-- Trailing stop management
-- Time-based exit enforcement
-- Portfolio correlation checks
-- Probability of Ruin tracking
+- ATR + S/R based Entry / Target / Stop Loss on underlying index
+- Smart instrument selection: Futures vs Options based on capital & regime
+- Black-Scholes option MTM re-pricing with Greeks
+- Trailing stop management on underlying spot
+- Time-based exit enforcement (weekly expiry awareness)
+- Portfolio correlation checks (NIFTY-BANKNIFTY)
+- F&O Contextual Bandit RL for strike/instrument optimization
 """
 
 import time
@@ -31,7 +36,8 @@ from ml.risk_engine import RiskEngine
 from ml.trade_logger import TradeLogger
 from ml.reinforcement_learner import ReinforcementLearner
 from ml.drift_detector import DriftDetector
-from ml.options_engine import OptionsEngine
+from ml.options_engine import DerivativeEngine
+from ml.assets import get_fo_name
 from api.notifier import notifier
 from data.market_hours import get_market_status, is_market_open
 from papertrade.persistence import (
@@ -48,30 +54,19 @@ logger = logging.getLogger("paper_trader")
 # Configuration
 # ---------------------------------------------------------------------------
 
-TICKERS = ["^NSEI", "^NSEBANK"]
+TICKERS = ["^NSEI", "^NSEBANK", "^BSESN"]  # F&O underlying indices only (NIFTY, BANKNIFTY, SENSEX)
 TIMEFRAME = "1h"
 PERIOD = "60d"  # Enough context for EMAs, S/R, and Macro features
 
 TRADES_FILE = "paper_trades.json"
 ACCOUNT_FILE = "paper_account.json"
 REPORT_FILE = "paper_trades_report.csv"
-SWING_WATCHLIST_FILE = os.path.join("data", "swing_watchlist.json")
 
 
 def get_scanning_tickers():
-    """Returns base tickers plus any active candidates from the Swing Watchlist."""
-    tickers = list(TICKERS)
-    if os.path.exists(SWING_WATCHLIST_FILE):
-        try:
-            with open(SWING_WATCHLIST_FILE, "r", encoding="utf-8") as f:
-                wl = json.load(f)
-                for item in wl:
-                    sym = item.get("ticker")
-                    if sym and sym not in tickers:
-                        tickers.append(sym)
-        except Exception as e:
-            logger.debug(f"Could not read swing watchlist: {e}")
-    return tickers
+    """Returns F&O underlying index tickers only from config."""
+    cfg = load_config()
+    return list(cfg.get("watchlist", TICKERS))
 
 def load_config():
     if os.path.exists("config.json"):
@@ -81,14 +76,17 @@ def load_config():
         except Exception as e:
             logger.error(f"Could not load config: {e}")
     return {
-        "version": "v1.0.0",
+        "version": "v2.0.0-fo",
         "stt_slippage_pct": 0.0005,
         "min_ai_confidence": 0.65,
         "max_portfolio_drawdown_pct": 0.10,
         "risk_per_trade_pct": 0.02,
         "min_risk_reward_ratio": 1.5,
         "retrain_interval_days": 7,
-        "drift_check_interval_hours": 24
+        "drift_check_interval_hours": 24,
+        "fo_mode": True,
+        "derivative_type": "AUTO",
+        "strike_preference": "AUTO"
     }
 
 CONFIG = load_config()
@@ -190,7 +188,7 @@ async def run_loop():
     ai_brain = EnsembleModel(timeframe=TIMEFRAME)
     learner = ReinforcementLearner()
     detector = DriftDetector()
-    opt_engine = OptionsEngine()
+    opt_engine = DerivativeEngine()
 
     await ensure_schema()
     
@@ -456,7 +454,7 @@ async def run_loop():
                 regime,
                 setups,
                 setup_weights=setup_weights,
-                asset_class="IN_EQUITY",
+                asset_class="IN_INDEX_FO",
                 df=df,
             )
 
@@ -480,50 +478,57 @@ async def run_loop():
                 open_positions=updated_trades,
             )
 
-            # Log the full trade plan
+            # --- Execute F&O Trade via DerivativeEngine ---
+            # ALL trades go through F&O — no equity/cash segment
+            if not trade_plan.is_approved:
+                rejection_record = TradeLogger.log_rejection(
+                    ticker=ticker,
+                    direction=trade_plan.direction,
+                    reasons=trade_plan.rejection_reasons,
+                    ai_probability=trade_plan.ai_probability,
+                    regime=trade_plan.regime,
+                    config_version=CONFIG.get("version", "v2.0.0-fo")
+                )
+                journal_events.append(rejection_record)
+                logger.warning(
+                    f"[REJECTED SPOT PLAN] {ticker} {trade_plan.direction} — "
+                    f"{'; '.join(trade_plan.rejection_reasons)}"
+                )
+                continue
+
             logger.info(f"\n{trade_plan.reasoning}")
 
-            # --- Execute or Reject ---
-            is_options_trade = ticker in opt_engine.LOT_SIZES
-            opt_plan = None
-            
-            if is_options_trade and trade_plan.is_approved:
-                iv = (df['macro_vix'].iloc[-1] / 100.0) if 'macro_vix' in df.columns else None
-                opt_plan = opt_engine.generate_options_plan(trade_plan, iv=iv)
-                
-                if not opt_plan.is_approved:
-                    rejection_record = TradeLogger.log_rejection(
-                        ticker=opt_plan.option_symbol,
-                        direction=opt_plan.option_type,
-                        reasons=opt_plan.rejection_reasons,
-                        ai_probability=trade_plan.ai_probability,
-                        regime=trade_plan.regime,
-                        config_version=CONFIG.get("version", "v1.0")
-                    )
-                    journal_events.append(rejection_record)
-                    logger.warning(
-                        f"[REJECTED OPTION] {opt_plan.option_symbol} — "
-                        f"{'; '.join(opt_plan.rejection_reasons)}"
-                    )
-                    continue
-                logger.info(f"\n{opt_plan.reasoning}")
-            else:
-                if not trade_plan.is_approved:
-                    rejection_record = TradeLogger.log_rejection(
-                        ticker=ticker,
-                        direction=trade_plan.direction,
-                        reasons=trade_plan.rejection_reasons,
-                        ai_probability=trade_plan.ai_probability,
-                        regime=trade_plan.regime,
-                        config_version=CONFIG.get("version", "v1.0")
-                    )
-                    journal_events.append(rejection_record)
-                    logger.warning(
-                        f"[REJECTED] {ticker} {trade_plan.direction} — "
-                        f"{'; '.join(trade_plan.rejection_reasons)}"
-                    )
-                    continue
-                logger.info(f"\n{trade_plan.reasoning}")
+            # Generate F&O derivative plan
+            iv = (df['macro_vix'].iloc[-1] / 100.0) if 'macro_vix' in df.columns else None
+            derivative_type = current_config.get("derivative_type", "AUTO")
+            strike_pref = current_config.get("strike_preference", "AUTO")
+
+            fo_plan = opt_engine.generate_derivative_plan(
+                spot_plan=trade_plan,
+                capital=account['capital'],
+                derivative_type=derivative_type,
+                strike_pref=strike_pref,
+                regime=regime_str,
+                iv=iv,
+            )
+
+            if not fo_plan.is_approved:
+                rejection_record = TradeLogger.log_rejection(
+                    ticker=fo_plan.contract_symbol,
+                    direction=fo_plan.direction,
+                    reasons=fo_plan.rejection_reasons,
+                    ai_probability=trade_plan.ai_probability,
+                    regime=trade_plan.regime,
+                    config_version=CONFIG.get("version", "v2.0.0-fo")
+                )
+                journal_events.append(rejection_record)
+                logger.warning(
+                    f"[REJECTED F&O] {fo_plan.contract_symbol} — "
+                    f"{'; '.join(fo_plan.rejection_reasons)}"
+                )
+                continue
+
+            logger.info(f"\n{fo_plan.reasoning}")
 
             # Convert setup signals to serializable dicts
             setup_signals_list = [{"name": s.name, "signal": s.signal, "confidence": float(s.confidence)} for s in setups]
@@ -531,19 +536,20 @@ async def run_loop():
             import uuid
             new_trade = {
                 "id": f"{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{ticker.replace('^', '')}_{uuid.uuid4().hex[:6]}",
-                "ticker": ticker if not is_options_trade else opt_plan.option_symbol,
+                "ticker": fo_plan.contract_symbol,
                 "underlying_ticker": ticker,
-                "direction": trade_plan.direction,
-                "quantity": trade_plan.position_size_qty if not is_options_trade else opt_plan.lots_to_buy * opt_plan.lot_size,
-                "invested": trade_plan.position_value if not is_options_trade else opt_plan.total_premium_invested,
-                "entry_price": trade_plan.entry_price, # Spot entry price for tracking Exits
-                "tp": trade_plan.take_profit, # Spot TP
-                "sl": trade_plan.stop_loss, # Spot SL
+                "direction": fo_plan.direction,
+                "instrument_type": fo_plan.instrument_type,
+                "quantity": fo_plan.total_quantity,
+                "invested": fo_plan.margin_or_premium_required,
+                "entry_price": trade_plan.entry_price,  # Spot entry for tracking
+                "tp": trade_plan.take_profit,            # Spot TP
+                "sl": trade_plan.stop_loss,              # Spot SL
                 "trailing_stop": trade_plan.stop_loss,
                 "atr_at_entry": trade_plan.atr_at_entry,
                 "probability": trade_plan.ai_probability,
                 "risk_pct": trade_plan.risk_per_trade_pct,
-                "risk_reward": trade_plan.risk_reward_ratio if not is_options_trade else opt_plan.risk_reward_ratio,
+                "risk_reward": fo_plan.risk_reward_ratio,
                 "kelly_fraction": trade_plan.kelly_fraction,
                 "probability_of_ruin": trade_plan.probability_of_ruin,
                 "sl_method": trade_plan.sl_method,
@@ -555,29 +561,30 @@ async def run_loop():
                 "opened_at": str(df.index[-1]),
                 "setup_signals": setup_signals_list,
                 "setup_weights": setup_weights,
+                # F&O specific fields
+                "is_fo": True,
+                "is_options": fo_plan.instrument_type == "OPTION",
+                "opt_type": fo_plan.option_type,
+                "opt_strike": fo_plan.strike_price,
+                "opt_entry_premium": fo_plan.entry_price if fo_plan.instrument_type == "OPTION" else 0.0,
+                "opt_delta": fo_plan.delta,
+                "opt_theta": fo_plan.theta,
+                "strike_type": fo_plan.strike_type,
+                "lot_size": fo_plan.lot_size,
+                "lots_to_trade": fo_plan.lots_to_trade,
             }
-            
-            if is_options_trade:
-                new_trade.update({
-                    "is_options": True,
-                    "opt_type": opt_plan.option_type,
-                    "opt_strike": opt_plan.strike_price,
-                    "opt_entry_premium": opt_plan.entry_premium,
-                    "opt_delta": opt_plan.delta,
-                    "opt_theta": opt_plan.theta
-                })
             
             entry_record = TradeLogger.log_entry(
                 trade_id=new_trade["id"],
                 ticker=new_trade["ticker"],
-                direction=trade_plan.direction if not is_options_trade else "LONG", # we always BUY options
-                entry_price=trade_plan.entry_price if not is_options_trade else opt_plan.entry_premium,
-                stop_loss=trade_plan.stop_loss if not is_options_trade else opt_plan.stop_loss_premium,
-                take_profit=trade_plan.take_profit if not is_options_trade else opt_plan.target_premium,
+                direction=fo_plan.direction,
+                entry_price=fo_plan.entry_price,
+                stop_loss=fo_plan.stop_loss_price,
+                take_profit=fo_plan.target_price,
                 quantity=new_trade["quantity"],
                 invested=new_trade["invested"],
                 risk_pct=trade_plan.risk_per_trade_pct,
-                risk_reward=trade_plan.risk_reward_ratio,
+                risk_reward=fo_plan.risk_reward_ratio,
                 ai_probability=trade_plan.ai_probability,
                 kelly_fraction=trade_plan.kelly_fraction,
                 probability_of_ruin=trade_plan.probability_of_ruin,
@@ -589,7 +596,7 @@ async def run_loop():
                 atr_at_entry=trade_plan.atr_at_entry,
                 setup_signals=setup_signals_list,
                 setup_weights=setup_weights,
-                config_version=CONFIG.get("version", "v1.0"),
+                config_version=CONFIG.get("version", "v2.0.0-fo"),
                 capital_at_entry=account['capital']
             )
             journal_events.append(entry_record)

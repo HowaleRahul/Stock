@@ -18,9 +18,17 @@ class VWAPSetup(BaseSetup):
             return SetupSignal(self.name, "neutral", 0.0, "Insufficient data or missing volume.")
             
         try:
-            # We need a datetime index for accurate anchored VWAP, but pandas_ta
-            # handles it gracefully. We use standard VWAP.
-            vwap = df.ta.vwap()
+            vwap = None
+            if isinstance(df.index, pd.DatetimeIndex):
+                try:
+                    vwap = df.ta.vwap()
+                except Exception:
+                    vwap = None
+            if vwap is None or vwap.empty:
+                # Standard cumulative VWAP formula
+                tp = (df['high'] + df['low'] + df['close']) / 3.0
+                cum_vol = df['volume'].cumsum()
+                vwap = (tp * df['volume']).cumsum() / cum_vol.replace(0, float('nan'))
             if vwap is None or vwap.empty:
                 return SetupSignal(self.name, "neutral", 0.0, "Could not calculate VWAP.")
                 

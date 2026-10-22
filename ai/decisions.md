@@ -181,3 +181,22 @@ This document records the major architectural, structural, and design decisions 
 - **Known trade-offs**: Introduces additional external Yahoo Finance requests when scanning the swing universe (50+ tickers).
 - **Evidence/source in the project**: Commit `56a5733`; `setups/swing_toolkit/` source code.
 - **Reason status**: **Verified** (documented in commit `56a5733` and docstrings).
+
+---
+
+### Decision 16: Complete Specialization in Indian Stock Market Futures & Options (F&O) and SENSEX Index Support
+- **Date**: October 2026 (Pass 14 F&O Transformation)
+- **Decision**: Transform the entire trading system to specialize strictly in Futures & Options (F&O) on the Indian Stock Market. Eliminate all cash/equity execution paths, foreign markets, and crypto. Add native BSE SENSEX (`^BSESN`) index alongside NIFTY, BANKNIFTY, FINNIFTY, and MIDCPNIFTY. Configure dual scalp (`5m`, `15m`) and swing (`1h`, `1d`) timeframes. Reroute all paper trading through `DerivativeEngine` with option Greeks (Delta, Theta, Gamma, IV) and exact exchange lot sizes. Reset database tables and local paper trading state from scratch. Retrain all ML stacking classifiers from scratch on historical F&O index data. Update all frontend pages (`Dashboard`, `TrainingUI`, `Portfolio`, `BacktestUI`, `OptionChartViewer`) to feature BSE SENSEX, F&O lot sizing, dynamic futures margin calculation, and contract indicators.
+- **Why it appears to have been made**: As requested by user, the workstation is dedicated solely to Indian stock market F&O trading (scalping and swinging), leveraging derivatives with leverage and risk management rather than equity delivery.
+- **Current implementation**:
+  - `ml/assets.py`: Restricted `ASSET_CLASSES` to `("IN_INDEX_FO",)`. Defined `FO_UNDERLYINGS`, `LOT_SIZES` (NIFTY 25, BANKNIFTY 15, SENSEX 10, FINNIFTY 25, MIDCPNIFTY 50), `STRIKE_INTERVALS` (SENSEX/BANKNIFTY 100, NIFTY/FINNIFTY 50, MIDCPNIFTY 25), `FUTURES_MARGIN_RATES`, `EXPIRY_DAYS` (SENSEX Friday day 4).
+  - `paper_trader.py` & `live_trader.py`: Direct execution through `DerivativeEngine.generate_derivative_plan()`. Option buying (CE/PE) for micro/small budgets and linear Index Futures for growth tiers.
+  - `setups/engine.py`: Re-calibrated regime modulation for F&O leverage, gating long calls in crash regimes and prioritizing mean reversion in choppy regimes.
+  - `models/init_db.py`: Seeded 11 F&O symbols (`NIFTY`, `BANKNIFTY`, `SENSEX`, `FINNIFTY`, `MIDCPNIFTY`, `^NSEI`, `^NSEBANK`, `^BSESN`).
+  - `scripts/reset_fo_database.py`: Clean recreation of schemas, TimescaleDB hypertables, fresh paper account with ₹1,00,000, and reset of local trade logs.
+  - `scripts/train_fo_models.py`: Fresh ML training across scalp (`5m`, `15m`) and swing (`1h`, `1d`) timeframes for all F&O indices.
+  - Frontend: `Dashboard.tsx`, `BacktestUI.tsx`, `Portfolio.tsx`, `OptionChartViewer.tsx`, `TrainingUI.tsx`, and `tradingViewUtils.ts` updated with BSE SENSEX support, exchange indicators (`BSE F&O` / `NSE F&O`), F&O contract labels, and margin advisories.
+- **Files/components affected**: `ml/assets.py`, `ml/options_engine.py`, `ml/continuous_trainer.py`, `paper_trader.py`, `live_trader.py`, `config.json`, `.env.example`, `models/init_db.py`, `api/catalog.py`, `api/market_router.py`, `api/training_router.py`, `api/dashboard_router.py`, `api/backtest_router.py`, `frontend/src/pages/Dashboard.tsx`, `frontend/src/pages/TrainingUI.tsx`, `frontend/src/pages/Portfolio.tsx`, `frontend/src/pages/BacktestUI.tsx`, `frontend/src/components/OptionChartViewer.tsx`, `frontend/src/components/tradingViewUtils.ts`.
+- **Known trade-offs**: Cash equities and foreign markets are disallowed; attempts to trade non-F&O assets fail closed.
+- **Evidence/source in the project**: User prompt requirement; `ml/assets.py`, `config.json`, `REVIEW_LOG.md` Pass 14.
+- **Reason status**: **Verified**.

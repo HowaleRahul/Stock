@@ -9,10 +9,11 @@ This document provides a comprehensive, factual snapshot of the architecture, co
 The **Personal AI-Assisted Trading System (Signal Desk)** is an end-to-end algorithmic trading and decision-support workstation. It combines classical technical analysis setups, machine learning meta-models, reinforcement learning setup reweighting, real-time market data streaming, and risk management. 
 
 Primary focus:
-1. **Indian Markets (NSE/BSE)**: Intraday and swing trading on major indices (`^NSEI` / NIFTY 50, `^NSEBANK` / BANK NIFTY, `^BSESN` / SENSEX) and liquid blue-chip equities.
-2. **Derivatives (F&O)**: Long call/put options buying (`CE`/`PE`) with Black-Scholes Greeks evaluation and SEBI 2026 retail algo compliance constraints.
-3. **Momentum Swing Toolkit**: 3 scanning strategies (Momentum, DWIB, ATH Contraction), 8-factor quality scoring, and 15-minute Opening Range Breakout (ORB) execution.
-4. **Multi-Asset Extensibility**: Strict asset-class policies supporting US Equities (`^GSPC`, `^DJI`, `^IXIC`, `AAPL`, `NVDA`, `MSFT`) and Cryptocurrencies (`BTC-USD`, `ETH-USD`, `SOL-USD`).
+1. **Indian Stock Market F&O Specialization**: The system specializes WHOLE AND SOLE in Futures & Options (F&O) trading on the Indian stock market (NSE & BSE). Cash equity delivery, US markets, and cryptocurrencies have been completely removed.
+2. **Supported Underlyings**: NIFTY 50 (`^NSEI`), BANK NIFTY (`^NSEBANK`), BSE SENSEX (`^BSESN`), FINNIFTY, and MIDCPNIFTY with exact exchange lot sizes, strike intervals, and weekly expiry schedules.
+3. **Dual Scalp & Swing Framework**: Fast intraday scalp trading (`5m`, `15m`) with tight ATR barriers, and multiday positional swing trading (`1h`, `1d`) with wide trailing stops.
+4. **Derivatives Execution Engine**: All trade allocations execute strictly as Index Options (CE/PE calls & puts with Black-Scholes Delta, Theta, Gamma, IV) or linear Index Futures depending on user capital tier and market regime. Naked options selling is prohibited.
+5. **Continuous AI Retraining**: Fresh stacking classifiers trained from scratch on historical Indian index data, coupled with contextual bandit strike selection and TimescaleDB hypertable persistence.
 
 ---
 

@@ -22,6 +22,14 @@ interface OpenTrade {
   current_ltp?: number;
   unrealized_pnl?: number;
   unrealized_pnl_pct?: number;
+  is_fo?: boolean;
+  instrument_type?: string;
+  opt_type?: string;
+  opt_strike?: number;
+  opt_delta?: number;
+  opt_theta?: number;
+  strike_type?: string;
+  lot_size?: number;
 }
 
 const Portfolio = () => {
@@ -81,6 +89,14 @@ const Portfolio = () => {
             current_ltp: t.current_ltp,
             unrealized_pnl: t.unrealized_pnl,
             unrealized_pnl_pct: t.unrealized_pnl_pct,
+            is_fo: t.is_fo ?? true,
+            instrument_type: t.instrument_type || 'OPTION',
+            opt_type: t.opt_type,
+            opt_strike: t.opt_strike,
+            opt_delta: t.opt_delta,
+            opt_theta: t.opt_theta,
+            strike_type: t.strike_type,
+            lot_size: t.lot_size,
           }));
         }
       }
@@ -242,7 +258,24 @@ const Portfolio = () => {
 
                   return (
                     <tr key={t.order_id || idx} className="hover:bg-gray-800/50">
-                      <td className="py-3 px-4 font-bold">{t.ticker}</td>
+                      <td className="py-3 px-4 font-bold">
+                        <div className="flex items-center gap-2">
+                          <span className="text-white">{t.ticker}</span>
+                          {(t.instrument_type || t.is_fo) && (
+                            <span className={`text-[10px] px-2 py-0.5 rounded font-mono font-bold border ${
+                              t.instrument_type === 'FUTURES'
+                                ? 'bg-blue-950 text-blue-400 border-blue-800'
+                                : t.opt_type === 'PE'
+                                ? 'bg-red-950 text-red-400 border-red-800'
+                                : 'bg-emerald-950 text-emerald-400 border-emerald-800'
+                            }`}>
+                              {t.instrument_type === 'FUTURES'
+                                ? 'FUT'
+                                : `${t.opt_strike || ''} ${t.opt_type || ''}`}
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className={`py-3 px-4 font-bold ${isLong ? 'text-emerald-400' : 'text-red-400'}`}>
                         {String(t.direction || 'UNKNOWN').toUpperCase()}
                       </td>

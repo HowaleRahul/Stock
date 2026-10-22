@@ -9,6 +9,11 @@ from typing import Dict, List
 
 # Sector mapping for universe candidates
 STOCK_SECTORS: Dict[str, str] = {
+    # Core Index F&O
+    "NIFTY": "Index F&O",
+    "BANKNIFTY": "Index F&O",
+    "SENSEX": "Index F&O",
+
     # Banking & Financial Services
     "HDFCBANK": "Banking",
     "ICICIBANK": "Banking",

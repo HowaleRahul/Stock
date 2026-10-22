@@ -81,26 +81,48 @@ const BacktestUI = () => {
     <div className="space-y-6">
       <form onSubmit={runBacktest} className="bg-gray-900 p-6 rounded-lg border border-gray-800 flex flex-wrap gap-4 items-end">
         <div>
-          <label htmlFor="bt-ticker" className="block text-sm text-gray-400 mb-1">Ticker</label>
-          <input
-            id="bt-ticker"
-            type="text"
-            value={ticker}
-            onChange={e => setTicker(e.target.value.toUpperCase())}
-            placeholder="e.g. ^NSEI or RELIANCE.NS"
-            className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
-          />
+          <label htmlFor="bt-ticker" className="block text-sm text-gray-400 mb-1">Index / Underlying (F&O)</label>
+          <div className="flex gap-2">
+            <input
+              id="bt-ticker"
+              type="text"
+              value={ticker}
+              onChange={e => setTicker(e.target.value.toUpperCase())}
+              placeholder="e.g. ^NSEI, ^NSEBANK, ^BSESN"
+              className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white font-mono"
+            />
+          </div>
+          <div className="flex gap-1.5 mt-1.5">
+            {[
+              { label: 'NIFTY', sym: '^NSEI' },
+              { label: 'BANKNIFTY', sym: '^NSEBANK' },
+              { label: 'SENSEX', sym: '^BSESN' },
+            ].map(idx => (
+              <button
+                key={idx.sym}
+                type="button"
+                onClick={() => setTicker(idx.sym)}
+                className={`text-[11px] px-2 py-0.5 rounded font-mono border ${
+                  ticker === idx.sym ? 'bg-blue-600 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'
+                }`}
+              >
+                {idx.label}
+              </button>
+            ))}
+          </div>
         </div>
         <div>
-          <label htmlFor="bt-timeframe" className="block text-sm text-gray-400 mb-1">Timeframe</label>
+          <label htmlFor="bt-timeframe" className="block text-sm text-gray-400 mb-1">Timeframe (Scalp / Swing)</label>
           <select
             id="bt-timeframe"
             value={timeframe}
             onChange={e => setTimeframe(e.target.value)}
             className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white"
           >
-            <option value="1h">1 Hour</option>
-            <option value="1d">1 Day</option>
+            <option value="5m">5 Min (F&O Scalp)</option>
+            <option value="15m">15 Min (F&O Scalp)</option>
+            <option value="1h">1 Hour (F&O Swing)</option>
+            <option value="1d">1 Day (F&O Swing)</option>
           </select>
         </div>
         <div>

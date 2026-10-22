@@ -134,7 +134,7 @@ def test_setup_engine_error_isolation_and_aggregation():
     })
 
     signals = engine.evaluate_all(df_valid)
-    assert len(signals) == 6
+    assert len(signals) == len(engine.setups)
     assert signals[0].name == "Exploding Setup"
     assert signals[0].signal == "neutral"
     assert signals[0].confidence == 0.0

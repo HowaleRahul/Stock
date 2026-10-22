@@ -3,7 +3,7 @@ import logging
 from typing import List, Dict, Any, Tuple
 import joblib
 import numpy as np
-from ml.assets import asset_flags
+from ml.assets import asset_flags, fo_asset_flags
 
 logger = logging.getLogger("trading.ml.ensemble")
 
@@ -70,7 +70,7 @@ class EnsembleModel:
                     self.feature_names = bundle["features"]
                     self.scaler = bundle["scaler"]
                     self.feature_version = bundle.get("feature_version", "continuous_bundle")
-                    self.asset_class = bundle.get("asset_class", "IN_EQUITY")
+                    self.asset_class = bundle.get("asset_class", "IN_INDEX_FO")
                     logger.info(f"Loaded continuous brain bundle fallback for {self.timeframe}")
                     return
             except Exception as e:
@@ -95,7 +95,7 @@ class EnsembleModel:
         regime_data: Dict[str, Any],
         setups: List[Any],
         setup_weights: Dict[str, float] = None,
-        asset_class: str = "IN_EQUITY",
+        asset_class: str = "IN_INDEX_FO",
         df: Any = None,
     ) -> Dict[str, Any]:
         """

@@ -164,9 +164,9 @@ const Dashboard = () => {
             isOpen ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-gray-800 text-gray-300 border border-gray-700'
           }`}>
             <span className={`w-2 h-2 rounded-full ${isOpen ? 'bg-emerald-400 animate-pulse' : 'bg-gray-400'}`} />
-            {isOpen ? 'NSE LIVE (09:15 - 15:30 IST)' : 'NSE MARKET CLOSED'}
+            {isOpen ? 'INDIAN F&O LIVE (09:15 - 15:30 IST)' : 'F&O MARKET CLOSED'}
           </span>
-          <div className="heading-note"><span className="live-dot" /> Real-time feed active</div>
+          <div className="heading-note"><span className="live-dot" /> F&O Index Stream Active</div>
         </div>
       </div>
 
@@ -223,12 +223,14 @@ const Dashboard = () => {
                 value={tickerInput}
                 onChange={e => setTickerInput(e.target.value.toUpperCase())}
                 onKeyDown={e => e.key === 'Enter' && handleSubmit()}
-                placeholder="Enter ticker (e.g. NIFTY, RELIANCE)..."
+                placeholder="Enter F&O ticker (e.g. NIFTY, BANKNIFTY, SENSEX)..."
                 aria-label="Ticker symbol"
                 className="ticker-input"
               />
               <button type="submit" className="sr-only">Search</button>
-              <span className="exchange-tag">NSE</span>
+              <span className="exchange-tag">
+                {activeTicker.includes('SENSEX') || activeTicker.includes('BSESN') ? 'BSE' : 'NSE'}
+              </span>
             </form>
 
             {/* Chart Mode Toggle */}
@@ -298,7 +300,9 @@ const Dashboard = () => {
           <div className="chart-panel">
             <div className="chart-panel-heading">
               <div>
-                <span className="eyebrow">NSE Real-Time Streaming</span>
+                <span className="eyebrow">
+                  {activeTicker.includes('SENSEX') || activeTicker.includes('BSESN') ? 'BSE F&O' : 'NSE F&O'} Real-Time Streaming
+                </span>
                 <h2>{activeTicker} <ArrowUpRight aria-hidden="true" /></h2>
               </div>
               <div className="flex items-center gap-2">
@@ -327,7 +331,13 @@ const Dashboard = () => {
               />
             ) : chartMode === 'option_chart' ? (
               <OptionChartViewer
-                initialUnderlying={activeTicker.includes('BANK') ? 'BANKNIFTY' : activeTicker.includes('FIN') ? 'FINNIFTY' : 'NIFTY'}
+                initialUnderlying={
+                  activeTicker.includes('SENSEX') || activeTicker.includes('BSESN') ? 'SENSEX' :
+                  activeTicker.includes('BANK') ? 'BANKNIFTY' :
+                  activeTicker.includes('FIN') ? 'FINNIFTY' :
+                  activeTicker.includes('MID') ? 'MIDCPNIFTY' :
+                  'NIFTY'
+                }
                 height={600}
               />
             ) : (

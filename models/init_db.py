@@ -7,16 +7,15 @@ from models.models import Symbol, OHLCVBar, NewsHeadline, Account, Trade
 logger = logging.getLogger("trading.init_db")
 
 DEFAULT_WATCHLIST = [
-    # Indian Markets (NSE)
-    {"ticker": "RELIANCE.NS", "name": "Reliance Industries Limited", "exchange": "NSE", "currency": "INR"},
-    {"ticker": "TCS.NS", "name": "Tata Consultancy Services Limited", "exchange": "NSE", "currency": "INR"},
-    {"ticker": "INFY.NS", "name": "Infosys Limited", "exchange": "NSE", "currency": "INR"},
-    {"ticker": "SBIN.NS", "name": "State Bank of India", "exchange": "NSE", "currency": "INR"},
-    {"ticker": "HDFCBANK.NS", "name": "HDFC Bank Limited", "exchange": "NSE", "currency": "INR"},
-    # US Markets (Optional expansion)
-    {"ticker": "AAPL", "name": "Apple Inc.", "exchange": "NASDAQ", "currency": "USD"},
-    {"ticker": "NVDA", "name": "NVIDIA Corporation", "exchange": "NASDAQ", "currency": "USD"},
-    {"ticker": "MSFT", "name": "Microsoft Corporation", "exchange": "NASDAQ", "currency": "USD"},
+    # Indian F&O Underlying Indices
+    {"ticker": "NIFTY", "name": "NIFTY 50 Index (F&O)", "exchange": "NSE", "currency": "INR"},
+    {"ticker": "BANKNIFTY", "name": "NIFTY Bank Index (F&O)", "exchange": "NSE", "currency": "INR"},
+    {"ticker": "SENSEX", "name": "BSE Sensex Index (F&O)", "exchange": "BSE", "currency": "INR"},
+    {"ticker": "^NSEI", "name": "NIFTY 50 Spot", "exchange": "NSE", "currency": "INR"},
+    {"ticker": "^NSEBANK", "name": "BANK NIFTY Spot", "exchange": "NSE", "currency": "INR"},
+    {"ticker": "^BSESN", "name": "BSE SENSEX Spot", "exchange": "BSE", "currency": "INR"},
+    {"ticker": "FINNIFTY", "name": "Nifty Financial Services (F&O)", "exchange": "NSE", "currency": "INR"},
+    {"ticker": "MIDCPNIFTY", "name": "Nifty Midcap Select (F&O)", "exchange": "NSE", "currency": "INR"},
 ]
 
 async def init_database(seed_watchlist: bool = True) -> dict:

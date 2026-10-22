@@ -10,8 +10,14 @@ export const formatTradingViewSymbol = (ticker: string): string => {
   if (clean === '^NSEBANK' || clean === 'BANKNIFTY' || clean === 'NIFTY BANK') {
     return 'NSE:BANKNIFTY';
   }
-  if (clean === '^BSESN' || clean === 'SENSEX') {
+  if (clean === '^BSESN' || clean === 'SENSEX' || clean === 'BSE SENSEX') {
     return 'BSE:SENSEX';
+  }
+  if (clean === 'FINNIFTY') {
+    return 'NSE:FINNIFTY';
+  }
+  if (clean === 'MIDCPNIFTY') {
+    return 'NSE:MIDCPNIFTY';
   }
   if (clean.endsWith('.NS')) {
     return `NSE:${clean.replace('.NS', '')}`;

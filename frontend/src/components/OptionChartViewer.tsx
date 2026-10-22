@@ -262,7 +262,7 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
       }));
   }, [entryPrice, targetPrice, stopLossPrice, height]);
 
-  const intervalStep = underlying === 'BANKNIFTY' ? 100 : 50;
+  const intervalStep = (underlying === 'BANKNIFTY' || underlying === 'SENSEX') ? 100 : (underlying === 'MIDCPNIFTY' ? 25 : 50);
 
   return (
     <div className="bg-gray-950 rounded-xl border border-gray-800 p-4 shadow-xl">
@@ -323,13 +323,15 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-2.5 mb-3 text-xs bg-gray-900/60 p-2.5 rounded-lg border border-gray-800/80">
         <div className="flex items-center gap-2">
           <span className="text-gray-400 font-semibold">Underlying:</span>
-          {['NIFTY', 'BANKNIFTY', 'FINNIFTY'].map(u => (
+          {['NIFTY', 'BANKNIFTY', 'SENSEX', 'FINNIFTY'].map(u => (
             <button
               key={u}
               type="button"
               onClick={() => {
                 setUnderlying(u);
-                setStrike(u === 'BANKNIFTY' ? 55000 : 22800);
+                if (u === 'BANKNIFTY') setStrike(52000);
+                else if (u === 'SENSEX') setStrike(80000);
+                else setStrike(24500);
               }}
               className={`px-2.5 py-1 rounded text-[11px] font-bold border ${
                 underlying === u

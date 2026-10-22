@@ -34,9 +34,9 @@ class Settings(BaseSettings):
                 return v.replace("postgresql://", "postgresql+asyncpg://", 1)
         return v
 
-    # Initial Focus Target Symbols (Indices & Equities for F&O / Intraday)
+    # Initial Focus Target Symbols (Indian F&O Underlyings)
     target_symbols: List[str] = Field(
-        default=["NIFTY", "BANKNIFTY", "RELIANCE.NS", "HDFCBANK.NS", "TCS.NS"],
+        default=["NIFTY", "BANKNIFTY", "SENSEX"],
         alias="TARGET_SYMBOLS"
     )
 

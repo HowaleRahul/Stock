@@ -1,23 +1,59 @@
+import pytest
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from unittest.mock import patch
 
-from ml.assets import asset_flags, classify_ticker
+from ml.assets import asset_flags, fo_asset_flags, classify_ticker, normalize_ticker, get_fo_name
 from ml.ensemble import EnsembleModel
 from ml.features import _align_daily_series, enrich_with_macro_and_options
 from ml.continuous_trainer import generate_features_for_ticker
 
 
-def test_asset_classification_is_explicit_and_one_hot():
-    assert classify_ticker("BTC-USD") == "CRYPTO"
-    assert classify_ticker("^GSPC") == "US_EQUITY"
-    # A foreign-exchange symbol must not be incorrectly treated as crypto.
-    assert classify_ticker("INR=X") == "IN_EQUITY"
-    assert sum(asset_flags("CRYPTO").values()) == 1.0
+def test_asset_classification_is_fo_only():
+    # Indian F&O Underlyings must classify cleanly as IN_INDEX_FO
+    assert classify_ticker("NIFTY") == "IN_INDEX_FO"
+    assert classify_ticker("BANKNIFTY") == "IN_INDEX_FO"
+    assert classify_ticker("SENSEX") == "IN_INDEX_FO"
+    assert classify_ticker("^NSEI") == "IN_INDEX_FO"
+    assert classify_ticker("^NSEBANK") == "IN_INDEX_FO"
+    assert classify_ticker("^BSESN") == "IN_INDEX_FO"
+
+    # Non-F&O instruments must fail closed
+    with pytest.raises(ValueError):
+        classify_ticker("BTC-USD")
+    with pytest.raises(ValueError):
+        classify_ticker("^GSPC")
+    with pytest.raises(ValueError):
+        classify_ticker("AAPL")
 
 
-def test_crypto_weekend_uses_last_available_macro_value_without_lookahead():
+def test_fo_asset_flags_one_hot():
+    nifty_flags = fo_asset_flags("NIFTY")
+    assert nifty_flags["feat_is_nifty"] == 1.0
+    assert nifty_flags["feat_is_banknifty"] == 0.0
+    assert nifty_flags["feat_is_sensex"] == 0.0
+
+    bank_flags = fo_asset_flags("BANKNIFTY")
+    assert bank_flags["feat_is_nifty"] == 0.0
+    assert bank_flags["feat_is_banknifty"] == 1.0
+    assert bank_flags["feat_is_sensex"] == 0.0
+
+    sensex_flags = fo_asset_flags("SENSEX")
+    assert sensex_flags["feat_is_nifty"] == 0.0
+    assert sensex_flags["feat_is_banknifty"] == 0.0
+    assert sensex_flags["feat_is_sensex"] == 1.0
+
+
+def test_fo_name_resolution():
+    assert get_fo_name("^NSEI") == "NIFTY"
+    assert get_fo_name("^NSEBANK") == "BANKNIFTY"
+    assert get_fo_name("^BSESN") == "SENSEX"
+    assert get_fo_name("SENSEX") == "SENSEX"
+    assert get_fo_name("BANKNIFTY") == "BANKNIFTY"
+
+
+def test_macro_alignment_without_lookahead():
     primary_index = pd.date_range("2026-01-02", periods=3, freq="D", tz="UTC")
     delayed_macro = pd.Series(
         [17.0], index=pd.DatetimeIndex(["2026-01-02"], tz="UTC")
@@ -26,59 +62,38 @@ def test_crypto_weekend_uses_last_available_macro_value_without_lookahead():
     assert aligned.tolist() == [17.0, 17.0, 17.0]
 
 
-def test_crypto_macro_enrichment_adds_btc_volume_context():
+def test_fo_macro_and_options_enrichment():
     index = pd.date_range("2026-01-01", periods=25, freq="D", tz="UTC")
     primary = pd.DataFrame(
-        {"open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 10.0}, index=index
+        {"open": 24000.0, "high": 24200.0, "low": 23900.0, "close": 24100.0, "volume": 50000.0}, index=index
     )
     macro_index = pd.date_range("2025-12-01", periods=40, freq="D", tz="UTC")
 
     def fake_download(symbol, **_kwargs):
-        if symbol == "BTC-USD":
-            return pd.DataFrame({"Close": np.linspace(90, 130, 40), "Volume": np.arange(40) + 100}, index=macro_index)
-        return pd.DataFrame({"Close": np.linspace(10, 50, 40)}, index=macro_index)
+        return pd.DataFrame({"Close": np.linspace(10, 50, 40), "Volume": np.arange(40) + 100}, index=macro_index)
 
     with patch("ml.features.yf.download", side_effect=fake_download):
-        enriched = enrich_with_macro_and_options(primary, "BTC-USD", asset_class="CRYPTO")
+        enriched = enrich_with_macro_and_options(primary, "^NSEI", asset_class="IN_INDEX_FO")
 
-    assert {"macro_vix", "macro_btc_volume", "macro_btc_volume_ret", "opt_delta", "opt_gamma"} <= set(enriched.columns)
-    assert enriched[["macro_vix", "macro_btc_volume"]].notna().all().all()
-
-
-def test_ensemble_explains_asset_class_driver():
-    class DummyModel:
-        classes_ = np.array([-1, 0, 1])
-        coef_ = np.array([[0.0, 0.0, 0.0]])
-
-        def predict(self, _X): return np.array([1])
-        def predict_proba(self, _X): return np.array([[0.1, 0.1, 0.8]])
-
-    model = EnsembleModel("nonexistent-test-timeframe")
-    model.model = DummyModel()
-    model.feature_names = ["feat_is_crypto", "feat_is_in_equity", "feat_is_us_equity"]
-    model.scaler = StandardScaler().fit(np.zeros((1, 3)))
-    model.asset_class = "CRYPTO"
-    model.model.coef_[0][0] = 3.0
-    result = model.predict({"regime": "unknown", "adx": 0}, [], asset_class="CRYPTO")
-    assert result["drivers"] == ["Asset class: crypto"]
-    assert "asset-class" in result["alternative_scenario"]
+    assert {"macro_vix", "macro_spx_ret", "macro_usdinr_ret", "opt_delta", "opt_gamma"} <= set(enriched.columns)
+    assert enriched[["macro_vix", "opt_delta", "opt_gamma"]].notna().all().all()
 
 
-def test_crypto_trainer_dry_run_emits_one_hot_features():
+def test_continuous_trainer_dry_run_for_fo():
     index = pd.date_range("2026-01-01", periods=110, freq="D")
     raw = pd.DataFrame(
         {
-            "Open": np.linspace(100, 130, len(index)),
-            "High": np.linspace(101, 131, len(index)),
-            "Low": np.linspace(99, 129, len(index)),
-            "Close": np.linspace(100, 130, len(index)),
-            "Volume": np.full(len(index), 1000),
+            "Open": np.linspace(24000, 24500, len(index)),
+            "High": np.linspace(24100, 24600, len(index)),
+            "Low": np.linspace(23900, 24400, len(index)),
+            "Close": np.linspace(24000, 24500, len(index)),
+            "Volume": np.full(len(index), 100000),
         }, index=index,
     )
 
     def fake_macro(df, *_args, **_kwargs):
         result = df.copy()
-        result["macro_vix"] = 20.0
+        result["macro_vix"] = 15.0
         result["macro_spx_ret"] = 0.0
         result["macro_usdinr_ret"] = 0.0
         result["macro_btc_volume_ret"] = 0.0
@@ -95,8 +110,8 @@ def test_crypto_trainer_dry_run_emits_one_hot_features():
     with patch("ml.continuous_trainer.yf.download", return_value=raw), \
          patch("ml.continuous_trainer.enrich_with_macro_and_options", side_effect=fake_macro), \
          patch("ml.continuous_trainer.enrich_with_psychology_features", side_effect=fake_psychology):
-        X, y = generate_features_for_ticker("BTC-USD", {"tf": "1d", "period": "1y", "tp_atr": 3.0, "sl_atr": 1.5, "max_hold": 20}, "CRYPTO")
+        X, y = generate_features_for_ticker("^NSEI", {"tf": "1d", "period": "1y", "tp_atr": 2.0, "sl_atr": 1.0, "max_hold": 10}, "IN_INDEX_FO")
 
     assert X is not None and len(X) == len(y) and not X.empty
-    assert (X["feat_is_crypto"] == 1.0).all()
-    assert (X["feat_is_in_equity"] == 0.0).all()
+    assert "regime_val" in X.columns
+    assert "regime_adx" in X.columns

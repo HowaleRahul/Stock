@@ -302,3 +302,42 @@
 - Frontend build: `npm run build` passed in 1.41s.
 - Oxlint: warnings reduced from 16 to 10 with 0 errors.
 - System integrity: `iterate.txt` verified present and unmodified.
+
+---
+
+## Pass 14 — Specialization in Indian Stock Market Futures & Options (F&O) Trading & BSE SENSEX Addition
+
+### F&O Transformation & Policy Consolidation
+- Centralized `ASSET_CLASSES` in `ml/assets.py` exclusively to `("IN_INDEX_FO",)`. Completely removed cash equities, foreign stocks, and crypto execution paths.
+- Added full BSE SENSEX support (`^BSESN`, BSE) alongside NIFTY 50 (`^NSEI`), BANK NIFTY (`^NSEBANK`), FINNIFTY, and MIDCPNIFTY with exchange lot sizes (SENSEX: 10), strike intervals (100), margin rate (0.15), and Friday weekly expiry.
+- Converted `paper_trader.py` and `live_trader.py` to trade exclusively through `DerivativeEngine.generate_derivative_plan()`. Eliminated equity fallback allocations.
+- Re-calibrated regime modulation for F&O leverage, gating long calls in crash regimes and boosting mean-reversion setups in choppy ranges.
+
+### Multi-Timeframe Scalp & Swing Framework
+- Calibrated dual timeframes:
+  - Scalp trading: `5m` (hold $\le 15$ bars, $1.5$ ATR target, $0.8$ ATR stop) and `15m` (hold $\le 25$ bars).
+  - Swing trading: `1h` (hold $\le 40$ bars, $2.0$ ATR target, $1.0$ ATR stop) and `1d` (hold $\le 20$ bars).
+- Updated `TIMEFRAME_CONFIGS` in `ml/continuous_trainer.py` and trained classifiers across all four timeframes.
+
+### Clean Database and Local State Reset
+- Created and executed `scripts/reset_fo_database.py`. Dropped legacy tables and cleanly re-created SQLAlchemy models and TimescaleDB hypertables.
+- Seeded 11 F&O symbols into `symbols` table and initialized paper account with ₹1,00,000 balance.
+- Reset `paper_account.json` to ₹1,00,000, `paper_trades.json` to `[]`, and `trade_journal.jsonl`.
+
+### Model Retraining From Scratch
+- Developed and executed `scripts/train_fo_models.py` downloading historical data for `^NSEI`, `^NSEBANK`, and `^BSESN`.
+- Generated triple-barrier path-dependent labels, synthetic Black-Scholes Greeks, and behavioral psychology features.
+- Deployed Logistic Regression classifiers with fitted `StandardScaler` to `ml/registry/` (`model_5m.pkl`, `model_15m.pkl`, `model_1h.pkl`, `model_1d.pkl`) and continuous brain bundle `ml/models/continuous_brain_bundle.pkl`.
+
+### Frontend BSE SENSEX & F&O Enhancements
+- `Dashboard.tsx`: Added dynamic exchange badges (`BSE F&O` / `NSE F&O`), SENSEX strike mapping, and updated live feed status.
+- `OptionChartViewer.tsx`: Added BSE SENSEX selection, 80,000 strike default, and 100 strike interval stepping.
+- `TrainingUI.tsx`: Integrated BSE SENSEX into underlying selection, dynamic futures margin calculation (~₹1.2L for SENSEX), and Option vs Spot chart toggling.
+- `BacktestUI.tsx`: Added quick F&O index buttons (`^NSEI`, `^NSEBANK`, `^BSESN`) and scalp (`5m`, `15m`) & swing (`1h`, `1d`) timeframes.
+- `Portfolio.tsx`: Enriched active positions table with F&O contract tags (`FUT`, `CE`, `PE`, strike).
+- `tradingViewUtils.ts`: Mapped `^BSESN` / `SENSEX` to `BSE:SENSEX`.
+
+## Verification — Pass 14
+- Frontend TypeScript check (`npx tsc -p tsconfig.app.json --noEmit`): passed with 0 errors.
+- Frontend production build (`npm run build`): passed in 1.46s.
+- System integrity: `iterate.txt` verified present and unmodified.

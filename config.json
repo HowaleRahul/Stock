@@ -1,5 +1,5 @@
 {
-    "version": "v1.1.0",
+    "version": "v2.0.0-fo",
     "stt_slippage_pct": 0.0005,
     "min_ai_confidence": 0.65,
     "max_portfolio_drawdown_pct": 0.1,
@@ -11,15 +11,33 @@
     "capital": 100000.0,
     "watchlist": [
         "^NSEI",
-        "^NSEBANK"
+        "^NSEBANK",
+        "^BSESN"
     ],
     "active_setups": [
-        "BreakoutSetup",
-        "FibonacciSetup",
-        "RsiDivergenceSetup",
-        "MeanReversionSetup"
+        "MACrossover",
+        "RSI",
+        "MACD",
+        "BollingerBands",
+        "Breakout",
+        "VWAP"
     ],
     "target_index": "ALL",
     "derivative_type": "AUTO",
-    "strike_preference": "AUTO"
+    "strike_preference": "AUTO",
+    "fo_mode": true,
+    "fo_underlyings": [
+        "NIFTY",
+        "BANKNIFTY",
+        "SENSEX"
+    ],
+    "default_expiry_type": "WEEKLY",
+    "scalp_timeframes": [
+        "5m",
+        "15m"
+    ],
+    "swing_timeframes": [
+        "1h",
+        "1d"
+    ]
 }

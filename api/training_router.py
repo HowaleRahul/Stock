@@ -41,13 +41,13 @@ class StartTrainingRequest(BaseModel):
         allow_inf_nan=False,
         description="Custom trading capital in INR (e.g. 10000 for 10k, 50000, 100000, etc.)"
     )
-    target_index: Optional[Literal["NIFTY", "BANKNIFTY", "FINNIFTY", "ALL"]] = Field(
+    target_index: Optional[Literal["NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "ALL"]] = Field(
         default="ALL",
-        description="Target index: 'NIFTY', 'BANKNIFTY', 'FINNIFTY', or 'ALL'"
+        description="Target index: 'NIFTY', 'BANKNIFTY', 'SENSEX', 'FINNIFTY', or 'ALL'"
     )
-    derivative_type: Optional[Literal["AUTO", "OPTIONS", "FUTURES", "EQUITY"]] = Field(
+    derivative_type: Optional[Literal["AUTO", "OPTIONS", "FUTURES"]] = Field(
         default="AUTO",
-        description="Derivative instrument: 'AUTO' (budget-optimized), 'OPTIONS' (CE/PE), 'FUTURES', 'EQUITY'"
+        description="Derivative instrument: 'AUTO' (budget-optimized), 'OPTIONS' (CE/PE), 'FUTURES'"
     )
     strike_preference: Optional[Literal["AUTO", "ITM", "ATM", "OTM"]] = Field(
         default="AUTO",

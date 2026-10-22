@@ -105,7 +105,7 @@ def test_engine_on_empty_and_corrupted_dataframes():
     # Empty dataframe
     df_empty = pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"])
     signals_empty = engine.evaluate_all(df_empty)
-    assert len(signals_empty) == 5
+    assert len(signals_empty) == len(engine.setups)
     for s in signals_empty:
         assert s.signal == "neutral"
         assert s.confidence == 0.0

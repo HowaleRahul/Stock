@@ -183,6 +183,7 @@ class FOLearner:
             "weights": {
                 "NIFTY": {"trending": dict(default_strikes), "rangebound": dict(default_strikes)},
                 "BANKNIFTY": {"trending": dict(default_strikes), "rangebound": dict(default_strikes)},
+                "SENSEX": {"trending": dict(default_strikes), "rangebound": dict(default_strikes)},
                 "FINNIFTY": {"trending": dict(default_strikes), "rangebound": dict(default_strikes)},
             }
         }
@@ -212,7 +213,7 @@ class FOLearner:
         Returns ranked list of strike types [(strike_type, sampled_score)]
         using Thompson Sampling from Beta posterior.
         """
-        idx_key = "BANKNIFTY" if "BANK" in index.upper() else ("FINNIFTY" if "FIN" in index.upper() else "NIFTY")
+        idx_key = "SENSEX" if "SENSEX" in index.upper() or "BSESN" in index.upper() else ("BANKNIFTY" if "BANK" in index.upper() else ("FINNIFTY" if "FIN" in index.upper() else "NIFTY"))
         reg_key = "rangebound" if "range" in regime.lower() else "trending"
 
         idx_weights = self.state.get("weights", {}).get(idx_key, {})
@@ -239,7 +240,7 @@ class FOLearner:
         ticker = trade.get("ticker", "NIFTY")
         regime = trade.get("regime", "trending")
 
-        idx_key = "BANKNIFTY" if "BANK" in ticker.upper() else ("FINNIFTY" if "FIN" in ticker.upper() else "NIFTY")
+        idx_key = "SENSEX" if "SENSEX" in ticker.upper() or "BSESN" in ticker.upper() else ("BANKNIFTY" if "BANK" in ticker.upper() else ("FINNIFTY" if "FIN" in ticker.upper() else "NIFTY"))
         reg_key = "rangebound" if "range" in str(regime).lower() else "trending"
 
         if idx_key not in self.state.setdefault("weights", {}):
@@ -311,6 +312,8 @@ class DerivativeEngine:
         "^NSEI": 25,
         "BANKNIFTY": 15,
         "^NSEBANK": 15,
+        "SENSEX": 10,
+        "^BSESN": 10,
         "FINNIFTY": 25,
         "MIDCPNIFTY": 50,
     }
@@ -320,16 +323,20 @@ class DerivativeEngine:
         "^NSEI": 50,
         "BANKNIFTY": 100,
         "^NSEBANK": 100,
+        "SENSEX": 100,
+        "^BSESN": 100,
         "FINNIFTY": 50,
         "MIDCPNIFTY": 25,
     }
 
-    # Futures Span + Exposure margin requirement (~14% to 16% on NSE)
+    # Futures Span + Exposure margin requirement (~14% to 16% on NSE/BSE)
     FUTURES_MARGIN_RATES = {
         "NIFTY": 0.15,
         "^NSEI": 0.15,
         "BANKNIFTY": 0.16,
         "^NSEBANK": 0.16,
+        "SENSEX": 0.15,
+        "^BSESN": 0.15,
         "FINNIFTY": 0.15,
         "MIDCPNIFTY": 0.16,
     }
@@ -346,6 +353,8 @@ class DerivativeEngine:
 
     def _normalize_ticker(self, ticker: str) -> str:
         t = ticker.upper().replace("^", "")
+        if "BSESN" in t or "SENSEX" in t:
+            return "SENSEX"
         if "NSEBANK" in t or "BANKNIFTY" in t:
             return "BANKNIFTY"
         if "NSEI" in t or "NIFTY" in t:

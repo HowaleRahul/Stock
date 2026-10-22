@@ -35,7 +35,7 @@ logger = logging.getLogger("trading.ml.live_market_learner")
 
 DEFAULT_VIRTUAL_CAPITAL = 10000.0  # Default micro capital ₹10k
 DEFAULT_TARGET_TICKERS = [
-    "SBIN", "TATAMOTORS", "ITC", "RELIANCE", "INFY", "HDFCBANK", "ICICIBANK", "TCS", "NIFTY", "BANKNIFTY"
+    "NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"
 ]
 
 
@@ -84,8 +84,12 @@ class LiveMarketLearner:
             self.tickers = ["NIFTY"]
         elif self.target_index == "BANKNIFTY":
             self.tickers = ["BANKNIFTY"]
+        elif self.target_index == "SENSEX":
+            self.tickers = ["SENSEX"]
         elif self.target_index == "FINNIFTY":
             self.tickers = ["FINNIFTY"]
+        elif self.target_index == "MIDCPNIFTY":
+            self.tickers = ["MIDCPNIFTY"]
         else:
             self.tickers = tickers or DEFAULT_TARGET_TICKERS
 
@@ -451,7 +455,7 @@ class LiveMarketLearner:
             )
 
             # Check if we should execute as Derivative (Futures or Options)
-            is_index = ticker.upper() in ("NIFTY", "BANKNIFTY", "FINNIFTY", "^NSEI", "^NSEBANK")
+            is_index = ticker.upper() in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY", "^NSEI", "^NSEBANK", "^BSESN")
             should_trade_derivative = is_index or (self.derivative_type != "EQUITY" and self.derivative_engine.is_derivative_supported(ticker))
 
             if should_trade_derivative:

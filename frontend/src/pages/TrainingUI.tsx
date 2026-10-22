@@ -60,17 +60,17 @@ const CAPITAL_PRESETS = [
 ];
 
 const INDEX_PRESETS = [
-  { id: 'ALL', label: 'All Instruments', desc: 'Indices & Liquid Equities' },
-  { id: 'NIFTY', label: 'NIFTY 50', desc: 'Lot: 25 | Interval: 50' },
-  { id: 'BANKNIFTY', label: 'BANK NIFTY', desc: 'Lot: 15 | Interval: 100' },
-  { id: 'FINNIFTY', label: 'FIN NIFTY', desc: 'Lot: 25 | Interval: 50' },
+  { id: 'ALL', label: 'All F&O Indices', desc: 'NIFTY, BANKNIFTY, SENSEX, FINNIFTY' },
+  { id: 'NIFTY', label: 'NIFTY 50', desc: 'Lot: 25 | Interval: 50 | Expiry: Thu' },
+  { id: 'BANKNIFTY', label: 'BANK NIFTY', desc: 'Lot: 15 | Interval: 100 | Expiry: Wed' },
+  { id: 'SENSEX', label: 'BSE SENSEX', desc: 'Lot: 10 | Interval: 100 | Expiry: Fri' },
+  { id: 'FINNIFTY', label: 'FIN NIFTY', desc: 'Lot: 25 | Interval: 50 | Expiry: Tue' },
 ];
 
 const DERIVATIVE_PRESETS = [
   { id: 'AUTO', label: 'Auto (Budget-Optimized)', desc: 'Routes to Options (<₹1.2L) or Futures (≥₹1.2L)' },
   { id: 'OPTIONS', label: 'Options Only (CE / PE)', desc: 'Directional Call & Put Buying' },
   { id: 'FUTURES', label: 'Futures Only', desc: 'Index Futures (Requires Margin)' },
-  { id: 'EQUITY', label: 'Cash Equities', desc: 'Delivery / Intraday Shares' },
 ];
 
 const STRIKE_PRESETS = [
@@ -246,8 +246,14 @@ const TrainingUI = () => {
   const minRR = isMicro ? 1.8 : 1.5;
 
   // Futures Margin estimates vs Options Premium estimates
-  const niftyFutureMargin = 22800 * 25 * 0.15; // ~₹85,500
-  const canAffordFutures = userCapital >= niftyFutureMargin && (niftyFutureMargin <= userCapital * 0.60);
+  const futureMarginEstimate = selectedIndex === 'SENSEX'
+    ? 80000 * 10 * 0.15 // ~₹1,20,000 for BSE SENSEX
+    : selectedIndex === 'BANKNIFTY'
+    ? 52000 * 15 * 0.15 // ~₹1,17,000 for BANKNIFTY
+    : selectedIndex === 'FINNIFTY'
+    ? 23500 * 25 * 0.15 // ~₹88,125 for FINNIFTY
+    : 24500 * 25 * 0.15; // ~₹91,875 for NIFTY 50
+  const canAffordFutures = userCapital >= futureMarginEstimate && (futureMarginEstimate <= userCapital * 0.60);
 
   return (
     <div className="training-page">
@@ -504,7 +510,7 @@ const TrainingUI = () => {
           <div>
             {selectedDerivative === 'FUTURES' && !canAffordFutures ? (
               <p>
-                1 lot of Index Futures requires ~₹85,500 - ₹1,40,000 margin. With ₹{userCapital.toLocaleString('en-IN')} capital,
+                1 lot of Index Futures requires ~₹{Math.round(futureMarginEstimate).toLocaleString('en-IN')} margin. With ₹{userCapital.toLocaleString('en-IN')} capital,
                 Futures orders will be rejected by Risk Gate 0 to protect your wallet. Please select <strong>Auto</strong> or <strong>Options Only</strong>.
               </p>
             ) : isMicro ? (
@@ -740,8 +746,8 @@ const TrainingUI = () => {
 
         {chartViewMode === 'option' ? (
           <OptionChartViewer
-            initialUnderlying={focusedOption?.underlying || (selectedIndex === 'BANKNIFTY' ? 'BANKNIFTY' : selectedIndex === 'FINNIFTY' ? 'FINNIFTY' : 'NIFTY')}
-            initialStrike={focusedOption?.strike || (selectedIndex === 'BANKNIFTY' ? 48500 : selectedIndex === 'FINNIFTY' ? 21500 : 22800)}
+            initialUnderlying={focusedOption?.underlying || (selectedIndex === 'SENSEX' ? 'SENSEX' : selectedIndex === 'BANKNIFTY' ? 'BANKNIFTY' : selectedIndex === 'FINNIFTY' ? 'FINNIFTY' : 'NIFTY')}
+            initialStrike={focusedOption?.strike || (selectedIndex === 'SENSEX' ? 80000 : selectedIndex === 'BANKNIFTY' ? 52000 : selectedIndex === 'FINNIFTY' ? 23500 : 24500)}
             initialOptionType={focusedOption?.optionType || 'CE'}
             entryPrice={focusedOption?.entryPrice}
             targetPrice={focusedOption?.targetPrice}
@@ -751,7 +757,7 @@ const TrainingUI = () => {
         ) : (
           <div className="h-[420px] rounded-lg overflow-hidden border border-gray-800">
             <TradingViewWidget
-              symbol={selectedIndex === 'BANKNIFTY' ? 'NSE:BANKNIFTY' : selectedIndex === 'FINNIFTY' ? 'NSE:FINNIFTY' : 'NSE:NIFTY'}
+              symbol={selectedIndex === 'SENSEX' ? 'BSE:SENSEX' : selectedIndex === 'BANKNIFTY' ? 'NSE:BANKNIFTY' : selectedIndex === 'FINNIFTY' ? 'NSE:FINNIFTY' : 'NSE:NIFTY'}
               height={420}
             />
 
