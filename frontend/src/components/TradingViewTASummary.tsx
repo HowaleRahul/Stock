@@ -1,5 +1,5 @@
 import { useEffect, useRef, memo } from 'react';
-import { formatTradingViewSymbol } from './TradingViewWidget';
+import { formatTradingViewSymbol } from './tradingViewUtils';
 
 interface TradingViewTASummaryProps {
   symbol?: string;
@@ -33,15 +33,16 @@ const TradingViewTASummary = ({
   };
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    const currentContainer = containerRef.current;
+    if (!currentContainer) return;
 
-    containerRef.current.innerHTML = '';
+    currentContainer.innerHTML = '';
 
     const widgetContainer = document.createElement('div');
     widgetContainer.className = 'tradingview-widget-container__widget';
     widgetContainer.style.height = '100%';
     widgetContainer.style.width = '100%';
-    containerRef.current.appendChild(widgetContainer);
+    currentContainer.appendChild(widgetContainer);
 
     const script = document.createElement('script');
     script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js';
@@ -59,11 +60,11 @@ const TradingViewTASummary = ({
       colorTheme: theme,
     });
 
-    containerRef.current.appendChild(script);
+    currentContainer.appendChild(script);
 
     return () => {
-      if (containerRef.current) {
-        containerRef.current.innerHTML = '';
+      if (currentContainer) {
+        currentContainer.innerHTML = '';
       }
     };
   }, [tvSymbol, theme, interval, height]);

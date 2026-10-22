@@ -111,6 +111,7 @@ const TrainingUI = () => {
   const [error, setError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const logsContainerRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const isFetchingRef = useRef(false);
@@ -138,6 +139,7 @@ const TrainingUI = () => {
   const fetchStatus = useCallback(async () => {
     if (isFetchingRef.current) return;
     isFetchingRef.current = true;
+    setIsRefreshing(true);
     try {
       const res = await axios.get('/api/v1/training/status');
       setIsTraining(Boolean(res.data.is_training));
@@ -159,6 +161,7 @@ const TrainingUI = () => {
       setError("Training service is offline. Start the API server and retry.");
     } finally {
       isFetchingRef.current = false;
+      setIsRefreshing(false);
     }
   }, []);
 
@@ -820,7 +823,7 @@ const TrainingUI = () => {
             onClick={fetchStatus}
             title="Refresh status"
           >
-            <RefreshCw className={`w-4 h-4 ${isFetchingRef.current ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </section>

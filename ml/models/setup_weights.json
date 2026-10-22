@@ -3,15 +3,15 @@
     "rsi_setup": {
       "trending": {
         "alpha": 1.0,
-        "beta": 17.0,
-        "ewma_reward": -0.007813694273419373,
-        "n": 16
+        "beta": 21.0,
+        "ewma_reward": -0.008424878449154086,
+        "n": 20
       }
     }
   },
   "global_weights": {
-    "rsi_setup": 0.05555555555555555
+    "rsi_setup": 0.045454545454545456
   },
-  "version": 16,
-  "last_update": "2026-10-21T23:56:28.702065"
+  "version": 20,
+  "last_update": "2026-10-22T23:57:51.213024"
 }

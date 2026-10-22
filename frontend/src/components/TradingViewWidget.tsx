@@ -1,4 +1,5 @@
 import { useEffect, useRef, memo } from 'react';
+import { formatTradingViewSymbol } from './tradingViewUtils';
 
 interface TradingViewWidgetProps {
   symbol?: string;
@@ -7,31 +8,6 @@ interface TradingViewWidgetProps {
   height?: number;
   interval?: string;
 }
-
-// Convert ticker to TradingView format (e.g. ^NSEI -> NSE:NIFTY, RELIANCE.NS -> NSE:RELIANCE)
-export const formatTradingViewSymbol = (ticker: string): string => {
-  const clean = (ticker || '').trim().toUpperCase();
-  if (clean === '^NSEI' || clean === 'NIFTY' || clean === 'NIFTY 50') {
-    return 'NSE:NIFTY';
-  }
-  if (clean === '^NSEBANK' || clean === 'BANKNIFTY' || clean === 'NIFTY BANK') {
-    return 'NSE:BANKNIFTY';
-  }
-  if (clean === '^BSESN' || clean === 'SENSEX') {
-    return 'BSE:SENSEX';
-  }
-  if (clean.endsWith('.NS')) {
-    return `NSE:${clean.replace('.NS', '')}`;
-  }
-  if (clean.endsWith('.BO')) {
-    return `BSE:${clean.replace('.BO', '')}`;
-  }
-  if (clean.includes(':')) {
-    return clean;
-  }
-  // Default to NSE for Indian equities
-  return `NSE:${clean}`;
-};
 
 const TradingViewWidget = ({
   symbol = 'NSE:NIFTY',
@@ -44,60 +20,62 @@ const TradingViewWidget = ({
   const tvSymbol = formatTradingViewSymbol(symbol);
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    const currentContainer = containerRef.current;
+    if (!currentContainer) return;
 
-    // Clear previous widget
-    containerRef.current.innerHTML = '';
+    // Clear any previous chart instances
+    currentContainer.innerHTML = '';
 
-    const widgetContainer = document.createElement('div');
-    widgetContainer.className = 'tradingview-widget-container__widget';
-    widgetContainer.style.height = '100%';
-    widgetContainer.style.width = '100%';
-    containerRef.current.appendChild(widgetContainer);
+    const widgetDiv = document.createElement('div');
+    widgetDiv.id = 'tradingview_advanced_chart';
+    widgetDiv.style.height = autosize ? '100%' : `${height}px`;
+    widgetDiv.style.width = '100%';
+    currentContainer.appendChild(widgetDiv);
 
     const script = document.createElement('script');
-    script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+    script.src = 'https://s3.tradingview.com/tv.js';
     script.type = 'text/javascript';
     script.async = true;
-    script.innerHTML = JSON.stringify({
-      autosize: autosize,
-      symbol: tvSymbol,
-      interval: interval,
-      timezone: 'Asia/Kolkata',
-      theme: theme,
-      style: '1',
-      locale: 'en',
-      enable_publishing: false,
-      allow_symbol_change: true,
-      calendar: false,
-      support_host: 'https://www.tradingview.com',
-      hide_top_toolbar: false,
-      hide_side_toolbar: false,
-      save_image: true,
-      details: true,
-      hotlist: true,
-      studies: [
-        'RSI@tv-basicstudies',
-        'MASimple@tv-basicstudies',
-        'MACD@tv-basicstudies'
-      ],
-      container_id: 'tradingview_advanced_chart',
-    });
-
-    containerRef.current.appendChild(script);
-
-    return () => {
-      if (containerRef.current) {
-        containerRef.current.innerHTML = '';
+    script.onload = () => {
+      if (typeof (window as any).TradingView !== 'undefined') {
+        new (window as any).TradingView.widget({
+          autosize: autosize,
+          height: height,
+          symbol: tvSymbol,
+          interval: interval,
+          timezone: 'Asia/Kolkata',
+          theme: theme,
+          style: '1',
+          locale: 'en',
+          toolbar_bg: '#131722',
+          enable_publishing: false,
+          hide_side_toolbar: false,
+          allow_symbol_change: true,
+          save_image: false,
+          container_id: 'tradingview_advanced_chart',
+          studies: [
+            'RSI@tv-basicstudies',
+            'MASimple@tv-basicstudies',
+            'MACD@tv-basicstudies'
+          ],
+        });
       }
     };
-  }, [tvSymbol, theme, autosize, interval]);
+
+    currentContainer.appendChild(script);
+
+    return () => {
+      if (currentContainer) {
+        currentContainer.innerHTML = '';
+      }
+    };
+  }, [tvSymbol, theme, autosize, height, interval]);
 
   return (
     <div
       ref={containerRef}
-      className="tradingview-widget-container rounded-lg overflow-hidden border border-gray-800 shadow-xl"
-      style={{ height: `${height}px`, width: '100%' }}
+      className="tradingview-widget-container rounded-lg overflow-hidden border border-gray-800"
+      style={{ height: autosize ? '100%' : `${height}px`, width: '100%' }}
     />
   );
 };

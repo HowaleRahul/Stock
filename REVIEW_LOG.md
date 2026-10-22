@@ -266,3 +266,39 @@
 - Frontend lint: passed with 16 non-blocking React hook/Fast Refresh warnings in existing UI code.
 - `git diff --check`: passed.
 - Not run by design: database persistence/health integration, live quote/news/search tests that can call external providers, live broker/trading flows, browser automation, and deployment/proxy integration.
+
+## Pass 13 — Audit Remediation, Feature Pipeline Alignment, Hermetic Testing, and Repository Consolidation
+
+### Audit 01 — Feature Pipeline Alignment & ML Model Lifecycle
+- Unified the ML prediction contract in `ml/ensemble.py` by introducing `MACRO_NEUTRAL_DEFAULTS`, continuous bundle fallback (`CONTINUOUS_BUNDLE_PATH`), and optional `df: Optional[pd.DataFrame]` parameter to extract full indicators dynamically from the latest price bar.
+- Formatted feature vectors using `pd.DataFrame` with explicit column names, preventing scikit-learn feature name mismatch warnings.
+- Deployed compatible scaler bundles across all timeframes (`model_1d.pkl`, `model_1h.pkl`, `model_15m.pkl`, `model_5m.pkl`) in `ml/registry/`.
+- Updated all inference callers (`api/router.py`, `paper_trader.py`, `live_trader.py`, `ml/replay_engine.py`) to supply primary market DataFrames to `ensemble.predict()`.
+- Active ML probabilities and XAI driver attributions now operate continuously across `1d`, `1h`, `15m`, and `5m` timeframes without falling back to heuristic voting.
+
+### Audit 02 — Distributed Infrastructure Configuration
+- Added `redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")` to `api/config.py` Pydantic settings schema to enable centralized token-bucket rate limiting in multi-worker production deployments.
+
+### Audit 03 — Repository Consolidation & Dead Code Elimination
+- Cleanly purged deprecated, unreferenced legacy frontends `frontend_legacy/` (vanilla HTML/JS) and `web/` (outdated React prototype) from the repository root.
+- Confirmed that `iterate.txt` is intact and preserved in the repository root.
+- Single source of truth for the UI is now exclusively `frontend/` (React 19 + TypeScript + Vite).
+
+### Audit 04 — Test Fixture Hermeticity & Offline CI/CD
+- Registered the `database` marker in `pytest.ini`.
+- Added dynamic TCP socket probe `is_database_online()` and `pytest_collection_modifyitems` hook in `conftest.py` that dynamically marks database-dependent test cases.
+- Enables 100% offline hermetic execution (`pytest -m "not database"`: 131 passed in 40s) without requiring running Docker/PostgreSQL containers, while retaining full integration coverage when the database is available (`pytest`: 148 passed).
+
+### Frontend Warning Reductions & Code Hygiene
+- Extracted `formatTradingViewSymbol` into shared utility `frontend/src/components/tradingViewUtils.ts` to satisfy Vite Fast Refresh component constraints.
+- Eliminated ref access during render in `TrainingUI.tsx` by introducing `isRefreshing` state.
+- Hardened cleanup effects in `TradingViewWidget.tsx` and `TradingViewTASummary.tsx` against container null references.
+- Verified TypeScript build (`tsc -p tsconfig.app.json --noEmit`) passes with 0 diagnostics; production Vite build passes in 1.41s.
+
+## Verification — Pass 13
+- Python compilation: `venv\Scripts\python -m compileall -q api backtest data ml models setups papertrade scripts tests paper_trader.py live_trader.py start.py conftest.py` passed with 0 errors.
+- Test suite (full): `pytest -q` passed all 148 tests with 0 failures.
+- Test suite (offline/hermetic): `pytest -m "not database" -q` passed all 131 tests with 0 failures.
+- Frontend build: `npm run build` passed in 1.41s.
+- Oxlint: warnings reduced from 16 to 10 with 0 errors.
+- System integrity: `iterate.txt` verified present and unmodified.

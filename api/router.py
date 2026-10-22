@@ -607,6 +607,7 @@ async def evaluate_setups(
         regime_data,
         primary_signals,
         asset_class=classify_ticker(ticker_clean),
+        df=df_primary,
     )
 
     return SetupEvaluationResponse(

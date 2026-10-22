@@ -482,7 +482,13 @@ class ReplayEngine:
 
         regime_str = regime.get("regime", "unknown")
         setup_weights = self.learner.get_setup_weights(regime_str)
-        prediction = self.ai_brain.predict(regime, setups, setup_weights)
+        prediction = self.ai_brain.predict(
+            regime,
+            setups,
+            setup_weights=setup_weights,
+            asset_class=asset_class,
+            df=eval_df,
+        )
 
         signal = prediction.get("signal", "neutral")
         prob = prediction.get("probability", 0.0)

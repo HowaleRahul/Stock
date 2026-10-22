@@ -204,7 +204,12 @@ async def run_live_loop_async():
                                     notifier.send_exit_alert(closed_rec, is_live=True)
 
                 regime, setups = engine.evaluate_with_regime(df, ticker)
-                prediction_dict = ai_brain.predict(regime, setups)
+                prediction_dict = ai_brain.predict(
+                    regime,
+                    setups,
+                    asset_class="IN_EQUITY",
+                    df=df,
+                )
                 ai_signal = prediction_dict.get("signal", "neutral")
                 confidence = prediction_dict.get("probability", 0.0)
                 

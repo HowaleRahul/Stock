@@ -9,7 +9,23 @@ logger = logging.getLogger("trading.ml.ensemble")
 
 # Constants
 REGISTRY_DIR = os.path.join(os.path.dirname(__file__), "registry")
+CONTINUOUS_BUNDLE_PATH = os.path.join(os.path.dirname(__file__), "models", "continuous_brain_bundle.pkl")
 os.makedirs(REGISTRY_DIR, exist_ok=True)
+
+MACRO_NEUTRAL_DEFAULTS: Dict[str, float] = {
+    "macro_spx_ret": 0.0,
+    "macro_usdinr_ret": 0.0,
+    "macro_vix": 15.0,
+    "macro_btc_volume_ret": 0.0,
+    "opt_delta": 0.5,
+    "opt_gamma": 0.0,
+    "psych_fomo_streak": 0.0,
+    "psych_panic_index": 0.0,
+    "psych_dist_to_round": 0.5,
+    "psych_session_phase": 0.5,
+    "atr": 10.0,
+    "tf_hint": 1.0,
+}
 
 class EnsembleModel:
     """
@@ -28,18 +44,39 @@ class EnsembleModel:
         self.load_model()
 
     def load_model(self):
+        loaded_from_registry = False
         if os.path.exists(self.model_path):
             try:
                 data = joblib.load(self.model_path)
-                self.model = data["model"]
-                self.feature_names = data["features"]
+                self.model = data.get("model")
+                self.feature_names = data.get("features")
                 self.scaler = data.get("scaler")
                 self.feature_version = data.get("feature_version")
                 self.asset_class = data.get("asset_class")
-                logger.info(f"Loaded ensemble model for {self.timeframe}")
+                if self.model is not None and self.scaler is not None and self.feature_names is not None:
+                    logger.info(f"Loaded ensemble model for {self.timeframe}")
+                    loaded_from_registry = True
+                else:
+                    logger.warning(f"Registry model for {self.timeframe} missing scaler/model metadata.")
             except Exception as e:
                 logger.error(f"Failed to load model for {self.timeframe}: {e}")
-        else:
+
+        # Check continuous brain bundle as high-quality fallback
+        if not loaded_from_registry and os.path.exists(CONTINUOUS_BUNDLE_PATH):
+            try:
+                bundle = joblib.load(CONTINUOUS_BUNDLE_PATH)
+                if bundle.get("model") is not None and bundle.get("scaler") is not None and bundle.get("features"):
+                    self.model = bundle["model"]
+                    self.feature_names = bundle["features"]
+                    self.scaler = bundle["scaler"]
+                    self.feature_version = bundle.get("feature_version", "continuous_bundle")
+                    self.asset_class = bundle.get("asset_class", "IN_EQUITY")
+                    logger.info(f"Loaded continuous brain bundle fallback for {self.timeframe}")
+                    return
+            except Exception as e:
+                logger.debug(f"Could not load continuous brain bundle: {e}")
+
+        if not loaded_from_registry and not self.model:
             logger.warning(f"No trained model found for {self.timeframe}. Will fallback to simple voting.")
 
     def _signal_to_num(self, signal: str) -> int:
@@ -59,6 +96,7 @@ class EnsembleModel:
         setups: List[Any],
         setup_weights: Dict[str, float] = None,
         asset_class: str = "IN_EQUITY",
+        df: Any = None,
     ) -> Dict[str, Any]:
         """
         Takes the regime and the raw setups from SetupEngine and outputs the ensemble prediction.
@@ -84,6 +122,26 @@ class EnsembleModel:
             else:
                 features_dict[f"{s_name}_sig"] = 0
                 features_dict[f"{s_name}_conf"] = 0.0
+
+        # Extract macro/Greeks/psychology features from DataFrame if provided
+        if df is not None:
+            try:
+                import pandas as pd
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    last_row = df.iloc[-1]
+                    for col in MACRO_NEUTRAL_DEFAULTS.keys():
+                        if col in df.columns:
+                            val = last_row[col]
+                            if pd.notnull(val):
+                                features_dict[col] = float(val)
+            except Exception as e:
+                logger.debug(f"Error extracting features from df: {e}")
+
+        # Fill neutral baseline values for expected features not present in inputs
+        if self.feature_names:
+            for name in self.feature_names:
+                if name not in features_dict and name in MACRO_NEUTRAL_DEFAULTS:
+                    features_dict[name] = MACRO_NEUTRAL_DEFAULTS[name]
                 
         # If no model is trained yet, fallback to heuristic unweighted voting
         if not self.model or not self.feature_names or self.scaler is None:
@@ -103,9 +161,14 @@ class EnsembleModel:
             logger.error("Model feature contract is incomplete: %s", missing_features)
             return self._fallback_voting(features_dict, expected_setups, setup_weights)
             
-        # Build feature vector
-        X_raw = np.array([[features_dict[f] for f in self.feature_names]], dtype=float)
-        X = self.scaler.transform(X_raw)
+        # Build feature vector matching scaler expectation to prevent sklearn warnings
+        import pandas as pd
+        raw_vals = [[features_dict[f] for f in self.feature_names]]
+        if hasattr(self.scaler, "feature_names_in_") and self.scaler.feature_names_in_ is not None:
+            X_df = pd.DataFrame(raw_vals, columns=self.feature_names)
+            X = self.scaler.transform(X_df)
+        else:
+            X = self.scaler.transform(raw_vals)
         
         # Predict
         try:

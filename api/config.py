@@ -21,6 +21,9 @@ class Settings(BaseSettings):
         alias="DATABASE_URL"
     )
 
+    # Redis Distributed Cache & Lock (Optional; enables multi-worker clustering)
+    redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")
+
     @field_validator("database_url", mode="before")
     @classmethod
     def normalize_asyncpg_scheme(cls, v: Any) -> Any:

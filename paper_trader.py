@@ -452,7 +452,13 @@ async def run_loop():
             
             # Fetch RL weights and pass to brain
             setup_weights = learner.get_setup_weights(regime_str)
-            prediction = ai_brain.predict(regime, setups, setup_weights)
+            prediction = ai_brain.predict(
+                regime,
+                setups,
+                setup_weights=setup_weights,
+                asset_class="IN_EQUITY",
+                df=df,
+            )
 
             signal = prediction.get("signal", "neutral")
             prob = prediction.get("probability", 0.0)
