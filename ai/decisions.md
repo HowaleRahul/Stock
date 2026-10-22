@@ -118,9 +118,45 @@ This document records the major architectural, structural, and design decisions 
 - **Why it appears to have been made**: As dashboard requirements expanded to include interactive charts, real-time analytics, backtest visualizers, and strategy builders, vanilla JS became difficult to maintain and lacked compile-time type safety.
 - **Current implementation**: Full SPA in `frontend/src/` with 8 distinct pages, dynamic route splitting (`lazy`), and shared layout shell (`App.tsx`).
 - **Files/components affected**: `frontend/`, `frontend_legacy/`, `web/`, `api/main.py`.
-- **Known trade-offs**: Increased build complexity, higher bundle sizes (React vendor ~234 kB, charts ~166 kB), and legacy directories remaining unpruned in the repo.
+- **Known trade-offs**: Increased build complexity, higher bundle sizes (React vendor ~234 kB, charts ~166 kB). (Legacy directories were subsequently removed in Decision 13).
 - **Evidence/source in the project**: `frontend/package.json`, `frontend/vite.config.ts`, `frontend/src/App.tsx`.
-- **Reason status**: **Inferred** based on git commit history and presence of `frontend_legacy` and `web`.
+- **Reason status**: **Inferred** based on git commit history and initial presence of `frontend_legacy` and `web`.
+
+---
+
+### Decision 13: Repository Consolidation and Removal of Legacy Frontends
+- **Date**: Audit Remediation (October 2026; commit `31382e0`, `REVIEW_LOG.md` Pass 13)
+- **Decision**: Completely delete deprecated, unreferenced legacy frontends `frontend_legacy/` (vanilla HTML/JS) and `web/` (outdated React prototype), leaving `frontend/` as the sole UI surface, while strictly preserving `iterate.txt`.
+- **Why it appears to have been made**: Having three frontends caused developer ambiguity, search noise, and review overhead. Only `frontend/` is mounted by FastAPI in `api/main.py` and built by `start.py`.
+- **Current implementation**: Only `frontend/` remains in the root.
+- **Files/components affected**: `frontend_legacy/`, `web/`, `REVIEW_LOG.md`, `ai/`.
+- **Known trade-offs**: None; legacy frontends were non-functional and unreferenced.
+- **Evidence/source in the project**: Commit `31382e0`; `REVIEW_LOG.md` Pass 13; `ai/audits/03-repository-consolidation.md`.
+- **Reason status**: **Verified** (documented in audit and commit log).
+
+---
+
+### Decision 14: Dynamic Socket-Based Test Fixture Hermeticity
+- **Date**: Audit Remediation (October 2026; commit `31382e0`, `REVIEW_LOG.md` Pass 13)
+- **Decision**: Register `@pytest.mark.database` in `pytest.ini` and implement a dynamic TCP socket probe `is_database_online()` in `conftest.py` with an automated `pytest_collection_modifyitems` hook to segregate database integration tests.
+- **Why it appears to have been made**: 17 database integration tests previously failed with connection errors when running in offline development or containerless CI/CD environments.
+- **Current implementation**: `conftest.py` checks TCP connectivity to `127.0.0.1:5432` on collection. Running `pytest -m "not database"` executes 131 tests with 100% pass rate in complete offline isolation. When the database is available, all 148 tests execute automatically.
+- **Files/components affected**: `conftest.py`, `pytest.ini`, `tests/`, `ai/audits/04-test-fixture-hermeticity.md`.
+- **Known trade-offs**: None; provides full flexibility between fast offline CI runs and complete end-to-end integration verification.
+- **Evidence/source in the project**: Commit `31382e0`; `conftest.py` lines 14–46; `pytest.ini`.
+- **Reason status**: **Verified** (documented in `conftest.py`).
+
+---
+
+### Decision 15: Unified ML Inference with Dynamic Indicator Extraction and Continuous Fallback
+- **Date**: Audit Remediation (October 2026; commit `31382e0`, `REVIEW_LOG.md` Pass 13)
+- **Decision**: Upgrade `EnsembleModel.predict()` to accept an optional `df: Optional[pd.DataFrame]` parameter, extract ATR/RSI/MACD indicators dynamically, provide `MACRO_NEUTRAL_DEFAULTS`, deploy fitted `StandardScaler` artifacts across all timeframes in `ml/registry/`, and automatically fall back to `ml/models/continuous_brain_bundle.pkl`.
+- **Why it appears to have been made**: Previously, models trained on rich features fell back to simple unweighted heuristic voting during inference due to missing macro/options/volatility fields, disabling trained ML predictions in live/paper trading.
+- **Current implementation**: `ml/ensemble.py` lines 86–168 extracts features dynamically, matches feature schemas with `StandardScaler`, and outputs active model probabilities and XAI driver attributions across `1d`, `1h`, `15m`, and `5m` timeframes.
+- **Files/components affected**: `ml/ensemble.py`, `ml/registry/`, `api/router.py`, `paper_trader.py`, `live_trader.py`, `ml/replay_engine.py`.
+- **Known trade-offs**: Requires callers to pass the active OHLCV DataFrame into `ensemble.predict()`.
+- **Evidence/source in the project**: Commit `31382e0`; `ml/ensemble.py` lines 86–175; `REVIEW_LOG.md` Pass 13.
+- **Reason status**: **Verified** (verified by unit tests and live prediction endpoints).
 
 ---
 

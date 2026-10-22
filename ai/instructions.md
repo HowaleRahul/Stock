@@ -33,7 +33,7 @@ This document establishes operational directives, architectural constraints, and
 ### 2.2 Frontend Architecture
 * **Active Surface**: The active frontend is in `frontend/` (React 19 + TypeScript + Vite + Tailwind CSS 4 + React Router 7).
 * **Vite Proxy & Base Path**: The SPA is hosted under `/app/` (`base: "/app/"` in `frontend/vite.config.ts`). In development, Vite proxies `/api`, `/docs`, and `/openapi.json` to the backend on `http://127.0.0.1:8000`.
-* **Legacy Subsystems**: `frontend_legacy/` (Vanilla JS) and `web/` (React JS prototype) are deprecated. Do not add new features to `frontend_legacy` or `web`.
+* **Legacy Subsystems**: `frontend_legacy/` (Vanilla JS) and `web/` (React JS prototype) were purged during repository consolidation (Pass 13). Only `frontend/` is maintained.
 * **Chart Rendering**: Charting uses TradingView Lightweight Charts v5. Charts must be properly removed via `chart.remove()` on React unmounts to prevent detached DOM memory leaks and resize observer exceptions (verified in `frontend/src/components/ChartWidget.tsx`).
 
 ---
@@ -108,9 +108,13 @@ Before committing any modifications or creating PRs, agents must execute the fol
 
 4. **Python Automated Test Suite**:
    ```powershell
-   venv\Scripts\pytest -q tests/test_multi_asset.py tests/test_phase2_adversarial_sdet.py tests/test_phase2_security.py tests/test_replay_isolation.py tests/test_swing_toolkit.py
+   # Run all 131 offline unit tests hermetically without requiring Docker/PostgreSQL:
+   venv\Scripts\pytest -m "not database" -q
+
+   # Run full 148 unit and database integration tests when Docker is online:
+   venv\Scripts\pytest -q
    ```
-   All offline unit and regression test suites must pass. Note: Tests requiring live PostgreSQL connection will fail if Docker container `trading_timescaledb` is not running.
+   All hermetic unit tests must pass 100% offline. Full integration tests run automatically when `trading_timescaledb` is healthy.
 
 ---
 
@@ -148,7 +152,7 @@ Future agents must pause and seek explicit USER approval before performing any o
 2. Altering live trading capital allocations or risk parameters in `config.json`.
 3. Executing database drop, truncate, or schema migration scripts on production databases.
 4. Upgrading third-party dependencies with breaking changes (e.g., major version upgrades to pandas, SQLAlchemy, or React).
-5. Removing deprecated modules (`frontend_legacy/` or `web/`).
+5. Removing or renaming active trading setups, risk caps, or database tables.
 
 ---
 
@@ -161,6 +165,7 @@ Future agents must pause and seek explicit USER approval before performing any o
 | Five core setups contract in `SetupEngine` | **Existing Convention** | `setups/engine.py` line 30 |
 | Kelly sizing capped at 2% risk | **Existing Convention** | `ml/risk_engine.py` line 5 |
 | Options buying only (no naked selling) | **Existing Convention** | `ml/options_engine.py` line 11 |
-| Unification of batch model and continuous ML bundle deployment | **Recommended Rule** | Not yet implemented; documented in technical debt |
-| Redis-backed rate limiting for multi-worker Uvicorn deployment | **Recommended Rule** | Currently in-memory `TTLCache`; needed if scaling workers |
-| Consolidation of legacy frontend directories (`frontend_legacy`, `web`) | **Recommended Rule** | Deprecated directories remain in workspace |
+| Unification of batch model and continuous ML bundle deployment | **Existing Convention** | `ml/ensemble.py` Pass 13 |
+| Hermetic test suite execution via `@pytest.mark.database` | **Existing Convention** | `conftest.py` & `pytest.ini` Pass 13 |
+| Consolidated single React 19 SPA | **Existing Convention** | `frontend/` (legacy frontends deleted) |
+| Redis-backed rate limiting for multi-worker Uvicorn deployment | **Recommended Rule** | `REDIS_URL` setting added; Redis adapter next |
