@@ -1,26 +1,28 @@
 """
 SetupEngine — F&O-Optimized Orchestrator
 
-Runs all registered technical setups against index OHLCV data to generate
-signals for Futures & Options trading decisions.
+Runs registered technical and institutional setups against price and derivative data to generate
+signals for Futures & Options and equity trading decisions.
 
-All setups operate on the underlying index price action (NIFTY, BANKNIFTY).
-The DerivativeEngine then translates these spot signals into F&O trade plans.
-
-Included Setups (all applicable to F&O index trading):
+Included Core Setups:
 - MA Crossover: Trend direction on index
-- RSI: Overbought/oversold extremes for mean-reversion F&O plays
-- MACD: Momentum confirmation for directional F&O trades
-- Bollinger Bands: Squeeze/breakout for volatility-based F&O entries
-- Breakout: Donchian channel breakout for trend-following F&O
-- VWAP: Volume-weighted price for intraday F&O scalping
+- RSI: Overbought/oversold extremes for mean-reversion
+- MACD: Momentum confirmation for directional trades
+- Bollinger Bands: Squeeze/breakout for volatility-based entries
+- Breakout: Donchian channel breakout for trend-following
+- VWAP: Volume-weighted price for intraday scalping
+
+Institutional & Advanced Setups (from research repositories):
+- VCP: Minervini Volatility Contraction Pattern (from claude-trading-skills)
+- Options PCR: Live NSE Put-Call Ratio & Max Pain (from nsepython & Bharat-SM-Data)
+- Piotroski F-Score: 9-point fundamental health (from staskh/trading_skills)
 """
 
 from __future__ import annotations
 
 import logging
 import inspect
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 
@@ -37,9 +39,9 @@ logger = logging.getLogger("trading.setups.engine")
 
 
 class SetupEngine:
-    """Runs all F&O-relevant technical setups against an index OHLCV DataFrame."""
+    """Runs technical and institutional setups against OHLCV and market data."""
 
-    def __init__(self) -> None:
+    def __init__(self, include_advanced: bool = False) -> None:
         self.setups: List[BaseSetup] = [
             MACrossoverSetup(),
             RSISetup(),
@@ -48,9 +50,17 @@ class SetupEngine:
             BreakoutSetup(),
             VWAPSetup(),
         ]
+        if include_advanced:
+            try:
+                from setups.vcp_setup import VCPSetup
+                from setups.options_setup import OptionsSetup
+                from setups.piotroski_setup import PiotroskiSetup
+                self.setups.extend([VCPSetup(), OptionsSetup(), PiotroskiSetup()])
+            except Exception as e:
+                logger.debug(f"Could not load advanced setups: {e}")
 
     def evaluate_with_regime(self, df: pd.DataFrame, ticker: str = "") -> tuple[dict, List[SetupSignal]]:
-        """Run every registered setup against index price data.
+        """Run every registered setup against price data.
 
         Args:
             df: OHLCV DataFrame with columns ``time, open, high, low,
@@ -62,10 +72,10 @@ class SetupEngine:
             ``SetupSignal`` — one per setup.
         """
         results: List[SetupSignal] = []
-        
+
         # Detect Market Regime for confidence modulation
         regime_data = RegimeDetector.detect(df)
-        
+
         for setup in self.setups:
             try:
                 sig = inspect.signature(setup.evaluate)
@@ -73,9 +83,9 @@ class SetupEngine:
                     signal = setup.evaluate(df, ticker=ticker)
                 else:
                     signal = setup.evaluate(df)
-                
+
                 # Regime-based confidence weighting for F&O
-                if regime_data["regime"] == "range-bound":
+                if regime_data.get("regime") == "range-bound":
                     # Trend setups are weak in range-bound — reduce confidence
                     if setup.name in ["MA Crossover", "MACD"]:
                         if signal.confidence > 0.0:
@@ -86,14 +96,14 @@ class SetupEngine:
                         if signal.confidence > 0.0:
                             signal.confidence = min(1.0, signal.confidence * 1.15)
                             signal.reasoning += " (Confidence boosted: range-bound regime favorable for mean-reversion)."
-                            
+
                 # Hard Gating: No bullish F&O entries in crash regime
-                if regime_data["regime"] == "crash":
+                if regime_data.get("regime") == "crash":
                     if signal.signal == "bullish":
                         signal.confidence = 0.0
                         signal.signal = "neutral"
                         signal.reasoning += " [SYSTEM BLOCK: Crash Regime — bullish F&O entries gated.]"
-                        
+
                 results.append(signal)
             except Exception as e:
                 logger.warning(f"Setup '{setup.name}' raised an error: {e}")
@@ -105,7 +115,7 @@ class SetupEngine:
                         reasoning=f"Evaluation error: {str(e)}",
                     )
                 )
-                
+
         return regime_data, results
 
     def evaluate_all(self, df: pd.DataFrame, ticker: str = "") -> List[SetupSignal]:

@@ -1,0 +1,227 @@
+{
+  "version": 1,
+  "last_update": "2026-10-24T14:09:25.541405",
+  "total_fo_trades": 3,
+  "options_wins": 3,
+  "options_losses": 0,
+  "futures_wins": 0,
+  "futures_losses": 0,
+  "weights": {
+    "NIFTY": {
+      "trending": {
+        "ITM": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.12,
+          "n": 6
+        },
+        "ATM": {
+          "alpha": 8.0,
+          "beta": 2.0,
+          "ewma": 0.34274456249999996,
+          "n": 10
+        },
+        "OTM": {
+          "alpha": 3.0,
+          "beta": 3.0,
+          "ewma": 0.05,
+          "n": 6
+        },
+        "FUTURES": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.1,
+          "n": 6
+        }
+      },
+      "rangebound": {
+        "ITM": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.12,
+          "n": 6
+        },
+        "ATM": {
+          "alpha": 6.0,
+          "beta": 2.0,
+          "ewma": 0.224925,
+          "n": 8
+        },
+        "OTM": {
+          "alpha": 3.0,
+          "beta": 3.0,
+          "ewma": 0.05,
+          "n": 6
+        },
+        "FUTURES": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.1,
+          "n": 6
+        }
+      }
+    },
+    "BANKNIFTY": {
+      "trending": {
+        "ITM": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.12,
+          "n": 6
+        },
+        "ATM": {
+          "alpha": 6.0,
+          "beta": 2.0,
+          "ewma": 0.224925,
+          "n": 8
+        },
+        "OTM": {
+          "alpha": 3.0,
+          "beta": 3.0,
+          "ewma": 0.05,
+          "n": 6
+        },
+        "FUTURES": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.1,
+          "n": 6
+        }
+      },
+      "rangebound": {
+        "ITM": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.12,
+          "n": 6
+        },
+        "ATM": {
+          "alpha": 6.0,
+          "beta": 2.0,
+          "ewma": 0.224925,
+          "n": 8
+        },
+        "OTM": {
+          "alpha": 3.0,
+          "beta": 3.0,
+          "ewma": 0.05,
+          "n": 6
+        },
+        "FUTURES": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.1,
+          "n": 6
+        }
+      }
+    },
+    "SENSEX": {
+      "trending": {
+        "ITM": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.12,
+          "n": 6
+        },
+        "ATM": {
+          "alpha": 6.0,
+          "beta": 2.0,
+          "ewma": 0.224925,
+          "n": 8
+        },
+        "OTM": {
+          "alpha": 3.0,
+          "beta": 3.0,
+          "ewma": 0.05,
+          "n": 6
+        },
+        "FUTURES": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.1,
+          "n": 6
+        }
+      },
+      "rangebound": {
+        "ITM": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.12,
+          "n": 6
+        },
+        "ATM": {
+          "alpha": 6.0,
+          "beta": 2.0,
+          "ewma": 0.224925,
+          "n": 8
+        },
+        "OTM": {
+          "alpha": 3.0,
+          "beta": 3.0,
+          "ewma": 0.05,
+          "n": 6
+        },
+        "FUTURES": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.1,
+          "n": 6
+        }
+      }
+    },
+    "FINNIFTY": {
+      "trending": {
+        "ITM": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.12,
+          "n": 6
+        },
+        "ATM": {
+          "alpha": 6.0,
+          "beta": 2.0,
+          "ewma": 0.224925,
+          "n": 8
+        },
+        "OTM": {
+          "alpha": 3.0,
+          "beta": 3.0,
+          "ewma": 0.05,
+          "n": 6
+        },
+        "FUTURES": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.1,
+          "n": 6
+        }
+      },
+      "rangebound": {
+        "ITM": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.12,
+          "n": 6
+        },
+        "ATM": {
+          "alpha": 6.0,
+          "beta": 2.0,
+          "ewma": 0.224925,
+          "n": 8
+        },
+        "OTM": {
+          "alpha": 3.0,
+          "beta": 3.0,
+          "ewma": 0.05,
+          "n": 6
+        },
+        "FUTURES": {
+          "alpha": 4.0,
+          "beta": 2.0,
+          "ewma": 0.1,
+          "n": 6
+        }
+      }
+    }
+  }
+}

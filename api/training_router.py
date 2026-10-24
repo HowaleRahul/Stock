@@ -60,6 +60,7 @@ class TrainingStatus(BaseModel):
     mode: str
     market_status: Dict[str, Any]
     portfolio: Optional[Dict[str, Any]] = None
+    replay_telemetry: Optional[Dict[str, Any]] = None
     cycles: int = 0
     logs: List[str]
     target_index: Optional[str] = "ALL"
@@ -192,13 +193,22 @@ async def stop_training(
     _api_key: str = Depends(get_api_key),
     _rate_limit: bool = Depends(rate_limiter(10))
 ):
-    global is_training
+    global is_training, training_thread
     with _lock:
         if not is_training and (training_thread is None or not training_thread.is_alive()):
             return {"status": "not_running"}
 
-    stop_event.set()
-    return {"status": "stopping"}
+        stop_event.set()
+        is_training = False
+
+    # Perform cooperative join with brief timeout in background thread to avoid blocking event loop
+    if training_thread and training_thread.is_alive():
+        try:
+            await asyncio.to_thread(training_thread.join, 1.5)
+        except Exception:
+            pass
+
+    return {"status": "stopped"}
 
 
 @router.get("/status", response_model=TrainingStatus)
@@ -206,16 +216,18 @@ async def get_status(
     _rate_limit: bool = Depends(rate_limiter(60))
 ):
     with _lock:
-        still_running = is_training or (training_thread is not None and training_thread.is_alive())
+        is_stopping = stop_event.is_set()
+        still_running = (not is_stopping) and (is_training or (training_thread is not None and training_thread.is_alive()))
         telemetry = get_training_telemetry()
         current_logs = list(training_logs)
 
         p_data = telemetry.get("portfolio") or {}
         return {
             "is_training": still_running,
-            "mode": telemetry.get("mode", current_training_mode if still_running else "IDLE"),
+            "mode": "IDLE" if is_stopping else telemetry.get("mode", current_training_mode if still_running else "IDLE"),
             "market_status": telemetry.get("market_status", get_market_status("NSE")),
             "portfolio": telemetry.get("portfolio"),
+            "replay_telemetry": telemetry.get("replay_telemetry"),
             "cycles": telemetry.get("cycles", 0),
             "logs": current_logs,
             "target_index": p_data.get("target_index", "ALL"),

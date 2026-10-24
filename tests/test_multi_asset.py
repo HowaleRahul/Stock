@@ -115,3 +115,34 @@ def test_continuous_trainer_dry_run_for_fo():
     assert X is not None and len(X) == len(y) and not X.empty
     assert "regime_val" in X.columns
     assert "regime_adx" in X.columns
+
+
+def test_continuous_trainer_schema_reset_pd_index_safety():
+    """Verify _reset_if_feature_schema_changed never evaluates ambiguous truth value of pd.Index."""
+    from ml.continuous_trainer import _reset_if_feature_schema_changed
+    from sklearn.linear_model import SGDClassifier
+
+    model = SGDClassifier(loss="log_loss")
+    scaler = StandardScaler()
+
+    # Fit initial scaler on a 2-column DataFrame
+    initial_df = pd.DataFrame({"regime_val": [0.0, 1.0], "regime_adx": [15.0, 25.0]})
+    scaler.fit(initial_df)
+
+    # 1. Calling with identical schema using a pd.Index (e.g. df.columns)
+    new_model, new_scaler = _reset_if_feature_schema_changed(model, scaler, initial_df, initial_df.columns)
+    assert new_model is model
+    assert new_scaler is scaler
+
+    # 2. Calling with feature_names=None
+    new_model2, new_scaler2 = _reset_if_feature_schema_changed(model, scaler, initial_df, None)
+    assert new_model2 is model
+    assert new_scaler2 is scaler
+
+    # 3. Calling with modified schema (columns added) safely triggers reset without Index exception
+    altered_df = pd.DataFrame({"regime_val": [0.0], "regime_adx": [15.0], "new_feat": [1.0]})
+    reset_model, reset_scaler = _reset_if_feature_schema_changed(model, scaler, altered_df, altered_df.columns)
+    assert reset_model is not model
+    assert reset_scaler is not scaler
+    assert getattr(reset_scaler, "n_features_in_", None) is None
+

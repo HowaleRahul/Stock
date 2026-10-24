@@ -6,8 +6,9 @@ This document establishes operational directives, architectural constraints, and
 
 ## 1. Project-Specific Rules
 
-### 1.0 Compulsory Project Brain Synchronization (Strictly Enforced)
-* **Always Update the Brain Without Fail**: Whenever ANY change, bug fix, feature addition, refactoring, dependency update, file removal, or architectural adjustment is made to this codebase, the project brain files in `ai/` (`current-state.md`, `decisions.md`, `known-issues.md`, `instructions.md`) and `REVIEW_LOG.md` **MUST** be updated accordingly without fail.
+### 1.0 Compulsory Project Brain Synchronization (Strictly Enforced Across All Sessions)
+* **Always Update the Brain Without Fail**: In ANY and ALL chats or sessions on this project, whenever ANY change, bug fix, feature addition, refactoring, dependency update, file removal, or architectural adjustment is made to this codebase, the project brain files in `ai/` (`current-state.md`, `decisions.md`, `known-issues.md`, `instructions.md`) and `REVIEW_LOG.md` **MUST** be updated immediately and thoroughly without fail.
+* **Non-Negotiable Pre-Condition**: No update, goal, prompt, or task is considered complete until all affected components, architectural decisions, and verification steps are accurately reflected in the brain documentation.
 * **Definition of Done**: No coding task, audit, or refactoring is finished until the brain documentation has been verified and updated to mirror the exact current reality of the codebase.
 
 ### 1.1 Non-Negotiable Operational Safety
@@ -74,7 +75,8 @@ This document establishes operational directives, architectural constraints, and
 | File / Module | Reason for Caution |
 |---|---|
 | `api/auth.py` | Governs rate limiting, reverse-proxy header trust, and API key verification. Changes here can inadvertently expose the system to unauthorized access or lock out valid clients. |
-| `api/broker.py` | Contains live order execution scaffolding. Must remain locked in fail-closed mode until official exchange approval and dedicated broker tests are implemented. |
+| `api/broker.py` | Contains live order execution adapters (`BrokerAPI`, `SmartAPIBroker`). Must remain locked in fail-closed mode unless `BROKER_MODE=live`, `WHITELISTED_IP`, and official exchange algo ID are verified. |
+| `data/fx_fetcher.py` & `data/news_fetcher.py` | Governs external public API integrations (ECB Frankfurter FX & Indian financial press RSS feed). Must always maintain graceful fallback paths without blocking the event loop. |
 | `ml/risk_engine.py` | Calculates Kelly fraction, stop-loss, take-profit, and probability of ruin. Logic alterations directly impact capital preservation and position sizing. |
 | `paper_trader.py` | Main autonomous daemon managing real-time portfolio balance, trade entries, exits, and kill-switch execution. |
 | `models/models.py` & `models/init_db.py` | Defines TimescaleDB hypertables and primary key composite constraints. Schema modifications require coordinated migration and TimescaleDB hypertable adjustments. |

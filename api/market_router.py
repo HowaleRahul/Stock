@@ -347,3 +347,19 @@ async def get_option_tick(
     }
 
 
+@router.get("/news-sentiment/{ticker}")
+async def get_index_news_sentiment(
+    ticker: str,
+    _rate_limit: bool = Depends(rate_limiter(60))
+):
+    """
+    Returns live Indian market news headlines and VADER financial sentiment metrics
+    for an F&O underlying index or stock (NIFTY, BANKNIFTY, SENSEX).
+    """
+    from data.news_fetcher import NewsFetcher
+    clean = ticker.strip().upper()
+    summary = await NewsFetcher.get_sentiment_summary(clean)
+    return summary
+
+
+

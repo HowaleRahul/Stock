@@ -37,6 +37,9 @@ from ml.trade_logger import TradeLogger
 from ml.reinforcement_learner import ReinforcementLearner
 from ml.drift_detector import DriftDetector
 from ml.options_engine import DerivativeEngine
+from ml.circuit_breaker import DrawdownCircuitBreaker
+from ml.agent_reflection import AgentReflector
+from ml.multi_agent_consensus import MultiAgentConsensusEngine
 from ml.assets import get_fo_name
 from api.notifier import notifier
 from data.market_hours import get_market_status, is_market_open
@@ -189,6 +192,8 @@ async def run_loop():
     learner = ReinforcementLearner()
     detector = DriftDetector()
     opt_engine = DerivativeEngine()
+    circuit_breaker = DrawdownCircuitBreaker()
+    agent_reflector = AgentReflector()
 
     await ensure_schema()
     
@@ -350,14 +355,39 @@ async def run_loop():
                 journal_events.append(exit_record)
                 
                 notifier.send_exit_alert(trade, is_live=False)
-                # Update RL loop
+
+                # Update RL loop with risk-adjusted reward shaping (R-multiples)
                 if trade.get("setup_signals"):
                     learner.update_from_trade(
                         setup_signals=trade["setup_signals"],
                         regime=trade.get("regime", "unknown"),
                         pnl_pct=net_pnl_pct,
-                        is_win=net_pnl_pct > 0
+                        is_win=net_pnl_pct > 0,
+                        risk_pct=trade.get("risk_pct", 0.02)
                     )
+
+                # Update F&O strike contextual bandit (FOLearner)
+                if trade.get("is_fo") or trade.get("is_options"):
+                    try:
+                        opt_engine.fo_learner.update_from_trade(trade, net_pnl_pct=net_pnl_pct)
+                    except Exception as fo_err:
+                        logger.debug(f"FOLearner update error: {fo_err}")
+
+                # Post-Trade Reflection Memory (TradingAgents architecture)
+                try:
+                    reflection = agent_reflector.reflect_on_trade(
+                        trade=trade,
+                        pnl_pct=net_pnl_pct,
+                        cash_pnl=cash_pnl,
+                        exit_reason=exit_reason,
+                        bars_held=bars_held
+                    )
+                    logger.info(f"🧠 [AGENT REFLECTION] {reflection.lesson}")
+                except Exception as ref_err:
+                    logger.debug(f"Agent reflection error: {ref_err}")
+
+                # Record outcome into Drawdown Circuit Breaker
+                circuit_breaker.record_trade_outcome(pnl_pct=net_pnl_pct, cash_pnl=cash_pnl)
 
                 logger.info(
                     f"[CLOSED] {ticker} | Reason: {exit_reason} | "
@@ -433,8 +463,18 @@ async def run_loop():
             break
 
         # =================================================================
-        # PHASE 2: Scan for New Entries (with full Risk Engine)
+        # PHASE 2: Scan for New Entries (with full Risk Engine & Gates)
         # =================================================================
+        # Drawdown Circuit Breaker Gate (claude-trading-skills)
+        circuit_decision = circuit_breaker.evaluate(current_capital=account['capital'])
+        if not circuit_decision.is_allowed:
+            logger.warning(
+                f"🚫 [CIRCUIT BREAKER GATE] New trades suspended: {circuit_decision.reason} | "
+                f"Status: {circuit_decision.status} | Consecutive Losses: {circuit_decision.consecutive_losses}"
+            )
+            await asyncio.sleep(3600)
+            continue
+
         open_tickers = [t.get('underlying_ticker', t['ticker']) for t in updated_trades if t['status'] == 'OPEN']
 
         for ticker in get_scanning_tickers():
@@ -464,6 +504,20 @@ async def run_loop():
             # Only consider trades where AI is confident enough
             min_conf = float(current_config.get("min_ai_confidence", MIN_AI_CONFIDENCE))
             if prob < min_conf or signal not in ("bullish", "bearish"):
+                continue
+
+            # Multi-Agent Adversarial Debate & Consensus confirmation (TradingAgents)
+            consensus = MultiAgentConsensusEngine.evaluate(
+                ticker=ticker,
+                regime_data=regime,
+                setup_signals=setups,
+                options_data={"pcr_oi": 1.0, "gex_regime": "NEUTRAL"}
+            )
+            if consensus.recommended_action == "REJECT_TRADE":
+                logger.info(
+                    f"🚫 [MULTI-AGENT REJECT] {ticker}: Chief Risk ruling: {consensus.chief_risk_ruling}. "
+                    f"Consensus: {consensus.consensus_signal} ({consensus.consensus_confidence:.2f})"
+                )
                 continue
 
             # --- Generate Full Trade Plan via Risk Engine ---

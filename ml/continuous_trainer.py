@@ -10,7 +10,7 @@ import yfinance as yf
 from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 from ml.features import enrich_with_macro_and_options, enrich_with_psychology_features, generate_triple_barrier_labels
-from ml.assets import asset_flags, barrier_config
+from ml.assets import asset_flags, barrier_config, FO_UNDERLYINGS
 from setups.engine import SetupEngine
 from data.market_hours import is_market_open, get_market_status
 from ml.live_market_learner import LiveMarketLearner
@@ -64,20 +64,39 @@ def save_model(model, scaler, feature_names, asset_class, timeframe):
 
 def _reset_if_feature_schema_changed(model, scaler, X, feature_names=None):
     """Avoid silently applying a persisted model to a different feature set."""
-    expected_count = getattr(scaler, "n_features_in_", None)
-    persisted_names = getattr(scaler, "feature_names_in_", None)
-    names_match = persisted_names is None or list(persisted_names) == list(feature_names or X.columns)
-    if expected_count is None or (expected_count == X.shape[1] and names_match):
-        return model, scaler
+    try:
+        expected_count = getattr(scaler, "n_features_in_", None)
+        persisted_names = getattr(scaler, "feature_names_in_", None)
+        if feature_names is not None:
+            current_names = [str(c) for c in list(feature_names)]
+        else:
+            current_names = [str(c) for c in list(X.columns)]
+
+        if persisted_names is None:
+            names_match = True
+        else:
+            names_match = list(persisted_names) == current_names
+
+        if expected_count is None or (expected_count == X.shape[1] and names_match):
+            return model, scaler
+    except Exception as e:
+        logger.warning("Error evaluating feature schema (%s); resetting incremental model.", e)
+        return SGDClassifier(loss="log_loss"), StandardScaler()
+
     logger.warning(
         "Feature schema changed from %s to %s columns; resetting the incremental model.",
         expected_count, X.shape[1],
     )
     return SGDClassifier(loss="log_loss"), StandardScaler()
 
-def generate_features_for_ticker(ticker, tf_config, asset_class="IN_INDEX_FO"):
+def generate_features_for_ticker(ticker, tf_config, asset_class="IN_INDEX_FO", stop_event=None):
+    if stop_event and stop_event.is_set():
+        return None, None
+
     logger.info(f"Downloading {ticker} history ({tf_config['period']} at {tf_config['tf']})...")
     df = yf.download(ticker, period=tf_config["period"], interval=tf_config["tf"], progress=False)
+    if stop_event and stop_event.is_set():
+        return None, None
     if df.empty or len(df) < 100:
         return None, None
     
@@ -88,9 +107,14 @@ def generate_features_for_ticker(ticker, tf_config, asset_class="IN_INDEX_FO"):
     
     try:
         df = enrich_with_macro_and_options(df, ticker, asset_class=asset_class)
+        if stop_event and stop_event.is_set():
+            return None, None
         df = enrich_with_psychology_features(df)
     except Exception as e:
         logger.error(f"Macro fetch failed: {e}")
+        return None, None
+
+    if stop_event and stop_event.is_set():
         return None, None
 
     # Compute ATR (required by feature extraction below)
@@ -128,6 +152,10 @@ def generate_features_for_ticker(ticker, tf_config, asset_class="IN_INDEX_FO"):
     
     min_periods = 100
     for i in range(min_periods, len(df)):
+        if stop_event and stop_event.is_set():
+            logger.info("Stop event signaled; aborting feature generation loop immediately.")
+            return None, None
+
         window_df = df.iloc[max(0, i - 300):i+1]
         label = labels[i]
         
@@ -167,6 +195,28 @@ def generate_features_for_ticker(ticker, tf_config, asset_class="IN_INDEX_FO"):
     valid_mask = ~X.isna().any(axis=1)
     X = X[valid_mask]
     y_labels = [y for i, y in enumerate(y_labels) if valid_mask.iloc[i]]
+
+    global _replay_telemetry
+    import datetime
+    wins = y_labels.count(1)
+    losses = y_labels.count(-1)
+    timeouts = y_labels.count(0)
+    win_rate = round((wins / (wins + losses) * 100), 1) if (wins + losses) > 0 else 0.0
+
+    _replay_telemetry = {
+        "target": ticker,
+        "asset_class": asset_class,
+        "timeframe": tf_config["tf"],
+        "total_simulated": len(X),
+        "wins": wins,
+        "losses": losses,
+        "timeouts": timeouts,
+        "win_rate": win_rate,
+        "tp_atr": tf_config.get("tp_atr", 2.0),
+        "sl_atr": tf_config.get("sl_atr", 1.0),
+        "max_hold": tf_config.get("max_hold", 20),
+        "last_updated": datetime.datetime.now().strftime("%H:%M:%S IST")
+    }
     
     return X, y_labels
 
@@ -177,6 +227,7 @@ _training_state_lock = threading.Lock()
 _live_learner: Optional[LiveMarketLearner] = None
 _current_mode: str = "IDLE"
 _total_training_cycles: int = 0
+_replay_telemetry: Optional[Dict[str, Any]] = None
 
 
 def get_training_telemetry() -> Dict[str, Any]:
@@ -188,6 +239,7 @@ def get_training_telemetry() -> Dict[str, Any]:
             "mode": _current_mode,
             "market_status": market_stat,
             "portfolio": portfolio,
+            "replay_telemetry": _replay_telemetry,
             "cycles": _total_training_cycles,
         }
 
@@ -274,7 +326,7 @@ def run_training_loop(
 
             log(
                 f"[LIVE CYCLE {_total_training_cycles}] Mode: {_current_mode} | "
-                f"NSE: {market_stat['session']} | Scanning live setups on NIFTY, BANKNIFTY & Equities..."
+                f"NSE: {market_stat['session']} | Scanning live setups on NIFTY, BANKNIFTY, SENSEX, FINNIFTY & MIDCPNIFTY..."
             )
 
             try:
@@ -294,17 +346,24 @@ def run_training_loop(
                 # 3. LIVE MARKET F&O MODEL TRAINING:
                 # Continuously retrains the AI Brain on live market ticks and option features
                 if _total_training_cycles % 3 == 0:
-                    target_sym = "^NSEI" if _live_learner.target_index in ("NIFTY", "ALL") else ("^NSEBANK" if _live_learner.target_index == "BANKNIFTY" else "^NSEI")
+                    chosen_idx = _live_learner.target_index if _live_learner and _live_learner.target_index and _live_learner.target_index != "ALL" else "NIFTY"
+                    target_sym = FO_UNDERLYINGS.get(chosen_idx, "^NSEI")
                     try:
                         live_tf = {"tf": "1h", "period": "60d", "tp_atr": 2.0, "sl_atr": 1.0, "max_hold": 40}
                         log(f"⚡ [LIVE F&O TRAINING] Retraining AI Brain on live incoming stream for {target_sym}...")
-                        X_live, y_live = generate_features_for_ticker(target_sym, live_tf, "IN_EQUITY")
+                        X_live, y_live = generate_features_for_ticker(target_sym, live_tf, "IN_INDEX_FO", stop_event=stop_event)
+                        if stop_event and stop_event.is_set():
+                            log("[STOP] Stop signal received during live feature extraction. Halting immediately.")
+                            with _training_state_lock:
+                                _current_mode = "STOPPED"
+                            break
+
                         if X_live is not None and len(X_live) > 0:
                             model, scaler = _reset_if_feature_schema_changed(model, scaler, X_live, X_live.columns)
                             scaler.partial_fit(X_live)
                             X_scaled = scaler.transform(X_live)
                             model.partial_fit(X_scaled, y_live, classes=classes)
-                            save_model(model, scaler, X_live.columns, "IN_EQUITY", "1h")
+                            save_model(model, scaler, X_live.columns, "IN_INDEX_FO", "1h")
                             log(f"🧠 [LIVE BRAIN UPDATED] Model fitted on {len(X_live)} live {target_sym} bars! Checkpoint saved.")
                     except Exception as live_train_err:
                         log(f"[WARNING] Live F&O training step error: {live_train_err}")
@@ -312,11 +371,15 @@ def run_training_loop(
             except Exception as live_err:
                 log(f"[WARNING] Live trading cycle error: {live_err}")
 
-            # Sleep in 1-second chunks for 15 seconds to allow responsive stopping
-            for _ in range(15):
-                if stop_event and stop_event.is_set():
+            # Responsive sleep: awakens instantly (<1ms) if stop_event is signaled
+            if stop_event:
+                if stop_event.wait(timeout=15.0):
+                    log("[STOP] Stop signal received. Halting training and live trading loop.")
+                    with _training_state_lock:
+                        _current_mode = "STOPPED"
                     break
-                time.sleep(1)
+            else:
+                time.sleep(15.0)
 
         else:
             with _training_state_lock:
@@ -327,6 +390,13 @@ def run_training_loop(
                 f"Running Continuous Historical Replay & Training until 09:15 AM IST next session."
             )
 
+            # Manage existing positions & scan latest session setups in offline mode
+            if _live_learner:
+                try:
+                    _live_learner.execute_live_cycle()
+                except Exception as learner_err:
+                    log(f"[WARNING] Learner cycle error: {learner_err}")
+
             asset_class = random.choice(list(TARGET_CLASSES.keys()))
             ticker = random.choice(TARGET_CLASSES[asset_class])
             base_config = random.choice(TIMEFRAME_CONFIGS)
@@ -335,7 +405,13 @@ def run_training_loop(
             log(f"[REPLAY] Target: {ticker} ({asset_class}) | Timeframe: {tf_config['tf']}")
 
             try:
-                X, y = generate_features_for_ticker(ticker, tf_config, asset_class)
+                X, y = generate_features_for_ticker(ticker, tf_config, asset_class, stop_event=stop_event)
+                if stop_event and stop_event.is_set():
+                    log("[STOP] Stop signal received during historical replay. Halting immediately.")
+                    with _training_state_lock:
+                        _current_mode = "STOPPED"
+                    break
+
                 if X is not None and len(X) > 0:
                     log(f"Simulated {len(X)} trades. Win: {y.count(1)}, Loss: {y.count(-1)}, Timeout: {y.count(0)}")
                     model, scaler = _reset_if_feature_schema_changed(model, scaler, X, X.columns)
@@ -349,13 +425,19 @@ def run_training_loop(
                 else:
                     log(f"Not enough data for {ticker}. Skipping...")
             except Exception as replay_err:
+                import traceback
+                logger.error("Historical training error: %s", traceback.format_exc())
                 log(f"[WARNING] Historical training error: {replay_err}")
 
-            # Sleep in 1-second chunks for 30 seconds
-            for _ in range(30):
-                if stop_event and stop_event.is_set():
+            # Responsive sleep: awakens instantly (<1ms) if stop_event is signaled
+            if stop_event:
+                if stop_event.wait(timeout=30.0):
+                    log("[STOP] Stop signal received. Halting training and live trading loop.")
+                    with _training_state_lock:
+                        _current_mode = "STOPPED"
                     break
-                time.sleep(1)
+            else:
+                time.sleep(30.0)
 
 
 def main():

@@ -13,7 +13,15 @@ def start_services():
         # 1. Start the FastAPI Backend
         print("[1/3] Starting Backend API (Uvicorn)...")
         api_proc = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "api.main:app", "--reload", "--port", "8000"],
+            [
+                sys.executable, "-m", "uvicorn", "api.main:app",
+                "--reload",
+                "--reload-dir", "api",
+                "--reload-dir", "ml",
+                "--reload-dir", "data",
+                "--reload-dir", "setups",
+                "--port", "8000"
+            ],
             cwd=os.getcwd()
         )
         processes.append(("Backend API", api_proc))

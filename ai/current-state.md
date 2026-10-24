@@ -74,6 +74,7 @@ Stock/
 │   ├── db.py                 # Async SQLAlchemy engine & connection check
 │   ├── schemas.py            # Pydantic input/output models
 │   ├── broker.py             # Broker API scaffolding & static IP check
+│   ├── broker_adapter.py     # Universal multi-broker client & high-fidelity matching engine
 │   ├── notifier.py           # Telegram notification dispatcher
 │   ├── catalog.py            # Hardcoded ticker autocomplete catalog
 │   ├── router.py             # Data pipeline & watchlist endpoints
@@ -87,8 +88,10 @@ Stock/
 ├── data/                     # Ingestion & Market Feeds
 │   ├── cleaner.py            # Corporate actions cleaning & string sanitization
 │   ├── fetcher.py            # Synchronous-to-async yfinance wrapper & aliases
+│   ├── fx_fetcher.py         # Frankfurter ECB Currency API (zero-auth USD/INR live & historical FX)
+│   ├── nse_feed.py           # Live NSE India option chain scraper (curl_cffi TLS, PCR, Max Pain, FII/DII)
 │   ├── market_hours.py       # IST market session management & holiday schedules
-│   ├── news_fetcher.py       # Financial news headline scraper
+│   ├── news_fetcher.py       # Real-time Indian Market RSS Feed & VADER financial sentiment engine
 │   ├── realtime_feed.py      # TradingView-ta & yfinance live quote cache
 │   ├── service.py            # TimescaleDB idempotent bulk upsert service
 │   ├── swing_watchlist.json  # Persisted active swing candidates
@@ -100,7 +103,7 @@ Stock/
 │
 ├── setups/                   # Technical Analysis Setups
 │   ├── base.py               # BaseSetup abstract interface & SetupSignal dataclass
-│   ├── engine.py             # SetupEngine orchestrator (5 core setups + regime)
+│   ├── engine.py             # SetupEngine orchestrator (6 core setups + optional advanced)
 │   ├── indicators.py         # Pure mathematical indicators (SMA, EMA, RSI, MACD, BB)
 │   ├── regime.py             # ADX-based Market Regime detector
 │   ├── ma_crossover.py       # Moving average crossover setup
@@ -108,6 +111,9 @@ Stock/
 │   ├── macd_setup.py         # MACD signal line crossover setup
 │   ├── bollinger_setup.py    # Bollinger Band squeeze & breakout setup
 │   ├── breakout_setup.py     # Donchian channel support/resistance breakout
+│   ├── vcp_setup.py          # Mark Minervini Volatility Contraction Pattern setup
+│   ├── piotroski_setup.py    # Piotroski F-Score fundamental accounting quality setup
+│   ├── options_setup.py      # Real-time Put-Call Ratio & strike Max-Pain setup
 │   ├── swing_toolkit_setup.py# BaseSetup adapter for Momentum Masters
 │   ├── swing_toolkit/        # Specialized Momentum Masters suite
 │   │   ├── universe.py       # Curated 50+ liquid Indian swing universe
@@ -124,9 +130,13 @@ Stock/
 │   ├── train.py              # Batch model training script
 │   ├── continuous_trainer.py # Incremental SGDClassifier online learner
 │   ├── risk_engine.py        # Kelly criterion, ATR stops, probability of ruin
+│   ├── circuit_breaker.py    # Account-level Drawdown Circuit Breaker & streak cooldown gate
+│   ├── agent_reflection.py   # Post-trade reflection memory engine & JSONL logger
+│   ├── multi_agent_consensus.py # Multi-Agent decision consensus (Tech, Deriv, Fund, Sent, Risk)
+│   ├── gex_engine.py         # Institutional Dealer Gamma Exposure (GEX) engine
 │   ├── options_engine.py     # Long options contract selection & Greek math
 │   ├── trade_logger.py       # Structured trade event logger
-│   ├── reinforcement_learner.py # Contextual Bandit (Beta prior + Thompson Sampling)
+│   ├── reinforcement_learner.py # Contextual Bandit (Beta prior, R-multiples, arm bandits)
 │   ├── journal_analyzer.py   # Meta-pattern profitability matrix & setup gating
 │   ├── replay_engine.py      # Historical bar-by-bar RL self-play simulator
 │   ├── drift_detector.py     # Kolmogorov-Smirnov distribution drift detector
@@ -146,7 +156,7 @@ Stock/
 │   └── package.json          # Node dependencies & Vite config
 │
 ├── scripts/                  # Migration & maintenance scripts
-└── tests/                    # 14 test suites covering 148 test cases (131 hermetic unit, 17 database)
+└── tests/                    # 16 test suites covering 176 test cases (100% passing)
 ```
 
 ---
@@ -186,8 +196,12 @@ Gated by `RegimeDetector`:
 ### 4.4 Machine Learning & Risk Intelligence
 - **Stacking Ensemble (`ml/ensemble.py`)**: Predicts directional probability and outputs feature contributions (XAI) using logistic regression weights. Falls back to unweighted heuristic voting when model artifacts or scalers are incompatible.
 - **Risk Engine (`ml/risk_engine.py`)**: Computes trade plans using Kelly criterion position sizing (capped at 2% capital risk), ATR-based stops and targets, minimum 1.5:1 Risk-to-Reward gating, and probability of ruin.
-- **Options Engine (`ml/options_engine.py`)**: Maps directional index signals to near-the-money long calls or puts (`CE`/`PE`), calculates Black-Scholes Greeks (delta, gamma, theta), and sizes contracts to round lot sizes.
-- **RL Contextual Bandit (`ml/reinforcement_learner.py`)**: Uses Thompson Sampling over Beta posteriors to adjust setup weights based on trade outcomes per market regime.
+- **Drawdown Circuit Breakers (`ml/circuit_breaker.py`)**: Account-level risk gate enforcing daily loss ceiling (2.0%), consecutive loss streak gate (3 losses triggers a 24-hour mandatory cooldown), and weekly (5%) / monthly (8%) drawdown hard ceilings.
+- **Post-Trade Reflection Memory (`ml/agent_reflection.py`)**: Automatically analyzes settled paper and live trades upon exit across all exit modes, extracting structured rules and persisting lessons to `logs/agent_reflections.jsonl`.
+- **Multi-Agent Consensus Engine (`ml/multi_agent_consensus.py`)**: Collaborative financial consensus engine featuring Technical, Derivatives, Fundamental, and Sentiment analyst agents, adversarial Bull vs. Bear debate, and Chief Risk Officer gating.
+- **Dealer Gamma Exposure Engine (`ml/gex_engine.py`)**: Computes Call/Put walls, Gamma Flip strike, and volatility pinning vs. acceleration regimes.
+- **Options Engine (`ml/options_engine.py`)**: Maps directional index signals to near-the-money long calls or puts (`CE`/`PE`), calculates Black-Scholes Greeks (delta, gamma, theta), sizes contracts to round lot sizes, and continuously trains the `FOLearner` strike contextual bandit.
+- **RL Contextual Bandit (`ml/reinforcement_learner.py`)**: Uses Thompson Sampling over Beta posteriors with Risk-Adjusted Reward Shaping (R-multiples), Adaptive Prior Discounting (`discount_priors`) for regime shifts, and `ExecutionArmBandit` hyperparameter adaptation.
 - **Journal Analyzer (`ml/journal_analyzer.py`)**: Discovers meta-patterns from trade history and suppresses setups with win rates below 40% in specific regimes.
 - **Historical Replay Engine (`ml/replay_engine.py`)**: High-speed bar-by-bar simulator with order execution at next bar's open and STT/slippage friction (0.05%).
 
@@ -302,8 +316,11 @@ Starts container `trading_timescaledb` on `127.0.0.1:5432` with volume `pgdata`.
 | **Options Engine** | Feature-complete | Verified | Black-Scholes Greeks, long CE/PE only; live execution blocked. |
 | **RL Contextual Bandit**| Feature-complete | Verified | Thompson Sampling updates setup weights on trade outcomes. |
 | **Replay Engine** | Feature-complete | Verified | Next-bar open execution, STT friction, isolated weights. |
-| **Continuous Trainer** | Feature-complete | Verified | SGDClassifier online partial_fit; artifacts not unified with batch. |
+| **Continuous Trainer** | Feature-complete | Verified | SGDClassifier online partial_fit + 24/7 offline historical replay telemetry & live portfolio scanning. |
 | **Walk-Forward Backtest**| Feature-complete | Verified | Real-world friction (0.1%), label-safe test window isolation. |
 | **API Authentication** | Production-ready | Verified | Fail-closed production default, timing-safe key comparison. |
-| **Active Frontend SPA** | Production-ready | Verified | 8 functional pages, TypeScript clean, Vite builds in ~6s. |
-| **Live Broker Execution**| Scaffolding only | Intentionally Blocked | SEBI compliance checks in place; order placement fails closed. |
+| **Public APIs (Frankfurter & RSS)** | Production-ready | Verified | Keyless ECB USD/INR rates + Indian Market RSS financial sentiment feed. |
+| **SmartAPI Broker** | Feature-complete | Verified | Angel One SmartAPI RFC 6238 TOTP auth + SEBI Algo-ID tagged execution. |
+| **Trade Dossier & History** | Production-ready | Verified | Full 360° trade specs modal (Greeks, SL/TP, trailing ratchet, AI conf, setups) + closed trade history table. |
+| **Active Frontend SPA** | Production-ready | Verified | 8 functional pages, TypeScript clean, Vite builds in <2s with sentiment pulse widget & trade dossier. |
+| **Live Broker Execution**| Scaffolding only | Intentionally Blocked | SEBI compliance checks in place; order placement fails closed without live flag. |

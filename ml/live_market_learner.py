@@ -18,6 +18,7 @@ import asyncio
 import uuid
 import logging
 from typing import Dict, Any, List, Optional, Callable
+from dataclasses import asdict
 import numpy as np
 import pandas as pd
 
@@ -28,6 +29,9 @@ from ml.risk_engine import RiskEngine
 from ml.options_engine import DerivativeEngine
 from ml.trade_logger import TradeLogger
 from ml.reinforcement_learner import ReinforcementLearner
+from ml.circuit_breaker import DrawdownCircuitBreaker
+from ml.agent_reflection import AgentReflector
+from ml.multi_agent_consensus import MultiAgentConsensusEngine
 from setups.engine import SetupEngine
 from api.notifier import notifier
 
@@ -104,6 +108,8 @@ class LiveMarketLearner:
         self.ai_brain = EnsembleModel(timeframe="1h")
         self.learner = ReinforcementLearner()
         self.derivative_engine = DerivativeEngine()
+        self.circuit_breaker = DrawdownCircuitBreaker()
+        self.agent_reflector = AgentReflector()
 
         try:
             from ml.continuous_trainer import load_or_create_model
@@ -149,7 +155,9 @@ class LiveMarketLearner:
             "derivative_type": self.derivative_type,
             "strike_preference": self.strike_preference,
             "fo_summary": self.derivative_engine.fo_learner.get_summary(),
+            "circuit_breaker": asdict(self.circuit_breaker.evaluate(self.capital)),
             "open_trades": list(self.open_trades),
+            "closed_trades": list(self.closed_trades)[-50:],
             "last_cycle_time": self.last_cycle_time,
         }
 
@@ -334,8 +342,25 @@ class LiveMarketLearner:
                         setup_signals=trade["setup_signals"],
                         regime=trade.get("regime", "trending"),
                         pnl_pct=net_pnl_pct,
-                        is_win=net_pnl_pct > 0
+                        is_win=net_pnl_pct > 0,
+                        risk_pct=trade.get("risk_pct", 0.02)
                     )
+
+                # Record outcome into Drawdown Circuit Breaker
+                self.circuit_breaker.record_trade_outcome(pnl_pct=net_pnl_pct, cash_pnl=cash_pnl)
+
+                # Post-Trade Reflection Memory (TradingAgents architecture)
+                try:
+                    reflection = self.agent_reflector.reflect_on_trade(
+                        trade=trade,
+                        pnl_pct=net_pnl_pct,
+                        cash_pnl=cash_pnl,
+                        exit_reason=exit_reason,
+                        bars_held=bars_held
+                    )
+                    self.log(f"🧠 [AGENT REFLECTION] {reflection.lesson}")
+                except Exception as ref_err:
+                    logger.debug(f"Agent reflection error: {ref_err}")
 
                 # =================================================================
                 # 3. ONLINE INCREMENTAL ML MODEL TRAINING (LIVE MARKET HOURS):
@@ -394,6 +419,15 @@ class LiveMarketLearner:
         Scans instruments for new setups, evaluates AI Brain predictions,
         and opens paper positions in Futures, Options, or Equities according to budget.
         """
+        # Drawdown Circuit Breaker Gate (claude-trading-skills)
+        circuit_decision = self.circuit_breaker.evaluate(self.capital)
+        if not circuit_decision.is_allowed:
+            self.log(
+                f"🚫 [CIRCUIT BREAKER GATE] Live scanning halted: {circuit_decision.reason} | "
+                f"Status: {circuit_decision.status} | Consecutive Losses: {circuit_decision.consecutive_losses}"
+            )
+            return
+
         open_tickers = {t.get("underlying_ticker", t["ticker"]) for t in self.open_trades}
         risk_engine = RiskEngine(historical_trades=self.closed_trades)
 
@@ -440,7 +474,24 @@ class LiveMarketLearner:
                 prob = min(0.98, prob + 0.08)
 
             if prob < self.min_ai_confidence or signal not in ("bullish", "bearish"):
+                self.log(f"[SCAN] {ticker}: {signal.upper()} ({prob*100:.1f}% AI Conf, TV: {tv_rec}). Below {self.min_ai_confidence*100:.0f}% threshold. No entry.")
                 continue
+
+            # Multi-Agent Adversarial Debate & Consensus confirmation (TradingAgents)
+            consensus = MultiAgentConsensusEngine.evaluate(
+                ticker=ticker,
+                regime_data=regime_data,
+                setup_signals=setups,
+                options_data={"pcr_oi": 1.0, "gex_regime": "NEUTRAL"}
+            )
+            if consensus.recommended_action == "REJECT_TRADE":
+                self.log(
+                    f"🚫 [MULTI-AGENT REJECT] {ticker}: Chief Risk ruling: {consensus.chief_risk_ruling}. "
+                    f"Consensus: {consensus.consensus_signal} ({consensus.consensus_confidence:.2f})"
+                )
+                continue
+
+            self.log(f"[SCAN HIT] {ticker}: {signal.upper()} ({prob*100:.1f}% AI Conf, TV: {tv_rec}). Qualifying setup found! Sizing F&O derivative plan...")
 
             # Generate spot plan via Risk Engine
             spot_plan = risk_engine.generate_trade_plan(

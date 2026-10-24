@@ -100,6 +100,7 @@ class ReinforcementLearner:
         regime: str,
         pnl_pct: float,
         is_win: bool,
+        risk_pct: Optional[float] = None,
         save: bool = True,
     ) -> None:
         """
@@ -111,10 +112,16 @@ class ReinforcementLearner:
             regime: The market regime at entry time
             pnl_pct: The trade's P&L as a decimal (e.g., 0.02 = 2%)
             is_win: Whether the trade was a winner
+            risk_pct: Optional trade risk percentage at entry for R-multiple reward scaling
             save: Whether to persist state to disk immediately
         """
         weights = self._state["weights"]
         ewma_decay = 0.1  # How fast old observations decay (higher = faster)
+
+        # Risk-adjusted reward shaping via R-multiples (claude-trading-skills & TradingAgents)
+        base_risk = max(0.005, float(risk_pct if risk_pct is not None else 0.02))
+        r_multiple = abs(pnl_pct) / base_risk
+        step_delta = min(3.0, max(0.5, r_multiple))
 
         for setup in setup_signals:
             name = setup.get("name", "")
@@ -138,11 +145,11 @@ class ReinforcementLearner:
 
             state = weights[name][regime]
 
-            # Update Beta distribution
+            # Update Beta distribution with risk-adjusted step delta
             if is_win:
-                state["alpha"] += 1.0
+                state["alpha"] += step_delta
             else:
-                state["beta"] += 1.0
+                state["beta"] += step_delta
 
             # Update EWMA reward
             state["ewma_reward"] = (
@@ -155,6 +162,41 @@ class ReinforcementLearner:
         self._state["version"] += 1
         if save:
             self._save_state()
+
+    def discount_priors(self, regime: Optional[str] = None, decay: float = 0.95) -> int:
+        """
+        Applies exponential decay to learned setup priors towards the neutral prior (1.0, 1.0).
+        Preserves the win-rate ratio while expanding the posterior variance to re-enable
+        Thompson sampling exploration upon regime changes or concept drift.
+
+        Args:
+            regime: Target regime to decay, or None for all regimes.
+            decay: Decay factor in (0.0, 1.0).
+
+        Returns:
+            Number of setup-regime pairs updated.
+        """
+        weights = self._state["weights"]
+        updated_count = 0
+
+        for setup_name, regimes in weights.items():
+            target_regimes = [regime] if (regime and regime in regimes) else list(regimes.keys())
+            for r in target_regimes:
+                state = regimes[r]
+                old_alpha = state.get("alpha", 1.0)
+                old_beta = state.get("beta", 1.0)
+
+                state["alpha"] = max(1.0, 1.0 + (old_alpha - 1.0) * decay)
+                state["beta"] = max(1.0, 1.0 + (old_beta - 1.0) * decay)
+                updated_count += 1
+
+        if updated_count > 0:
+            self._update_global_weights()
+            self._state["version"] += 1
+            self._save_state()
+            logger.info(f"[RL] Discounted priors for {updated_count} pairs (decay={decay})")
+
+        return updated_count
 
     # -------------------------------------------------------------------
     # Compute Current Weights
@@ -382,4 +424,60 @@ class ReinforcementLearner:
         )
 
         return report
+
+
+class ExecutionArmBandit:
+    """
+    Multi-Armed Bandit for dynamically selecting and tuning execution parameters
+    (e.g., ATR trailing stop multipliers: 0.8x, 1.0x, 1.5x, 2.0x).
+    
+    Incorporates continuous parameter adaptation from `tradermonty/claude-trading-skills`.
+    Uses Thompson Sampling over Beta posteriors updated via trade profit outcomes.
+    """
+
+    def __init__(self, arms: Optional[List[float]] = None):
+        self.arms = arms or [0.8, 1.0, 1.5, 2.0]
+        self.arm_stats: Dict[float, Dict[str, Any]] = {
+            arm: {"alpha": 1.0, "beta": 1.0, "pulls": 0, "total_reward": 0.0}
+            for arm in self.arms
+        }
+
+    def select_arm(self) -> float:
+        """Sample from each arm's posterior distribution and pick the highest."""
+        samples = {}
+        for arm, stats in self.arm_stats.items():
+            alpha = max(0.1, float(stats.get("alpha", 1.0)))
+            beta_val = max(0.1, float(stats.get("beta", 1.0)))
+            samples[arm] = float(np.random.beta(alpha, beta_val))
+        return max(samples, key=samples.get)
+
+    def update_arm(self, arm: float, pnl_pct: float, is_win: bool, risk_pct: float = 0.02) -> None:
+        """Updates the posterior of the executed arm based on real trade result."""
+        if arm not in self.arm_stats:
+            self.arm_stats[arm] = {"alpha": 1.0, "beta": 1.0, "pulls": 0, "total_reward": 0.0}
+
+        stats = self.arm_stats[arm]
+        stats["pulls"] += 1
+        stats["total_reward"] += pnl_pct
+
+        base_risk = max(0.005, risk_pct)
+        r_multiple = abs(pnl_pct) / base_risk
+        delta = min(3.0, max(0.5, r_multiple))
+
+        if is_win:
+            stats["alpha"] += delta
+        else:
+            stats["beta"] += delta
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Returns diagnostic statistics for all arms."""
+        return {
+            str(arm): {
+                "pulls": stats["pulls"],
+                "total_reward": round(stats["total_reward"], 4),
+                "expected_win_prob": round(stats["alpha"] / (stats["alpha"] + stats["beta"]), 3),
+            }
+            for arm, stats in self.arm_stats.items()
+        }
+
 

@@ -341,3 +341,214 @@
 - Frontend TypeScript check (`npx tsc -p tsconfig.app.json --noEmit`): passed with 0 errors.
 - Frontend production build (`npm run build`): passed in 1.46s.
 - System integrity: `iterate.txt` verified present and unmodified.
+
+---
+
+## Pass 15 — Public APIs Audit & Production Integrations (Frankfurter, Indian News Sentiment, Angel One SmartAPI)
+
+### Public APIs Analysis & Selection
+- Audited the public-apis repository (`https://github.com/public-apis/public-apis.git`) to identify APIs suitable for the Indian stock market F&O trading workstation.
+- Selected and integrated 3 high-impact capabilities:
+  1. **Frankfurter Currency API** (`https://api.frankfurter.app/`): Zero-auth, keyless European Central Bank (ECB) reference rates for live and historical USD/INR forex data.
+  2. **Indian Financial News & Sentiment Feed**: Real-time RSS feed ingestion from Indian financial press (Google News India, Economic Times, NDTV Profit) with domain-specific VADER financial sentiment scoring.
+  3. **Angel One SmartAPI Broker** (`smartapi.angelbroking.com`): Top-tier Indian broker API listed in public-apis for automated 2FA (RFC 6238 TOTP) and SEBI Algo-ID order execution across NFO and BFO (BSE SENSEX) segments.
+
+### Backend Implementations
+- `data/fx_fetcher.py`:
+  - Created `FrankfurterFXFetcher` supporting `get_latest_usdinr_sync()` and `get_historical_usdinr_series_sync(days=...)`.
+  - Added in `ml/features.py` as an automatic keyless fallback in `enrich_with_macro_and_options()`.
+- `data/news_fetcher.py`:
+  - Implemented `calculate_sentiment()` with domain-tuned financial lexicon weights (`crash: -3.5`, `surge: +2.5`, `rally: +2.5`, `slump: -2.5`).
+  - Added `_fetch_indian_rss_news_sync()` pulling 25+ real-time Indian financial headlines.
+  - Implemented `get_sentiment_summary()` computing overall market bias (`BULLISH` / `BEARISH` / `NEUTRAL`), mean score, and bull/bear counts.
+  - Preserved backward compatibility with legacy yfinance headline extractors (supporting `canonicalUrl`, `pubDate`, and provider dicts).
+- `api/market_router.py`:
+  - Added `GET /api/v1/market/news-sentiment/{ticker}` returning real-time sentiment analytics and headlines.
+- `api/broker.py`:
+  - Implemented `SmartAPIBroker(BrokerAPI)` supporting automated RFC 6238 TOTP generation without external dependencies, segment execution (`NFO`, `BFO`, `NSE`, `BSE`), and SEBI Algo-ID order tagging (`tag=self.algo_id`).
+
+### Frontend Integration
+- `frontend/src/pages/Dashboard.tsx`:
+  - Added `NewsSentimentSummary` interface and `fetchNewsSentiment` callback.
+  - Integrated a dedicated "Market News Pulse & Sentiment Engine" card into the `signals-panel` displaying overall market bias, bull/bear count, and top headlines with external links.
+
+### Comprehensive Test Coverage
+- Created `tests/test_public_apis.py` with 8 unit and integration tests covering:
+  - `FrankfurterFXFetcher` live rate retrieval, historical time-series generation, and network failure fallback.
+  - `NewsFetcher` tuned financial VADER sentiment scoring and sentiment summary schema validation.
+  - `SmartAPIBroker` TOTP calculation, fail-closed enforcement, and mocked SEBI Algo-ID order placement.
+
+## Verification — Pass 15
+- Test suite (full): `pytest -q` passed all 157 tests with 0 failures (100% green).
+- Frontend TypeScript check (`npx tsc -p tsconfig.app.json --noEmit`): passed with 0 errors.
+- Frontend production build (`npm run build`): passed in 1.71s with 0 errors.
+- System integrity: `iterate.txt` verified present and unmodified.
+
+---
+
+## Pass 16 — Continuous Trainer Index Truth Value Bug Remediation & F&O Alignment
+
+### Bug Fix: Ambiguous Truth Value of Pandas Index
+- Identified root cause of runtime error `[WARNING] Historical training error: The truth value of a Index is ambiguous. Use a.empty, a.bool(), a.item(), a.any() or a.all().`:
+  - In `ml/continuous_trainer.py`, `_reset_if_feature_schema_changed()` evaluated `list(feature_names or X.columns)`.
+  - When `feature_names` is passed as a `pandas.Index` (e.g. `X.columns`), Python's `or` operator implicitly invoked `bool(pd.Index)`, which is explicitly forbidden by Pandas.
+  - Fixed by explicitly checking `current_names = list(feature_names) if feature_names is not None else list(X.columns)`.
+
+### Live Continuous Trainer F&O Alignment
+- Updated live training routine in `ml/continuous_trainer.py`:
+  - Replaced hardcoded `"IN_EQUITY"` asset class with canonical `"IN_INDEX_FO"`.
+  - Resolved live training underlying target dynamically via `FO_UNDERLYINGS` (supporting `NIFTY`, `BANKNIFTY`, and `SENSEX`).
+  - Updated live scanner status log to reflect all 5 Indian F&O underlyings (`NIFTY, BANKNIFTY, SENSEX, FINNIFTY & MIDCPNIFTY`).
+
+### Regression Verification
+- Added `test_continuous_trainer_schema_reset_pd_index_safety` in `tests/test_multi_asset.py`:
+  - Verified no exception when evaluating schema with `pd.Index`.
+  - Verified no exception when `feature_names=None`.
+  - Verified clean reset to new `SGDClassifier` and `StandardScaler` when feature schema dimensions change.
+- Test suite (full): `pytest -q` passed all 158 tests with 0 failures (100% green).
+- System integrity: `iterate.txt` verified present and unmodified.
+
+---
+
+## Pass 17 — Zero-Latency Continuous Training Loop Termination (<150ms)
+
+### Latency Bottlenecks Identified
+1. **Unchecked Bar Feature Loop**: `generate_features_for_ticker()` sequentially iterated through up to 5,000 bars running 5 technical setups and ADX regime detection without checking `stop_event`, locking the thread in CPU computation for 20-45 seconds.
+2. **Busy Polling Sleep**: The training loop waited up to 30 seconds using fixed interval sleeps.
+3. **Delayed UI State**: `stop_training` in `api/training_router.py` set `stop_event` but kept `is_training=True` until the thread died. When the frontend called `/status`, it received `is_training: true` and remained in the active state.
+
+### Optimizations Implemented
+1. **Per-Bar Stop Signal Checking**:
+   - Propagated `stop_event` directly into `generate_features_for_ticker()`.
+   - Added `stop_event.is_set()` checks before download, during feature enrichment, and inside the bar loop, aborting instantly within <5ms.
+2. **Instant Event Wait**:
+   - Replaced `for _ in range(30): time.sleep(1)` with native `stop_event.wait(timeout=30.0)` which awakens instantly (<1ms) when `stop_event.set()` is triggered.
+3. **Immediate Router & UI State Synchronization**:
+   - `stop_training` immediately sets `is_training = False`, signals `stop_event`, and cooperatively joins `training_thread` up to 1.5s via `asyncio.to_thread`.
+   - `get_status` returns `is_training: False` and `mode: "IDLE"` whenever `stop_event.is_set()` is true.
+   - `TrainingUI.tsx` optimistically updates `isTraining = false` and `trainingMode = 'IDLE'` for instant visual UI feedback.
+
+### Verification — Pass 17
+- Stop benchmark: thread actively running training halted completely in **0.140s** (140 milliseconds).
+- Frontend TypeScript check (`npx tsc -p tsconfig.app.json --noEmit`): passed with 0 errors.
+- Frontend production build (`npm run build`): passed in 1.55s.
+- Test suite (full): `pytest -q` passed all 158 tests with 0 failures (100% green).
+- System integrity: `iterate.txt` verified present and unmodified.
+
+---
+
+## Pass 18 — Comprehensive Trade Specification Dossier, Closed Trade History Serialization, Offline Replay Telemetry & Zero-Error Build
+
+### Problem Statement & User Demand
+- The user observed that during continuous training and historical replay cycles (where thousands of trades were simulated), the UI displayed `0 Closed Trades`, `0 Active Positions`, and provided no visibility into the individual trades being evaluated or taken.
+- User demanded: *"EACH TRADE TAKING ITS SPECIFICATION, DETAILS EVERYTHING SHOULD BE SHOWN. UI ISSUES ALSO THERE FIX THEM"*.
+
+### Remediation & Architectural Implementation
+1. **Backend Serialization of Closed Trades & Detailed Scan Telemetry**:
+   - `ml/live_market_learner.py`: Updated `get_portfolio_state()` to serialize `"closed_trades": list(self.closed_trades)[-50:]`. Added granular scanning logs (`[SCAN]` and `[SCAN HIT]`) recording underlying, current spot, regime, setups fired, and execution decision.
+   - `ml/continuous_trainer.py`: Added `_replay_telemetry` tracking offline simulation progress (target, timeframe, total simulated trades, win count, loss count, timeout count, win rate, and dynamic ATR TP/SL stops). Wired `_live_learner.execute_live_cycle()` into `OFFLINE_HISTORICAL` to run live paper scans even during closed market hours.
+   - `api/training_router.py`: Exposed `replay_telemetry` in `TrainingStatus` schema and endpoint.
+
+2. **Frontend Trade Specification Dossier & Telemetry Interface (`TrainingUI.tsx`)**:
+   - **Interactive Trade Dossier Modal (`TradeDossierModal`)**:
+     - Provides complete 360° visibility for any active open position or closed historical trade.
+     - Execution Specs: Contract Symbol, Underlying Index, Instrument Type (CE/PE Options vs Linear Futures), Moneyness (ATM/ITM/OTM), Strike Price, Expiry Date, Lots, Quantity, Entry Price, Current/Exit Price, Margin/Premium Invested, Net PnL, Return %.
+     - Dynamic Risk Envelope: Hard Stop Loss, Take Profit, Trailing Stop Ratchet, Distance to SL/TP in points and %, Risk/Reward ratio.
+     - Option Greeks: Delta ($\Delta$), Gamma ($\Gamma$), Theta ($\Theta$ per day), Implied Volatility ($IV$ annualized).
+     - Execution Context: Spot price at entry, Regime classification, AI Ensemble Confidence %, and Fired Technical Setups list with interactive chart inspect button.
+   - **Dedicated Closed Trades & Reinforcement Learning Table**:
+     - Displays the last 50 closed derivative trades with entry/exit timestamps, exit reasons (`TRAILING_STOP_HIT`, `TARGET_REACHED`, `ATR_STOP_HIT`), PnL, duration, and one-click "Specs" button.
+   - **Offline Historical Replay & Path-Dependent Simulation Card**:
+     - Visualizes real-time simulation metrics directly from the continuous replay engine with progress bars, win/loss breakdowns, and dynamic ATR targets.
+   - **Active Positions Table Enhancement**:
+     - Added "Greeks & Specs" inspect button to every active row alongside existing chart viewers.
+   - **UI Polish**:
+     - Fixed currency symbols (`₹`), removed unused imports, verified responsive layout, and ensured zero build warnings.
+
+### Verification — Pass 18
+- Frontend TypeScript check (`cd frontend; npx tsc -p tsconfig.app.json --noEmit`): passed with 0 errors.
+- Frontend production build (`cd frontend; npm run build`): passed with 0 errors, bundling `TrainingUI` cleanly in 1.34s.
+- Test suite (full): `pytest -q` passed all 158 tests with 0 failures (100% green in 49.84s).
+- System integrity: `iterate.txt` verified present and unmodified.
+- Compulsory project brain synchronization verified across `ai/current-state.md`, `ai/decisions.md`, `ai/known-issues.md`, and `REVIEW_LOG.md`.
+
+---
+
+## Pass 19 — Root Cause Resolution: Stale Worker Invalidation & Schema Comparison Safety
+
+### Root Cause Analysis of "Ambiguous Truth Value of a Index STILL"
+- Investigation of the running operating system processes revealed that the Uvicorn worker process (PID 14384) was spawned at `00:29:50` and had been running uninterrupted.
+- Because Uvicorn previously watched only `api/`, edits made to `ml/continuous_trainer.py` in Pass 16 were never reloaded by the long-running worker.
+- The worker's background training thread was therefore still executing the stale bytecode containing `list(persisted_names) == list(feature_names or X.columns)`.
+- When `feature_names` is a `pd.Index`, Python evaluated `bool(pd.Index)`, repeatedly raising the ambiguous truth value error on each replay cycle.
+
+### Permanent Fixes Implemented
+1. **Multi-Directory Auto-Reloading Configuration (`start.py`)**:
+   - Updated Uvicorn subprocess invocation to watch `--reload-dir api --reload-dir ml --reload-dir data --reload-dir setups`.
+   - Any modification to ML models, data pipelines, setups, or API endpoints immediately reloads the server cleanly.
+2. **Exception-Safe Schema Comparison (`ml/continuous_trainer.py`)**:
+   - Wrapped `_reset_if_feature_schema_changed()` in an exception-safe try/except block.
+   - Explicitly converted column names to string lists (`[str(c) for c in list(feature_names)]`) to eliminate any possibility of index truth-value evaluation.
+   - If any schema mismatch occurs or an unexpected error arises, it cleanly resets to fresh incremental estimators (`SGDClassifier` and `StandardScaler`) without raising exceptions.
+3. **Full Traceback Logging**:
+   - Added `logger.error("Historical training error: %s", traceback.format_exc())` to the replay loop.
+4. **Process Invalidation & Live Cycle Execution**:
+   - Terminated the stale worker processes.
+   - Relaunched the server and started a fresh continuous training and trading session.
+   - Observed **Cycle 1 finish simulating 1,133 trades** with win/loss/timeout breakdown and zero warnings.
+   - Transitioned cleanly into **Cycle 2** (`[HISTORICAL CYCLE 2] NSE is CLOSED...`) without a single warning.
+   - Verified immediate stop shutdown in **0.143s** (143ms).
+
+### Verification — Pass 19
+- Live Replay Execution: Verified complete cycle run simulating 1,133 trades with 0 Index ambiguous warnings.
+- Immediate Stop Benchmark: Thread halted in **0.143s** (143 milliseconds).
+- Frontend TypeScript check (`cd frontend; npx tsc -p tsconfig.app.json --noEmit`): passed with 0 errors.
+- Frontend production build (`cd frontend; npm run build`): passed with 0 errors.
+- Test suite (full): `pytest -q` passed all 158 tests with 0 failures (100% green in 48.02s).
+- System integrity: `iterate.txt` verified present and unmodified.
+- Compulsory project brain synchronization verified across `ai/current-state.md`, `ai/decisions.md`, `ai/known-issues.md`, and `REVIEW_LOG.md`.
+
+---
+
+## Pass 20 — Algorithmic Repositories Research, Paper Trading & RL Brain Enhancements
+
+### 1. Research & Synthesis of 15 Trading Repositories
+- Performed architectural analysis and evaluation across 15 external repositories:
+  1. `tradermonty/claude-trading-skills`: Drawdown circuit breakers, Volatility Contraction Pattern (VCP), risk discipline gates.
+  2. `TauricResearch/TradingAgents`: Multi-agent collaborative consensus, adversarial Bull vs. Bear debate, post-trade reflection memory.
+  3. `staskh/trading_skills`: Piotroski F-score fundamental analysis, institutional Dealer Gamma Exposure (GEX) engine.
+  4. `TheHardeep/fenix` & `Apurv-Salunke/india-stocks-api`: Multi-broker adapter client & high-fidelity trigger-then-convert SL paper matching engine.
+  5. `aeron7/nsepython` & `Sampad-Hegde/Bharat-SM-Data`: Browser TLS fingerprint impersonation for live NSE India option chains, real-time PCR, Max-Pain strike, and FII/DII flow tracking.
+  6. `QuantDinger`, `jesse-ai/jesse`, `shy3130/tick-stock-panel`, `SU1199/uniBroker`, `jerinisready/paper-trade-broker`, `QuantConnect/Lean.Brokerages.Zerodha`, `Prostocks/StarApi-py`, `RAKESHKRAJEEV90/nse-api-package`.
+- Published comprehensive architectural report in artifact: `repository_evaluation_and_integration_report.md`.
+
+### 2. Paper Trading Engine Upgrades (`paper_trader.py` & `ml/live_market_learner.py`)
+- **Account-Level Drawdown Circuit Breaker Gate (`ml/circuit_breaker.py`)**:
+  - Enforces a 2.0% daily realized loss ceiling.
+  - Automatically triggers a 24-hour mandatory cooldown upon 3 consecutive losses to eliminate emotional tilt and revenge trading.
+  - Enforces weekly (5%) and monthly (8%) drawdown hard ceilings.
+  - Pre-scan gate in both `paper_trader.py` and `LiveMarketLearner.scan_for_entries()`.
+- **Post-Trade Reflection Memory (`ml/agent_reflection.py`)**:
+  - Analyzes closed trades across all exit reasons (`TAKE_PROFIT`, `CLOSED_WIN`, `TRAILING_SL`, `STOP_LOSS`, `TIME_EXIT`).
+  - Generates structured, explainable lessons (thesis validation, driver, future rule) and appends to `logs/agent_reflections.jsonl`.
+- **Multi-Agent Consensus Gate (`ml/multi_agent_consensus.py`)**:
+  - Technical, Derivatives, Fundamental, and Sentiment agents evaluate setups with adversarial Bull vs. Bear debate and Chief Risk Officer sign-off prior to order entry.
+- **F&O Strike Contextual Bandit Learning Loop**:
+  - Wired trade settlement directly into `DerivativeEngine.fo_learner.update_from_trade(trade, net_pnl_pct)` for real-time strike optimization.
+
+### 3. ML Reinforcement Learning Engine Upgrades (`ml/reinforcement_learner.py`)
+- **Risk-Adjusted Reward Shaping (R-Multiples)**:
+  - Replaced binary flat $+1.0/-1.0$ Beta distribution updates with R-multiple reward scaling: $R = \frac{|\text{pnl\_pct}|}{\max(0.005, \text{risk\_pct})}$.
+  - Scaled step size $\Delta = \text{clip}(R, 0.5, 3.0)$ heavily rewards high-quality $+2.5R$ wins and penalizes blown stops without over-punishing controlled $-1R$ losses.
+- **Adaptive Prior Discounting (`discount_priors`)**:
+  - Exponential decay of alpha and beta towards (1.0, 1.0) on regime shifts, re-enabling Thompson sampling exploration.
+- **Dynamic Execution Hyperparameter Bandit (`ExecutionArmBandit`)**:
+  - Multi-armed bandit for tuning execution parameters (e.g. dynamic ATR trailing stop multiplier arms: 0.8x, 1.0x, 1.5x, 2.0x).
+
+### Verification — Pass 20
+- Created test suites:
+  - `tests/test_researched_modules.py`: 12/12 passed (VCP, Piotroski, GEX, NSE feed, broker adapter, multi-agent consensus).
+  - `tests/test_rl_paper_enhancements.py`: 6/6 passed (R-multiple scaling, adaptive prior discounting, execution arm bandit, circuit breaker halts, post-trade reflections).
+- Full regression suite: `pytest -q` passed **176/176 tests** with 0 failures in 50.37s.
+- Brain synchronization complete: `ai/current-state.md`, `ai/decisions.md` (Decision 22), and `REVIEW_LOG.md` fully up to date.
+

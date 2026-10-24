@@ -95,6 +95,18 @@ def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "
                 macro_dfs[name] = close_series
         except Exception as e:
             logger.warning(f"Failed to fetch {sym}: {e}")
+
+    # Fallback to Frankfurter Open API (public-apis) for USD/INR if Yahoo Finance was unavailable
+    if "USDINR" not in macro_dfs and asset_class in ("IN_INDEX_FO", "IN_EQUITY"):
+        try:
+            from data.fx_fetcher import FrankfurterFXFetcher
+            earliest_dt = df.index.min().strftime("%Y-%m-%d")
+            fx_series = FrankfurterFXFetcher.get_historical_usdinr_series_sync(start_date=earliest_dt)
+            if fx_series is not None and not fx_series.empty:
+                macro_dfs["USDINR"] = fx_series.shift(1)
+                logger.info("Successfully populated USD/INR macro feature via Frankfurter API fallback.")
+        except Exception as e:
+            logger.debug(f"Frankfurter fallback unavailable: {e}")
             
     # Combine into main df
     df = df.copy()
