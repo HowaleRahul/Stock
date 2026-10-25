@@ -384,5 +384,15 @@ This document catalogs all verified defects, technical debt, incomplete features
 - **Current Behavior**: Corrected exit logic to submit a `BUY` order at current ask price when exiting a position with `side == "SELL"`.
 - **Status**: Resolved / Verified (Pass 24).
 
+---
+
+### Issue 35: System Python Execution Bypassing Virtual Environment in `start.py`
+- **Severity**: Medium-High (Runtime Usability & Stability)
+- **Evidence**: Running `python start.py` from an unactivated terminal invoked the host system Python (`C:\Users\Rahul\AppData\Local\Programs\Python\Python313\python.exe`), causing `paper_trader.py` to fail with `ModuleNotFoundError: No module named 'yfinance'` and Uvicorn StatReload child processes to fail with `ModuleNotFoundError: No module named 'pydantic_settings'`. Additionally, unhandled emojis raised `UnicodeEncodeError` in Windows `cp1252` consoles.
+- **Affected Area**: `start.py`
+- **Current Behavior**: Implemented `ensure_virtualenv()` in `start.py` that auto-detects `.\venv\Scripts\python.exe` and re-executes itself inside the virtual environment with updated `PATH` and `VIRTUAL_ENV`. UTF-8 streams are safely reconfigured with ASCII-safe console tags.
+- **Status**: Resolved / Verified (Pass 25).
+
+
 
 

@@ -289,11 +289,12 @@ All endpoints reside under the `/api/v1` namespace:
 - Node.js & npm for frontend.
 - Docker Desktop running for TimescaleDB.
 
-### Startup Workflow (`start.py`)
-Running `python start.py` initiates three parallel processes:
+### Startup Workflow (`start.py`, `start.bat`, `start.ps1`)
+Running `python start.py`, `.\start.bat`, or `.\start.ps1` automatically detects the local virtual environment (`.\venv\Scripts\python.exe`), configures environment PATH and VIRTUAL_ENV, and initiates three supervised processes:
 1. **FastAPI Backend**: `venv\Scripts\python -m uvicorn api.main:app --reload --port 8000`
 2. **AI Background Trader**: `venv\Scripts\python paper_trader.py`
 3. **React Frontend**: `npm.cmd run dev` inside `frontend/` (accessible at `http://localhost:5173/app/`)
+*Note*: `start.py` includes automatic virtualenv self-healing: if executed with the system Python interpreter, it automatically relaunches itself using the project's `venv` Python, preventing `ModuleNotFoundError` crashes in Uvicorn reloader subprocesses or background workers.
 
 ### Docker Database Service
 ```powershell

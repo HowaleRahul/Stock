@@ -122,12 +122,19 @@ Before committing any modifications or creating PRs, agents must execute the fol
 
 4. **Python Automated Test Suite**:
    ```powershell
-   # Run all 235 offline unit tests hermetically without requiring Docker/PostgreSQL:
+   # Run all 288 offline unit and security tests hermetically without requiring Docker/PostgreSQL:
    venv\Scripts\pytest -m "not database" -q
 
-   # Run full 254 unit and database integration tests when Docker is online:
+   # Run full 307 unit, security, and database integration tests:
    venv\Scripts\pytest -q
    ```
+   Must pass with zero failures.
+
+5. **Process Launcher Verification**:
+   ```powershell
+   python start.py --check
+   ```
+   Must automatically resolve `venv\Scripts\python.exe` and exit with status 0.
    All hermetic unit tests must pass 100% offline. Full integration tests run automatically when `trading_timescaledb` is healthy.
 
 ---

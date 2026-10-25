@@ -809,5 +809,31 @@
 - Frontend Production Build: **Vite build succeeded** in 2.28s (`npm run build`).
 - Compulsory project brain synchronization verified across `ai/current-state.md`, `ai/decisions.md` (Decisions 26 & 27), `ai/known-issues.md`, `ai/instructions.md`, and `REVIEW_LOG.md`.
 
+---
+
+## Pass 25 — Process Launcher Virtual Environment Auto-Healing & Multi-Shell Launchers
+
+### 1. Launcher Auto-Virtualenv Resolution (`start.py`)
+- **Root Cause of `ModuleNotFoundError`**:
+  - Running `python start.py` from an unactivated terminal invoked the host global Python (`C:\Users\Rahul\AppData\Local\Programs\Python\Python313\python.exe`) which lacked installed dependencies.
+  - While Uvicorn initially started, Uvicorn's `StatReload` uses `multiprocessing.Process` (`SpawnProcess`), which re-invokes the parent executable (global Python) upon detecting any file modification, crashing with `ModuleNotFoundError: No module named 'pydantic_settings'`.
+  - Similarly, `paper_trader.py` was launched with global Python and crashed on `import yfinance as yf`.
+- **Remediation**:
+  - Implemented `ensure_virtualenv()` in `start.py` to auto-detect the local virtual environment (`.\venv\Scripts\python.exe`).
+  - If executed with global Python, `start.py` automatically relaunches itself using the virtual environment interpreter, passing through all CLI arguments.
+  - Subprocess environments for Uvicorn, Paper Trader, and Vite explicitly prepend `.\venv\Scripts` to `PATH` and set `VIRTUAL_ENV`.
+  - Added safe UTF-8 console stream reconfiguration and clean ASCII tags (`[VENV]`, `[RUNNER]`, `[OK]`, `[SHUTDOWN]`) to eliminate `UnicodeEncodeError` in Windows `cp1252` terminals.
+
+### 2. Multi-Shell Launchers (`start.bat`, `start.ps1`)
+- Added `start.bat` for Command Prompt / double-click execution.
+- Added `start.ps1` for native PowerShell execution.
+- Added `python start.py --check` validation flag for CI/diagnostics.
+
+### Verification — Pass 25
+- `python start.py --check`: Cleanly detected `venv\Scripts\python.exe`, relaunched into virtualenv, and exited with status 0.
+- `.\venv\Scripts\python.exe start.py --check`: Cleanly recognized active virtual environment without redundant relaunching, exiting with status 0.
+- Brain files synchronized: `ai/current-state.md`, `ai/decisions.md` (Decision 28), `ai/known-issues.md` (Issue 35), `ai/instructions.md`, and `REVIEW_LOG.md`.
+
+
 
 

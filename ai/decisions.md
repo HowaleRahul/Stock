@@ -481,6 +481,27 @@ This document records the major architectural, structural, and design decisions 
 - **Evidence/source in the project**: 288 passed tests in `pytest -q`, 0 failed.
 - **Reason status**: **Verified**.
 
+---
+
+### Decision 28: Automatic Virtual Environment Resolution & Subprocess Isolation in Orchestration Launcher
+- **Date**: Production Reliability & Developer Experience Pass (October 2026; Pass 25)
+- **What was decided**:
+  1. **Launcher Auto-Venv Self-Healing (`start.py`)**:
+     - Built `ensure_virtualenv()` in `start.py` that scans for local project virtual environments (`venv/Scripts/python.exe`, `.venv/Scripts/python.exe`, `venv/bin/python`, `.venv/bin/python`).
+     - If the script is invoked via system Python (`C:\Users\Rahul\AppData\Local\Programs\Python\Python313\python.exe`), it automatically relaunches itself using the detected virtual environment interpreter.
+  2. **Subprocess Environment Isolation**:
+     - Configured child processes (`api_proc`, `trader_proc`, `ui_proc`) with explicitly prepended `PATH` and `VIRTUAL_ENV` environment variables, ensuring that Uvicorn reloader subprocesses (`multiprocessing.Process` via `StatReload`) inherit the virtual environment and never fail with `ModuleNotFoundError: No module named 'pydantic_settings'` or `ModuleNotFoundError: No module named 'yfinance'`.
+  3. **Console Unicode Resilience**:
+     - Configured safe UTF-8 stream handling (`sys.stdout.reconfigure(encoding='utf-8', errors='replace')`) and standardized ASCII status tags (`[VENV]`, `[RUNNER]`, `[OK]`, `[SHUTDOWN]`) to avoid `UnicodeEncodeError` in Windows `cp1252` terminals.
+  4. **Multi-Shell Native Launchers**:
+     - Added `start.bat` for Command Prompt and `start.ps1` for PowerShell for instant 1-click execution.
+- **Why it was made**: Users commonly run `python start.py` from terminals where the virtual environment is not explicitly activated, causing Uvicorn reloader subprocesses and background traders to crash due to missing global packages.
+- **Files/components affected**: `start.py`, `start.bat`, `start.ps1`.
+- **Known trade-offs**: None.
+- **Evidence/source in the project**: Tested via `python start.py --check` which cleanly auto-reloads and resolves `venv\Scripts\python.exe` with exit code 0.
+- **Reason status**: **Verified**.
+
+
 
 
 
