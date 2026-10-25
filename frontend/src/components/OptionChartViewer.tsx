@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import axios from 'axios';
 import { createChart, CandlestickSeries, LineSeries, LineStyle } from 'lightweight-charts';
 import type { Time } from 'lightweight-charts';
@@ -6,11 +6,22 @@ import {
   Zap,
   RefreshCw
 } from 'lucide-react';
+import { formatIndianCurrency } from '../utils/formatters';
+import {
+  getExchangeLotSize,
+  formatContractSymbol,
+  calculateOptionPayoffProfile,
+} from '../utils/foUtils';
 
 interface OptionChartProps {
   initialUnderlying?: string;
   initialStrike?: number;
   initialOptionType?: 'CE' | 'PE';
+  initialAction?: 'BUY' | 'SELL';
+  strategyType?: string;
+  hedgeStrike?: number;
+  hedgePrice?: number;
+  netCredit?: number;
   entryPrice?: number;
   targetPrice?: number;
   stopLossPrice?: number;
@@ -21,6 +32,10 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
   initialUnderlying = 'NIFTY',
   initialStrike = 22800,
   initialOptionType = 'CE',
+  initialAction,
+  strategyType = 'DIRECTIONAL',
+  hedgeStrike,
+  hedgePrice,
   entryPrice,
   targetPrice,
   stopLossPrice,
@@ -29,11 +44,17 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
   const [underlying, setUnderlying] = useState<string>(initialUnderlying);
   const [strike, setStrike] = useState<number>(initialStrike);
   const [optionType, setOptionType] = useState<'CE' | 'PE'>(initialOptionType);
+  const [action, setAction] = useState<'BUY' | 'SELL'>(
+    initialAction || (strategyType.toUpperCase().includes('CREDIT') || strategyType.toUpperCase().includes('WRITING') ? 'SELL' : 'BUY')
+  );
+  const [activeStrategy, setActiveStrategy] = useState<string>(strategyType);
   const [timeframe, setTimeframe] = useState<string>('1h');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [chartData, setChartData] = useState<any>(null);
+  const [candles, setCandles] = useState<any[]>([]);
+  const [chartInstance, setChartInstance] = useState<any>(null);
 
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<any>(null);
@@ -42,18 +63,11 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
   const priceLinesRef = useRef<any[]>([]);
   const optionRequestRef = useRef<AbortController | null>(null);
 
-  // Sync state if props change
-  useEffect(() => {
-    if (initialUnderlying) setUnderlying(initialUnderlying);
-    if (initialStrike) setStrike(initialStrike);
-    if (initialOptionType) setOptionType(initialOptionType);
-  }, [initialUnderlying, initialStrike, initialOptionType]);
-
-  const fetchOptionData = useCallback(async () => {
+  const fetchOptionData = useCallback(async (isManual = false) => {
     optionRequestRef.current?.abort();
     const controller = new AbortController();
     optionRequestRef.current = controller;
-    setLoading(true);
+    if (isManual) setLoading(true);
     setError(null);
     try {
       const res = await axios.get('/api/v1/market/option-chart', {
@@ -66,7 +80,12 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
         },
         signal: controller.signal,
       });
-      if (!controller.signal.aborted) setChartData(res.data);
+      if (!controller.signal.aborted) {
+        setChartData(res.data);
+        if (Array.isArray(res.data?.candles)) {
+          setCandles(res.data.candles);
+        }
+      }
     } catch (error) {
       if (!controller.signal.aborted) {
         console.error('Unable to load option chart data.', error);
@@ -81,14 +100,39 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
   }, [underlying, strike, optionType, timeframe]);
 
   useEffect(() => {
-    void fetchOptionData();
-    const interval = setInterval(() => void fetchOptionData(), 12000);
+    let ignore = false;
+    const controller = new AbortController();
+    optionRequestRef.current = controller;
+
+    axios.get('/api/v1/market/option-chart', {
+      params: {
+        underlying,
+        strike,
+        option_type: optionType,
+        timeframe,
+        limit: 100,
+      },
+      signal: controller.signal,
+    }).then(res => {
+      if (!ignore) {
+        setChartData(res.data);
+        if (Array.isArray(res.data?.candles)) {
+          setCandles(res.data.candles);
+        }
+      }
+    }).catch(err => {
+      if (!ignore && !axios.isCancel(err)) {
+        setError('Option chart data currently unavailable.');
+      }
+    });
+
+    const interval = setInterval(() => { void fetchOptionData(false); }, 12000);
     return () => {
+      ignore = true;
       clearInterval(interval);
-      optionRequestRef.current?.abort();
-      optionRequestRef.current = null;
+      controller.abort();
     };
-  }, [fetchOptionData]);
+  }, [underlying, strike, optionType, timeframe, fetchOptionData]);
 
   // Live 2s Option Tick Loop: moves the option candle & Greeks in real time
   useEffect(() => {
@@ -122,11 +166,13 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
         });
 
         // Update last candlestick in lightweight charts
-        if (candleSeriesRef.current && chartData?.candles && chartData.candles.length > 0) {
-          const lastCandle = chartData.candles[chartData.candles.length - 1];
+        if (candleSeriesRef.current && candles.length > 0) {
+          const lastCandle = candles[candles.length - 1];
           const newHigh = Math.max(lastCandle.high, res.data.premium);
           const newLow = Math.min(lastCandle.low, res.data.premium);
-          const candleTime = (new Date(lastCandle.time).getTime() / 1000) as Time;
+          const candleTime = (typeof lastCandle.time === 'number' && lastCandle.time < 2000000000
+            ? lastCandle.time
+            : new Date(lastCandle.time).getTime() / 1000) as Time;
           candleSeriesRef.current.update({
             time: candleTime,
             open: lastCandle.open,
@@ -148,7 +194,7 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
       tickController?.abort();
       clearInterval(tickInterval);
     };
-  }, [underlying, strike, optionType, chartData?.candles]);
+  }, [underlying, strike, optionType, candles]);
 
 
   // Setup lightweight-chart
@@ -196,6 +242,7 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     vwapSeriesRef.current = vwapSeries;
+    setChartInstance(chart);
 
     const handleResize = () => {
       if (chartContainerRef.current) {
@@ -213,32 +260,53 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
       candleSeriesRef.current = null;
       vwapSeriesRef.current = null;
       priceLinesRef.current = [];
+      setChartInstance(null);
     };
   }, [height]);
 
   // Update chart series data
   useEffect(() => {
     const candleSeries = candleSeriesRef.current;
-    if (!candleSeries || !chartData?.candles) return;
+    if (!candleSeries || !chartInstance || !candles || candles.length === 0) return;
 
-    const formattedCandles = chartData.candles.map((c: any) => ({
-      time: (new Date(c.time).getTime() / 1000) as Time,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
+    const formattedCandles = candles.map((c: any) => ({
+      time: (typeof c.time === 'number' && c.time < 2000000000 ? c.time : new Date(c.time).getTime() / 1000) as Time,
+      open: Number(c.open),
+      high: Number(c.high),
+      low: Number(c.low),
+      close: Number(c.close),
     }));
 
-    const formattedVwap = chartData.candles.map((c: any) => ({
-      time: (new Date(c.time).getTime() / 1000) as Time,
-      value: c.vwap,
+    const formattedVwap = candles.map((c: any) => ({
+      time: (typeof c.time === 'number' && c.time < 2000000000 ? c.time : new Date(c.time).getTime() / 1000) as Time,
+      value: Number(c.vwap || c.close),
     }));
 
     candleSeries.setData(formattedCandles);
     if (vwapSeriesRef.current) {
       vwapSeriesRef.current.setData(formattedVwap);
     }
-  }, [chartData]);
+  }, [candles, chartInstance]);
+
+  const lotSize = chartData?.lot_size || getExchangeLotSize(underlying);
+  const contractTitle = formatContractSymbol(underlying, strike, optionType);
+  const intervalStep = (underlying === 'BANKNIFTY' || underlying === 'SENSEX') ? 100 : (underlying === 'MIDCPNIFTY' ? 25 : 50);
+
+  const payoff = useMemo(() => {
+    return calculateOptionPayoffProfile({
+      underlying,
+      strike,
+      optionType,
+      entryPrice: entryPrice || Number(chartData?.current_premium) || 120,
+      currentSpot: chartData?.current_spot,
+      action,
+      strategyType: activeStrategy,
+      hedgeStrike,
+      hedgePrice,
+      lotSize,
+      rawTheta: chartData?.greeks?.theta,
+    });
+  }, [underlying, strike, optionType, entryPrice, chartData?.current_premium, chartData?.current_spot, chartData?.greeks?.theta, action, activeStrategy, hedgeStrike, hedgePrice, lotSize]);
 
   useEffect(() => {
     const candleSeries = candleSeriesRef.current;
@@ -246,8 +314,9 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
     priceLinesRef.current.forEach(line => candleSeries.removePriceLine(line));
     priceLinesRef.current = [
       { price: entryPrice, color: '#60a5fa', title: 'Entry' },
-      { price: targetPrice, color: '#34d399', title: 'Target' },
+      { price: targetPrice, color: '#34d399', title: action === 'SELL' ? 'Target (Decay)' : 'Target' },
       { price: stopLossPrice, color: '#f87171', title: 'Stop Loss' },
+      { price: payoff.breakeven, color: '#f59e0b', title: `BE ₹${payoff.breakeven}` },
     ]
       .filter((level): level is { price: number; color: string; title: string } =>
         typeof level.price === 'number' && Number.isFinite(level.price) && level.price > 0
@@ -260,9 +329,7 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
         axisLabelVisible: true,
         title: level.title,
       }));
-  }, [entryPrice, targetPrice, stopLossPrice, height]);
-
-  const intervalStep = (underlying === 'BANKNIFTY' || underlying === 'SENSEX') ? 100 : (underlying === 'MIDCPNIFTY' ? 25 : 50);
+  }, [entryPrice, targetPrice, stopLossPrice, payoff.breakeven, action, height]);
 
   return (
     <div className="bg-gray-950 rounded-xl border border-gray-800 p-4 shadow-xl">
@@ -273,19 +340,32 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
             <Zap className="w-4 h-4" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h3 className="text-base font-bold text-white tracking-wide font-mono">
-                {chartData?.option_symbol || `${underlying} ${strike} ${optionType}`}
+                {contractTitle}
               </h3>
               <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${
                 optionType === 'CE' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-red-950 text-red-400 border border-red-800'
               }`}>
                 {optionType === 'CE' ? 'CALL OPTION (CE)' : 'PUT OPTION (PE)'}
               </span>
+              <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase transition-colors ${
+                action === 'SELL'
+                  ? 'bg-amber-950/90 text-amber-300 border border-amber-700/80 shadow-sm'
+                  : 'bg-blue-950/90 text-blue-300 border border-blue-700/80'
+              }`}>
+                {action === 'SELL' ? 'SHORT / SELL' : 'LONG / BUY'}
+              </span>
+              {payoff.isCredit && (
+                <span className="text-[10px] px-2 py-0.5 rounded font-bold bg-rose-950/80 text-rose-300 border border-rose-700/80 uppercase">
+                  {payoff.strategyName}
+                </span>
+              )}
             </div>
             <div className="text-xs text-gray-400 mt-0.5">
-              Spot: <span className="text-white font-mono">₹{chartData?.current_spot || '—'}</span> | 
-              Lot: <span className="text-white font-mono">{chartData?.lot_size || 25}</span>
+              Spot: <span className="text-white font-mono">{formatIndianCurrency(chartData?.current_spot || 0)}</span> | 
+              Lot: <span className="text-white font-mono">{lotSize} Qty</span> | 
+              Mode: <span className={action === 'SELL' ? 'text-amber-300 font-bold' : 'text-blue-300 font-bold'}>{action === 'SELL' ? 'Option Writing / Spread' : 'Option Buying'}</span>
             </div>
           </div>
         </div>
@@ -293,9 +373,9 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
         {/* Live Premium & VWAP Indicator */}
         <div className="flex items-center gap-4">
           <div className="text-right">
-            <span className="text-[11px] text-gray-400 block">Premium LTP</span>
+            <span className="text-[11px] text-gray-400 block">{action === 'SELL' ? 'Net Credit LTP' : 'Premium LTP'}</span>
             <div className="text-lg font-mono font-bold text-emerald-400 flex items-center justify-end gap-1">
-              ₹{chartData?.current_premium?.toFixed(2) || '0.00'}
+              {formatIndianCurrency(chartData?.current_premium || 0)}
             </div>
           </div>
 
@@ -304,13 +384,14 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
             <div className={`text-base font-mono font-bold ${
               chartData?.indicators?.is_above_vwap ? 'text-amber-400' : 'text-gray-400'
             }`}>
-              ₹{chartData?.indicators?.vwap?.toFixed(2) || '0.00'}
+              {formatIndianCurrency(chartData?.indicators?.vwap || 0)}
             </div>
           </div>
 
           <button
             type="button"
-            onClick={fetchOptionData}
+            onClick={() => void fetchOptionData(true)}
+            aria-label="Refresh option chart"
             className="p-2 rounded-lg bg-gray-900 border border-gray-800 text-gray-400 hover:text-white"
             title="Refresh option chart"
           >
@@ -321,27 +402,64 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
 
       {/* Strike & Parameter Selection Bar */}
       <div className="flex flex-wrap items-center justify-between gap-2.5 mb-3 text-xs bg-gray-900/60 p-2.5 rounded-lg border border-gray-800/80">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-gray-400 font-semibold">Underlying:</span>
-          {['NIFTY', 'BANKNIFTY', 'SENSEX', 'FINNIFTY'].map(u => (
+          {[
+            { id: 'NIFTY', defaultStrike: 24500 },
+            { id: 'BANKNIFTY', defaultStrike: 52000 },
+            { id: 'SENSEX', defaultStrike: 80000 },
+            { id: 'FINNIFTY', defaultStrike: 23500 },
+            { id: 'MIDCPNIFTY', defaultStrike: 12500 },
+          ].map(u => (
             <button
-              key={u}
+              key={u.id}
               type="button"
               onClick={() => {
-                setUnderlying(u);
-                if (u === 'BANKNIFTY') setStrike(52000);
-                else if (u === 'SENSEX') setStrike(80000);
-                else setStrike(24500);
+                setUnderlying(u.id);
+                setStrike(u.defaultStrike);
               }}
-              className={`px-2.5 py-1 rounded text-[11px] font-bold border ${
-                underlying === u
-                  ? 'bg-blue-600 border-blue-500 text-white'
+              className={`px-2.5 py-1 rounded text-[11px] font-bold border transition-colors ${
+                underlying === u.id
+                  ? 'bg-blue-600 border-blue-500 text-white shadow'
                   : 'bg-gray-800 border-gray-700 text-gray-300 hover:border-gray-600'
               }`}
             >
-              {u}
+              {u.id}
             </button>
           ))}
+        </div>
+
+        {/* Action Toggle (BUY vs SELL / Credit Spread) */}
+        <div className="flex items-center gap-1.5 bg-gray-950/80 p-1 rounded-md border border-gray-800">
+          <span className="text-gray-400 font-semibold text-[11px] px-1">Action:</span>
+          <button
+            type="button"
+            onClick={() => {
+              setAction('BUY');
+              setActiveStrategy('DIRECTIONAL');
+            }}
+            className={`px-2.5 py-1 rounded text-[11px] font-bold border transition-colors ${
+              action === 'BUY'
+                ? 'bg-blue-600 border-blue-500 text-white shadow-sm'
+                : 'bg-gray-800 border-gray-700 text-gray-300 hover:text-white'
+            }`}
+          >
+            BUY (Long)
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setAction('SELL');
+              setActiveStrategy(optionType === 'PE' ? 'BULL_PUT_SPREAD' : 'BEAR_CALL_SPREAD');
+            }}
+            className={`px-2.5 py-1 rounded text-[11px] font-bold border transition-colors ${
+              action === 'SELL'
+                ? 'bg-amber-600 border-amber-500 text-white shadow-sm'
+                : 'bg-gray-800 border-gray-700 text-gray-300 hover:text-white'
+            }`}
+          >
+            SELL / SHORT (Credit)
+          </button>
         </div>
 
         <div className="flex items-center gap-2">
@@ -349,7 +467,7 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
           <button
             type="button"
             onClick={() => setOptionType('CE')}
-            className={`px-2.5 py-1 rounded text-[11px] font-bold border ${
+            className={`px-2.5 py-1 rounded text-[11px] font-bold border transition-colors ${
               optionType === 'CE'
                 ? 'bg-emerald-600 border-emerald-500 text-white'
                 : 'bg-gray-800 border-gray-700 text-gray-300'
@@ -360,7 +478,7 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
           <button
             type="button"
             onClick={() => setOptionType('PE')}
-            className={`px-2.5 py-1 rounded text-[11px] font-bold border ${
+            className={`px-2.5 py-1 rounded text-[11px] font-bold border transition-colors ${
               optionType === 'PE'
                 ? 'bg-red-600 border-red-500 text-white'
                 : 'bg-gray-800 border-gray-700 text-gray-300'
@@ -408,29 +526,92 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
         </div>
       </div>
 
-      {/* Real-Time Option Greeks Bar */}
+      {/* Accurate Breakeven and Payoff Representation Card */}
+      <div className="mb-3 p-3 bg-gray-900/90 rounded-lg border border-gray-800 text-xs font-mono">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-gray-400 uppercase text-[10px] font-bold">Breakeven Spot:</span>
+            <span className="text-amber-400 font-bold text-sm bg-gray-950 px-2 py-0.5 rounded border border-gray-800">
+              ₹{payoff.breakeven.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+            </span>
+            <span className="text-[10px] text-gray-400">
+              ({payoff.safetyBufferPct}% {optionType === 'CE' ? 'below ceiling' : 'cushion to spot'})
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-4">
+            <div>
+              <span className="text-gray-400 uppercase text-[10px] mr-1">
+                {action === 'SELL' ? 'Max Profit (Net Credit):' : 'Max Profit:'}
+              </span>
+              <span className="text-emerald-400 font-bold text-xs">
+                +{formatIndianCurrency(payoff.maxProfit)}
+              </span>
+            </div>
+            <div>
+              <span className="text-gray-400 uppercase text-[10px] mr-1">
+                {action === 'SELL' && activeStrategy.includes('SPREAD') ? 'Max Risk (Spread Width - Credit):' : 'Max Risk:'}
+              </span>
+              <span className="text-red-400 font-bold text-xs">
+                -{formatIndianCurrency(payoff.maxLoss)}
+              </span>
+            </div>
+            {payoff.riskRewardRatio != null && (
+              <div>
+                <span className="text-gray-400 uppercase text-[10px] mr-1">R:R:</span>
+                <span className="text-blue-400 font-bold text-xs">1:{payoff.riskRewardRatio}</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Real-Time Option Greeks Bar (Full 5 Greeks + Margin vs Premium Labels) */}
       {chartData?.greeks && (
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 mb-3 text-xs font-mono">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-3 text-xs font-mono">
           <div className="p-2 rounded bg-gray-900/80 border border-gray-800 text-center">
             <span className="text-[10px] text-gray-400 block uppercase">Delta (Δ)</span>
-            <span className="text-emerald-400 font-bold">{chartData.greeks.delta}</span>
+            <span className="text-emerald-400 font-bold">{Number(chartData.greeks.delta || 0.5).toFixed(3)}</span>
           </div>
+
+          {/* Positive Theta notation for sellers (+₹Theta/day representing time decay profit) */}
           <div className="p-2 rounded bg-gray-900/80 border border-gray-800 text-center">
-            <span className="text-[10px] text-gray-400 block uppercase">Theta Decay (Θ)</span>
-            <span className="text-red-400 font-bold">₹{chartData.greeks.theta}/day</span>
+            <span className={`text-[10px] block uppercase font-bold ${action === 'SELL' ? 'text-emerald-400' : 'text-gray-400'}`}>
+              {action === 'SELL' ? 'Theta Gain (Θ)' : 'Theta Decay (Θ)'}
+            </span>
+            <span className={`font-bold ${action === 'SELL' ? 'text-emerald-400' : 'text-red-400'}`}>
+              {payoff.thetaFormatted}
+            </span>
+            <span className="text-[9px] text-gray-400 block">
+              {action === 'SELL' ? 'Decay income' : 'Decay cost'}
+            </span>
           </div>
+
           <div className="p-2 rounded bg-gray-900/80 border border-gray-800 text-center">
             <span className="text-[10px] text-gray-400 block uppercase">Gamma (Γ)</span>
-            <span className="text-blue-400 font-bold">{chartData.greeks.gamma}</span>
+            <span className="text-blue-400 font-bold">{Number(chartData.greeks.gamma || 0.0012).toFixed(4)}</span>
+          </div>
+          <div className="p-2 rounded bg-gray-900/80 border border-gray-800 text-center">
+            <span className="text-[10px] text-gray-400 block uppercase">Vega (ν)</span>
+            <span className="text-amber-400 font-bold">
+              {formatIndianCurrency(chartData.greeks.vega || 14.20)} / 1% IV
+            </span>
           </div>
           <div className="p-2 rounded bg-gray-900/80 border border-gray-800 text-center">
             <span className="text-[10px] text-gray-400 block uppercase">Implied Vol (IV)</span>
-            <span className="text-purple-400 font-bold">{chartData.greeks.iv}%</span>
+            <span className="text-purple-400 font-bold">{Number(chartData.greeks.iv || 15.2).toFixed(1)}%</span>
           </div>
+
+          {/* Margin vs Premium Block */}
           <div className="p-2 rounded bg-gray-900/80 border border-gray-800 text-center">
-            <span className="text-[10px] text-gray-400 block uppercase">1 Lot Premium Cost</span>
+            <span className="text-[10px] text-amber-400 block uppercase font-bold">
+              {action === 'SELL' ? 'Margin Req (1L)' : '1 Lot Premium'}
+            </span>
             <span className="text-white font-bold">
-              ₹{((chartData.current_premium || 0) * (chartData.lot_size || 25)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+              {formatIndianCurrency(action === 'SELL' ? payoff.marginEstimated : (chartData.current_premium || 0) * lotSize)}
+            </span>
+            <span className={`text-[9px] block ${action === 'SELL' ? 'text-emerald-400 font-semibold' : 'text-gray-400'}`}>
+              {action === 'SELL' ? `+${formatIndianCurrency((chartData.current_premium || 0) * lotSize)} Credit` : `${lotSize} Qty Outlay`}
             </span>
           </div>
         </div>
@@ -440,7 +621,7 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
       {error && (
         <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-red-800 bg-red-950/50 p-3 text-sm text-red-200" role="alert">
           <span>{error}</span>
-          <button type="button" onClick={fetchOptionData} className="shrink-0 underline">
+          <button type="button" onClick={() => void fetchOptionData(true)} className="shrink-0 underline">
             Retry
           </button>
         </div>

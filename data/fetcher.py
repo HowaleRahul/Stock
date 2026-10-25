@@ -245,3 +245,17 @@ class YFinanceFetcher:
                 "exchange": "NSE" if ticker.endswith(".NS") else ("BSE" if ticker.endswith(".BO") else "NASDAQ"),
                 "currency": "INR" if (ticker.endswith(".NS") or ticker.endswith(".BO")) else "USD"
             }
+
+    @classmethod
+    async def verify_symbol_exists(cls, ticker: str) -> bool:
+        """
+        Verifies if ticker exists externally by attempting to fetch recent data.
+        Returns True if at least one valid OHLCV bar is returned.
+        """
+        ticker = ticker.upper().strip()
+        try:
+            bars = await cls.fetch_ohlcv_bars(ticker, period="5d", interval="1d")
+            return len(bars) > 0
+        except Exception:
+            return False
+

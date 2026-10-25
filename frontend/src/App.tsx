@@ -2,6 +2,7 @@ import { Suspense, lazy, useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
 import ErrorBoundary from './components/ErrorBoundary';
 import { SettingsModal } from './components/SettingsModal';
+import { MarketSessionBadge } from './components/MarketSessionBadge';
 import {
   LineChart,
   Briefcase,
@@ -11,7 +12,6 @@ import {
   Wrench,
   BookOpen,
   CircleHelp,
-  Radio,
   Settings2,
   Flame,
 } from 'lucide-react';
@@ -149,10 +149,8 @@ function App() {
                 <span className="topbar-date">{todayStr}</span>
               </div>
               <div className="topbar-actions">
-                <span className="market-status">
-                  <Radio /> NSE SESSION <b>LIVE</b>
-                </span>
-                <span className="avatar">R</span>
+                <MarketSessionBadge />
+                <span className="avatar" title="Trader Workspace Profile">R</span>
               </div>
             </header>
             <ErrorBoundary

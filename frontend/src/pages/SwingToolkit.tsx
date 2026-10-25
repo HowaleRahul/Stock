@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import axios from 'axios';
 import {
   Flame,
@@ -11,7 +11,13 @@ import {
   Layers,
   ShieldCheck,
   Zap,
+  Search,
+  AlertTriangle,
+  X,
 } from 'lucide-react';
+import ErrorBoundary from '../components/ErrorBoundary';
+import { formatIndianCurrency } from '../utils/formatters';
+import { getExchangeLotSize } from '../utils/foUtils';
 
 interface ChecklistDetail {
   name: string;
@@ -77,47 +83,126 @@ const SwingToolkit: React.FC = () => {
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
   const [orbPlan, setOrbPlan] = useState<ORBPlan | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [loadingWatchlist, setLoadingWatchlist] = useState(false);
   const [watchlistError, setWatchlistError] = useState<string | null>(null);
   const [evaluatingOrb, setEvaluatingOrb] = useState<string | null>(null);
   const [notification, setNotification] = useState<string>('');
 
-  const fetchWatchlist = useCallback(async () => {
+  const [candidateFilterStatus, setCandidateFilterStatus] = useState<'ALL' | 'QUALIFIED' | 'FILTERED'>('ALL');
+  const [candidateFilterScanner, setCandidateFilterScanner] = useState<string>('ALL');
+  const [candidateSearch, setCandidateSearch] = useState<string>('');
+  const scanAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (scanAbortRef.current) {
+        scanAbortRef.current.abort();
+      }
+    };
+  }, []);
+
+  const fetchWatchlist = useCallback(async (isManual = false) => {
     try {
-      setLoadingWatchlist(true);
+      if (isManual) setLoadingWatchlist(true);
       const res = await axios.get('/api/v1/swing/watchlist');
       if (res.data?.watchlist) {
         setWatchlist(res.data.watchlist);
       }
       setWatchlistError(null);
     } catch {
-      setWatchlistError('Unable to load the approved watchlist.')
+      setWatchlistError('Unable to load the approved watchlist.');
     } finally {
-      setLoadingWatchlist(false);
+      if (isManual) setLoadingWatchlist(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchWatchlist();
-  }, [fetchWatchlist]);
+    let ignore = false;
+    axios.get('/api/v1/swing/watchlist')
+      .then(res => {
+        if (!ignore && res.data?.watchlist) {
+          setWatchlist(res.data.watchlist);
+        }
+      })
+      .catch(() => {
+        if (!ignore) {
+          setWatchlistError('Unable to load the approved watchlist.');
+        }
+      });
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedCandidate) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectedCandidate(null);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedCandidate]);
+
+  const cancelScan = () => {
+    if (scanAbortRef.current) {
+      scanAbortRef.current.abort();
+    }
+    setScanning(false);
+    setNotification('Universe scan was cancelled.');
+  };
 
   const runAllScanners = async () => {
+    if (scanAbortRef.current) {
+      scanAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    scanAbortRef.current = controller;
+
     try {
       setScanning(true);
+      setScanError(null);
       setNotification('Running Momentum, DWIB Inside Bar, and ATH Scanners across universe...');
       const res = await axios.get('/api/v1/swing/scanners/run', {
         params: { universe_size: 25 },
+        signal: controller.signal,
+        timeout: 45000,
       });
       if (res.data?.candidates) {
         setCandidates(res.data.candidates);
         setNotification(`Scanned universe complete: Found ${res.data.total_scanner_hits} hits (${res.data.qualified_for_watchlist} passed the 8-Factor filter).`);
       }
     } catch (err: any) {
-      setNotification(`Scan failed: ${err?.response?.data?.detail || err.message}`);
+      if (axios.isCancel(err)) {
+        return;
+      }
+      const isTimeout = err.code === 'ECONNABORTED' || String(err.message).toLowerCase().includes('timeout');
+      const msg = isTimeout
+        ? 'Scanner request timed out after 45s. The market data feed may be slow or temporarily overloaded.'
+        : `Scan failed: ${err?.response?.data?.detail || err.message}`;
+      setScanError(msg);
+      setNotification(msg);
     } finally {
-      setScanning(false);
+      if (!controller.signal.aborted && scanAbortRef.current === controller) {
+        setScanning(false);
+      }
     }
   };
+
+  const filteredCandidates = useMemo(() => {
+    return candidates.filter(cand => {
+      if (candidateFilterStatus === 'QUALIFIED' && !cand.qualifies_for_watchlist) return false;
+      if (candidateFilterStatus === 'FILTERED' && cand.qualifies_for_watchlist) return false;
+      if (candidateFilterScanner !== 'ALL' && !cand.matched_scanners.some(s => s.toLowerCase().includes(candidateFilterScanner.toLowerCase()))) return false;
+      if (candidateSearch.trim()) {
+        const q = candidateSearch.trim().toLowerCase();
+        const matchTicker = (cand.ticker || '').toLowerCase().includes(q);
+        const matchSector = (cand.sector || '').toLowerCase().includes(q);
+        if (!matchTicker && !matchSector) return false;
+      }
+      return true;
+    });
+  }, [candidates, candidateFilterStatus, candidateFilterScanner, candidateSearch]);
 
   const addToWatchlist = async (cand: Candidate) => {
     try {
@@ -177,8 +262,18 @@ const SwingToolkit: React.FC = () => {
             Half an hour a week. Three scanners. One clean watchlist. Run them once or twice a week, filter every hit through the 8-factor checklist, and execute with 15m ORB volume gating.
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          {scanning && (
+            <button
+              type="button"
+              onClick={cancelScan}
+              className="px-3.5 py-2.5 rounded-lg font-bold text-sm bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition-all flex items-center gap-1.5"
+            >
+              <X className="w-4 h-4 text-gray-400" /> Cancel
+            </button>
+          )}
           <button
+            type="button"
             onClick={runAllScanners}
             disabled={scanning}
             className={`px-5 py-2.5 rounded-lg font-bold text-sm flex items-center gap-2 transition-all ${
@@ -193,7 +288,32 @@ const SwingToolkit: React.FC = () => {
         </div>
       </div>
 
-      {notification && (
+      {scanError && (
+        <div className="bg-red-950/60 border border-red-800 text-red-200 px-4 py-3 rounded-lg text-sm flex flex-wrap items-center justify-between gap-3" role="alert">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-red-400 shrink-0" />
+            <span>{scanError}</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={runAllScanners}
+              className="px-3 py-1 bg-red-900/80 hover:bg-red-800 border border-red-700 text-xs font-semibold rounded text-white transition"
+            >
+              Retry Scanner
+            </button>
+            <button
+              type="button"
+              onClick={() => setScanError(null)}
+              className="text-gray-400 hover:text-white text-xs underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {notification && !scanError && (
         <div className="bg-blue-950/60 border border-blue-800 text-blue-200 px-4 py-2.5 rounded-lg text-sm flex items-center justify-between">
           <span>{notification}</span>
           <button onClick={() => setNotification('')} className="text-gray-400 hover:text-white text-xs">Dismiss</button>
@@ -291,316 +411,417 @@ const SwingToolkit: React.FC = () => {
       </div>
 
       {/* Active Winning Watchlist Section */}
-      <div className="bg-gray-900/70 border border-gray-800 rounded-xl p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-xl font-bold text-white flex items-center gap-2">
-              <ShieldCheck className="w-5 h-5 text-emerald-400" />
-              The Winning Watchlist (Approved Swing Pool)
-            </h2>
-            <p className="text-xs text-gray-400">
-              Filtered candidates cleared through the 8-Factor Checklist. These are monitored for 15m ORB volume gate execution on breakout day.
-            </p>
+      <ErrorBoundary compact title="Approved Watchlist Error">
+        <div className="bg-gray-900/70 border border-gray-800 rounded-xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-emerald-400" />
+                The Winning Watchlist (Approved Swing Pool)
+              </h2>
+              <p className="text-xs text-gray-400">
+                Filtered candidates cleared through the 8-Factor Checklist. These are monitored for 15m ORB volume gate execution on breakout day.
+              </p>
+            </div>
+            <span className="px-3 py-1 bg-gray-800 text-gray-300 rounded-full text-xs font-bold font-mono">
+              {watchlist.length} Active Candidates
+            </span>
           </div>
-          <span className="px-3 py-1 bg-gray-800 text-gray-300 rounded-full text-xs font-bold font-mono">
-            {watchlist.length} Active Candidates
-          </span>
-        </div>
 
-        {loadingWatchlist ? (
-          <div className="text-center py-8 text-gray-400" role="status">Loading approved watchlist...</div>
-        ) : watchlistError ? (
-          <div className="flex items-center justify-center gap-3 py-8 text-sm text-red-300" role="alert">
-            <span>{watchlistError}</span>
-            <button type="button" className="underline" onClick={fetchWatchlist}>Retry</button>
-          </div>
-        ) : watchlist.length === 0 ? (
-          <div className="text-center py-8 text-gray-500 text-sm">
-            Watchlist is empty. Run the 3 scanners above and approve qualifying candidates.
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-sm">
-              <thead>
-                <tr className="border-b border-gray-800 text-gray-400 text-xs uppercase">
-                  <th className="py-2.5 px-3">Ticker</th>
-                  <th className="py-2.5 px-3">Sector</th>
-                  <th className="py-2.5 px-3">Scanner Source</th>
-                  <th className="py-2.5 px-3">Quality Score</th>
-                  <th className="py-2.5 px-3">VCP &amp; Stage 2</th>
-                  <th className="py-2.5 px-3 text-right">Intraday ORB Gate</th>
-                  <th className="py-2.5 px-3 text-center">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-800/60">
-                {watchlist.map((item) => (
-                  <tr key={item.ticker} className="hover:bg-gray-800/40 transition-colors">
-                    <td className="py-3 px-3 font-bold text-white flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                      {item.ticker}
-                    </td>
-                    <td className="py-3 px-3 text-gray-300 text-xs">{item.sector}</td>
-                    <td className="py-3 px-3">
-                      <div className="flex flex-wrap gap-1">
-                        {item.source_scanners.map((sc, i) => (
-                          <span key={i} className="text-[10px] px-2 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800 font-semibold">
-                            {sc}
-                          </span>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="py-3 px-3">
-                      <span className="px-2.5 py-1 rounded text-xs font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
-                        {item.composite_score.toFixed(1)} / 100
-                      </span>
-                    </td>
-                    <td className="py-3 px-3 text-xs">
-                      <div className="flex gap-2">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${item.stage_2 ? 'bg-emerald-900/50 text-emerald-300' : 'bg-gray-800 text-gray-400'}`}>
-                          STAGE 2
-                        </span>
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${item.vcp_detected ? 'bg-purple-900/50 text-purple-300' : 'bg-gray-800 text-gray-400'}`}>
-                          VCP BASE
-                        </span>
-                      </div>
-                    </td>
-                    <td className="py-3 px-3 text-right">
-                      <button
-                        onClick={() => checkORB(item.ticker)}
-                        disabled={evaluatingOrb === item.ticker}
-                        className="px-3 py-1 bg-amber-950/70 hover:bg-amber-900 text-amber-300 border border-amber-800 rounded text-xs font-semibold flex items-center gap-1.5 ml-auto transition-all"
-                      >
-                        <Zap className={`w-3.5 h-3.5 ${evaluatingOrb === item.ticker ? 'animate-bounce' : ''}`} />
-                        {evaluatingOrb === item.ticker ? 'Evaluating...' : 'Check 15m ORB'}
-                      </button>
-                    </td>
-                    <td className="py-3 px-3 text-center">
-                      <button
-                        onClick={() => removeFromWatchlist(item.ticker)}
-                        className="text-gray-500 hover:text-red-400 transition-colors p-1"
-                        title="Remove candidate"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </td>
+          {loadingWatchlist ? (
+            <div className="text-center py-8 text-gray-400" role="status">Loading approved watchlist...</div>
+          ) : watchlistError ? (
+            <div className="flex items-center justify-center gap-3 py-8 text-sm text-red-300" role="alert">
+              <span>{watchlistError}</span>
+              <button type="button" className="underline" onClick={() => void fetchWatchlist(true)}>Retry</button>
+            </div>
+          ) : watchlist.length === 0 ? (
+            <div className="bg-gray-950/50 border border-dashed border-gray-800 rounded-xl p-8 text-center my-2">
+              <div className="w-12 h-12 bg-gray-800/80 rounded-full flex items-center justify-center mx-auto mb-3 text-orange-400">
+                <Flame className="w-6 h-6" />
+              </div>
+              <h3 className="text-base font-bold text-white mb-1">Approved Swing Watchlist is Empty</h3>
+              <p className="text-gray-400 text-sm max-w-md mx-auto mb-4">
+                Run the 3 swing scanners (Momentum, Inside Bar, and ATH) to scan liquid market stocks. Candidates scoring &ge; 70 on the 8-Factor filter can be approved into this watchlist with one click.
+              </p>
+              <button
+                type="button"
+                onClick={runAllScanners}
+                disabled={scanning}
+                className="px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition inline-flex items-center gap-2"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${scanning ? 'animate-spin' : ''}`} />
+                {scanning ? 'Scanning Market Universe...' : 'Run All 3 Scanners Now'}
+              </button>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-sm min-w-[760px]">
+                <thead>
+                  <tr className="border-b border-gray-800 text-gray-400 text-xs uppercase">
+                    <th className="py-2.5 px-3">Ticker</th>
+                    <th className="py-2.5 px-3">Sector</th>
+                    <th className="py-2.5 px-3">Scanner Source</th>
+                    <th className="py-2.5 px-3">Quality Score</th>
+                    <th className="py-2.5 px-3">VCP &amp; Stage 2</th>
+                    <th className="py-2.5 px-3 text-right">Intraday ORB Gate</th>
+                    <th className="py-2.5 px-3 text-center">Action</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* ORB Execution Plan Modal / Panel */}
-      {orbPlan && (
-        <div className="bg-gray-900 border border-amber-600/40 rounded-xl p-6 shadow-2xl space-y-4 animate-in fade-in">
-          <div className="flex items-center justify-between border-b border-gray-800 pb-3">
-            <div className="flex items-center gap-3">
-              <Zap className="w-6 h-6 text-amber-400" />
-              <div>
-                <h3 className="text-lg font-bold text-white">
-                  Intraday ORB &amp; Volume Gate Execution Plan: {orbPlan.ticker}
-                </h3>
-                <p className="text-xs text-gray-400">
-                  Evaluated against 20-Day ADV: {orbPlan.adv_20?.toLocaleString()} shares
-                </p>
-              </div>
-            </div>
-            <button onClick={() => setOrbPlan(null)} className="text-gray-400 hover:text-white text-sm">Close</button>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            {/* 5m Volume Gate */}
-            <div className="bg-gray-950 p-4 rounded-lg border border-gray-800">
-              <span className="text-xs text-gray-400 block mb-1">Gate 1: First 5-Min Volume</span>
-              <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-bold font-mono text-white">{orbPlan.gate_5m_pct}%</span>
-                <span className="text-xs text-gray-400">of 20d ADV</span>
-              </div>
-              <div className="mt-2 text-xs font-semibold flex items-center gap-1.5">
-                {orbPlan.gate_5m_passed ? (
-                  <span className="text-emerald-400 flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> PASSED (&ge; 7%)</span>
-                ) : (
-                  <span className="text-gray-500 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" /> Below 7%</span>
-                )}
-              </div>
-            </div>
-
-            {/* 15m Volume Gate */}
-            <div className="bg-gray-950 p-4 rounded-lg border border-gray-800">
-              <span className="text-xs text-gray-400 block mb-1">Gate 2: First 15-Min Volume</span>
-              <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-bold font-mono text-white">{orbPlan.gate_15m_pct}%</span>
-                <span className="text-xs text-gray-400">of 20d ADV</span>
-              </div>
-              <div className="mt-2 text-xs font-semibold flex items-center gap-1.5">
-                {orbPlan.gate_15m_passed ? (
-                  <span className="text-emerald-400 flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> PASSED (&ge; 17%)</span>
-                ) : (
-                  <span className="text-gray-500 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" /> Below 17%</span>
-                )}
-              </div>
-            </div>
-
-            {/* 15m Opening Range */}
-            <div className="bg-gray-950 p-4 rounded-lg border border-gray-800">
-              <span className="text-xs text-gray-400 block mb-1">15m Opening Range</span>
-              <div className="text-xs font-mono space-y-1 text-gray-200">
-                <div>High (Trigger): <span className="font-bold text-white">₹{orbPlan.orb_high}</span></div>
-                <div>Low (Stop): <span className="font-bold text-gray-400">₹{orbPlan.orb_low}</span></div>
-                <div>LTP: <span className="font-bold text-blue-400">₹{orbPlan.current_price}</span></div>
-              </div>
-            </div>
-
-            {/* Trigger State */}
-            <div className="bg-gray-950 p-4 rounded-lg border border-gray-800 flex flex-col justify-center">
-              <span className="text-xs text-gray-400 block mb-1">Execution Status</span>
-              {orbPlan.is_triggered ? (
-                <div className="text-sm font-bold px-3 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-center animate-pulse">
-                  🔥 BUY TRIGGERED
-                </div>
-              ) : (
-                <div className="text-xs font-semibold px-2.5 py-1 rounded bg-gray-800 text-gray-400 text-center">
-                  AWAITING BREAKOUT
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-gray-950 p-4 rounded-lg border border-gray-800 text-xs text-gray-300 leading-relaxed">
-            <strong>System Readout:</strong> {orbPlan.reasoning}
-          </div>
-
-          {orbPlan.is_triggered && orbPlan.entry_price && (
-            <div className="bg-emerald-950/40 border border-emerald-800/80 p-4 rounded-lg grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
-              <div><span className="text-gray-400 block">Entry Price:</span><span className="font-bold text-white text-sm">₹{orbPlan.entry_price}</span></div>
-              <div><span className="text-gray-400 block">Stop Loss:</span><span className="font-bold text-red-400 text-sm">₹{orbPlan.stop_loss}</span></div>
-              <div><span className="text-gray-400 block">Target 2R:</span><span className="font-bold text-emerald-400 text-sm">₹{orbPlan.target_2r}</span></div>
-              <div><span className="text-gray-400 block">Target 3R:</span><span className="font-bold text-emerald-300 text-sm">₹{orbPlan.target_3r}</span></div>
-              <div><span className="text-gray-400 block">Position Size (1.5% Risk):</span><span className="font-bold text-amber-300 text-sm">{orbPlan.position_size} shares</span></div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Scanner Hits & 8-Factor Filter Checklist Matrix */}
-      <div className="bg-gray-900/70 border border-gray-800 rounded-xl p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-xl font-bold text-white flex items-center gap-2">
-              <Layers className="w-5 h-5 text-blue-400" />
-              Scanner Hits &amp; 8-Factor Filter Matrix
-            </h2>
-            <p className="text-xs text-gray-400">
-              Every scanner hit must clear the checklist cutoff (Score &ge; 70.0) before earning a place on your watchlist.
-            </p>
-          </div>
-          <span className="text-xs text-gray-400 font-mono">
-            {candidates.length} Hits Found
-          </span>
-        </div>
-
-        {candidates.length === 0 ? (
-          <div className="text-center py-12 text-gray-500 text-sm">
-            Click <strong>"Run All 3 Scanners"</strong> above to scan the liquid momentum universe.
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-sm">
-              <thead>
-                <tr className="border-b border-gray-800 text-gray-400 text-xs uppercase">
-                  <th className="py-2.5 px-3">Ticker</th>
-                  <th className="py-2.5 px-3">Sector</th>
-                  <th className="py-2.5 px-3">LTP / Change</th>
-                  <th className="py-2.5 px-3">Scanners Matched</th>
-                  <th className="py-2.5 px-3">Filter Score</th>
-                  <th className="py-2.5 px-3">Checklist Gate</th>
-                  <th className="py-2.5 px-3 text-center">Inspect</th>
-                  <th className="py-2.5 px-3 text-right">Add to Watchlist</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-800/60">
-                {candidates.map((cand) => {
-                  const qualifies = cand.qualifies_for_watchlist;
-                  const inWatchlist = watchlist.some((w) => w.ticker === cand.ticker);
-                  return (
-                    <tr key={cand.ticker} className="hover:bg-gray-800/40 transition-colors">
-                      <td className="py-3 px-3 font-bold text-white">{cand.ticker}</td>
-                      <td className="py-3 px-3 text-gray-300 text-xs">{cand.sector}</td>
-                      <td className="py-3 px-3 text-xs">
-                        <div className="font-mono text-white">₹{cand.cur_close?.toFixed(2)}</div>
-                        <div className={`text-[11px] ${cand.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {cand.change_pct >= 0 ? '+' : ''}{cand.change_pct}%
-                        </div>
+                </thead>
+                <tbody className="divide-y divide-gray-800/60">
+                  {watchlist.map((item) => (
+                    <tr key={item.ticker} className="hover:bg-gray-800/40 transition-colors">
+                      <td className="py-3 px-3 font-bold text-white flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                        {item.ticker}
                       </td>
+                      <td className="py-3 px-3 text-gray-300 text-xs">{item.sector}</td>
                       <td className="py-3 px-3">
                         <div className="flex flex-wrap gap-1">
-                          {cand.matched_scanners.map((sc, i) => (
-                            <span key={i} className="text-[10px] px-2 py-0.5 rounded bg-gray-800 text-gray-300 font-semibold border border-gray-700">
+                          {item.source_scanners.map((sc, i) => (
+                            <span key={i} className="text-[10px] px-2 py-0.5 rounded bg-blue-950 text-blue-300 border border-blue-800 font-semibold">
                               {sc}
                             </span>
                           ))}
                         </div>
                       </td>
                       <td className="py-3 px-3">
-                        <span className={`px-2.5 py-1 rounded text-xs font-bold ${
-                          qualifies ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-red-950 text-red-300 border border-red-800'
-                        }`}>
-                          {cand.composite_score.toFixed(1)} / 100
+                        <span className="px-2.5 py-1 rounded text-xs font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">
+                          {item.composite_score.toFixed(1)} / 100
                         </span>
                       </td>
                       <td className="py-3 px-3 text-xs">
-                        {qualifies ? (
-                          <span className="text-emerald-400 font-semibold flex items-center gap-1">
-                            <CheckCircle2 className="w-3.5 h-3.5" /> Approved
+                        <div className="flex gap-2">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${item.stage_2 ? 'bg-emerald-900/50 text-emerald-300' : 'bg-gray-800 text-gray-400'}`}>
+                            STAGE 2
                           </span>
-                        ) : (
-                          <span className="text-red-400 font-semibold flex items-center gap-1">
-                            <XCircle className="w-3.5 h-3.5" /> Filtered Out
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${item.vcp_detected ? 'bg-purple-900/50 text-purple-300' : 'bg-gray-800 text-gray-400'}`}>
+                            VCP BASE
                           </span>
-                        )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-3 text-right">
+                        <button
+                          onClick={() => checkORB(item.ticker)}
+                          disabled={evaluatingOrb === item.ticker}
+                          className="px-3 py-1 bg-amber-950/70 hover:bg-amber-900 text-amber-300 border border-amber-800 rounded text-xs font-semibold flex items-center gap-1.5 ml-auto transition-all"
+                        >
+                          <Zap className={`w-3.5 h-3.5 ${evaluatingOrb === item.ticker ? 'animate-bounce' : ''}`} />
+                          {evaluatingOrb === item.ticker ? 'Evaluating...' : 'Check 15m ORB'}
+                        </button>
                       </td>
                       <td className="py-3 px-3 text-center">
                         <button
-                          onClick={() => setSelectedCandidate(cand)}
-                          className="px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs font-semibold"
+                          onClick={() => removeFromWatchlist(item.ticker)}
+                          className="text-gray-500 hover:text-red-400 transition-colors p-1"
+                          title="Remove candidate"
                         >
-                          Details
+                          <Trash2 className="w-4 h-4" />
                         </button>
                       </td>
-                      <td className="py-3 px-3 text-right">
-                        {inWatchlist ? (
-                          <span className="text-xs text-gray-500 font-semibold">On Watchlist</span>
-                        ) : (
-                          <button
-                            onClick={() => addToWatchlist(cand)}
-                            className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold flex items-center gap-1 ml-auto"
-                          >
-                            <Plus className="w-3.5 h-3.5" /> Add
-                          </button>
-                        )}
-                      </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </ErrorBoundary>
+
+      {/* ORB Execution Plan Modal / Panel */}
+      {orbPlan && (
+        <ErrorBoundary compact title="ORB Plan Error">
+          <div className="bg-gray-900 border border-amber-600/40 rounded-xl p-6 shadow-2xl space-y-4 animate-in fade-in">
+            <div className="flex items-center justify-between border-b border-gray-800 pb-3">
+              <div className="flex items-center gap-3">
+                <Zap className="w-6 h-6 text-amber-400" />
+                <div>
+                  <h3 className="text-lg font-bold text-white">
+                    Intraday ORB &amp; Volume Gate Execution Plan: {orbPlan.ticker}
+                  </h3>
+                  <p className="text-xs text-gray-400">
+                    Evaluated against 20-Day ADV: {orbPlan.adv_20?.toLocaleString('en-IN')} shares
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setOrbPlan(null)} className="text-gray-400 hover:text-white text-sm">Close</button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              {/* 5m Volume Gate */}
+              <div className="bg-gray-950 p-4 rounded-lg border border-gray-800">
+                <span className="text-xs text-gray-400 block mb-1">Gate 1: First 5-Min Volume</span>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-2xl font-bold font-mono text-white">{orbPlan.gate_5m_pct}%</span>
+                  <span className="text-xs text-gray-400">of 20d ADV</span>
+                </div>
+                <div className="mt-2 text-xs font-semibold flex items-center gap-1.5">
+                  {orbPlan.gate_5m_passed ? (
+                    <span className="text-emerald-400 flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> PASSED (&ge; 7%)</span>
+                  ) : (
+                    <span className="text-gray-500 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" /> Below 7%</span>
+                  )}
+                </div>
+              </div>
+
+              {/* 15m Volume Gate */}
+              <div className="bg-gray-950 p-4 rounded-lg border border-gray-800">
+                <span className="text-xs text-gray-400 block mb-1">Gate 2: First 15-Min Volume</span>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-2xl font-bold font-mono text-white">{orbPlan.gate_15m_pct}%</span>
+                  <span className="text-xs text-gray-400">of 20d ADV</span>
+                </div>
+                <div className="mt-2 text-xs font-semibold flex items-center gap-1.5">
+                  {orbPlan.gate_15m_passed ? (
+                    <span className="text-emerald-400 flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> PASSED (&ge; 17%)</span>
+                  ) : (
+                    <span className="text-gray-500 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" /> Below 17%</span>
+                  )}
+                </div>
+              </div>
+
+              {/* 15m Opening Range */}
+              <div className="bg-gray-950 p-4 rounded-lg border border-gray-800">
+                <span className="text-xs text-gray-400 block mb-1">15m Opening Range</span>
+                <div className="text-xs font-mono space-y-1 text-gray-200">
+                  <div>High (Trigger): <span className="font-bold text-white">{formatIndianCurrency(orbPlan.orb_high)}</span></div>
+                  <div>Low (Stop): <span className="font-bold text-gray-400">{formatIndianCurrency(orbPlan.orb_low)}</span></div>
+                  <div>LTP: <span className="font-bold text-blue-400">{formatIndianCurrency(orbPlan.current_price)}</span></div>
+                </div>
+              </div>
+
+              {/* Trigger State */}
+              <div className="bg-gray-950 p-4 rounded-lg border border-gray-800 flex flex-col justify-center">
+                <span className="text-xs text-gray-400 block mb-1">Execution Status</span>
+                {orbPlan.is_triggered ? (
+                  <div className="text-sm font-bold px-3 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 text-center animate-pulse">
+                    🔥 BUY TRIGGERED
+                  </div>
+                ) : (
+                  <div className="text-xs font-semibold px-2.5 py-1 rounded bg-gray-800 text-gray-400 text-center">
+                    AWAITING BREAKOUT
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="bg-gray-950 p-4 rounded-lg border border-gray-800 text-xs text-gray-300 leading-relaxed">
+              <strong>System Readout:</strong> {orbPlan.reasoning}
+            </div>
+
+            {orbPlan.is_triggered && orbPlan.entry_price && (
+              <div className="bg-emerald-950/40 border border-emerald-800/80 p-4 rounded-lg grid grid-cols-2 md:grid-cols-6 gap-3 text-xs">
+                <div><span className="text-gray-400 block">Entry Price:</span><span className="font-bold text-white text-sm">{formatIndianCurrency(orbPlan.entry_price)}</span></div>
+                <div><span className="text-gray-400 block">Stop Loss:</span><span className="font-bold text-red-400 text-sm">{formatIndianCurrency(orbPlan.stop_loss)}</span></div>
+                <div><span className="text-gray-400 block">Target 2R:</span><span className="font-bold text-emerald-400 text-sm">{formatIndianCurrency(orbPlan.target_2r)}</span></div>
+                <div><span className="text-gray-400 block">Target 3R:</span><span className="font-bold text-emerald-300 text-sm">{formatIndianCurrency(orbPlan.target_3r)}</span></div>
+                <div><span className="text-gray-400 block">Position Size (1.5% Risk):</span><span className="font-bold text-amber-300 text-sm">{orbPlan.position_size} shares</span></div>
+                <div><span className="text-gray-400 block">Exchange Lot:</span><span className="font-bold text-cyan-300 text-sm">{getExchangeLotSize(orbPlan.ticker)} qty/lot</span></div>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </ErrorBoundary>
+      )}
+
+      {/* Scanner Hits & 8-Factor Filter Checklist Matrix */}
+      <ErrorBoundary compact title="Candidate Scanner Universe Error">
+        <div className="bg-gray-900/70 border border-gray-800 rounded-xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                <Layers className="w-5 h-5 text-blue-400" />
+                Scanner Hits &amp; 8-Factor Filter Matrix
+              </h2>
+              <p className="text-xs text-gray-400">
+                Every scanner hit must clear the checklist cutoff (Score &ge; 70.0) before earning a place on your watchlist.
+              </p>
+            </div>
+            <span className="text-xs text-gray-400 font-mono">
+              {filteredCandidates.length} of {candidates.length} Hits Displayed
+            </span>
+          </div>
+
+          {/* Candidate Filter Toolbar */}
+          {candidates.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4 p-3 bg-gray-950/60 border border-gray-800 rounded-lg text-xs">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-gray-400 font-semibold mr-1">Status:</span>
+                {[
+                  { label: 'All Hits', val: 'ALL', count: candidates.length },
+                  { label: 'Approved (Score ≥ 70)', val: 'QUALIFIED', count: candidates.filter(c => c.qualifies_for_watchlist).length },
+                  { label: 'Filtered Out (< 70)', val: 'FILTERED', count: candidates.filter(c => !c.qualifies_for_watchlist).length },
+                ].map(tab => (
+                  <button
+                    key={tab.val}
+                    type="button"
+                    onClick={() => setCandidateFilterStatus(tab.val as any)}
+                    className={`px-2.5 py-1 rounded text-xs font-semibold border transition ${
+                      candidateFilterStatus === tab.val
+                        ? 'bg-blue-600 border-blue-500 text-white'
+                        : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    {tab.label} <span className="opacity-70 font-mono">({tab.count})</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <select
+                  aria-label="Filter by matched scanner"
+                  value={candidateFilterScanner}
+                  onChange={e => setCandidateFilterScanner(e.target.value)}
+                  className="bg-gray-800 border border-gray-700 text-gray-200 text-xs rounded px-2.5 py-1 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="ALL">All Scanners</option>
+                  <option value="Momentum">Momentum 52W</option>
+                  <option value="DWIB">DWIB Inside Bar</option>
+                  <option value="ATH">ATH Breakout</option>
+                </select>
+
+                <div className="flex items-center gap-1 bg-gray-800 border border-gray-700 px-2.5 py-1 rounded">
+                  <Search className="w-3.5 h-3.5 text-gray-500" />
+                  <input
+                    type="text"
+                    placeholder="Search ticker/sector..."
+                    value={candidateSearch}
+                    onChange={e => setCandidateSearch(e.target.value)}
+                    aria-label="Search candidates by ticker or sector"
+                    className="bg-transparent border-none text-gray-200 placeholder-gray-500 text-xs focus:outline-none w-32"
+                  />
+                  {candidateSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setCandidateSearch('')}
+                      aria-label="Clear search"
+                      className="text-gray-400 hover:text-white text-xs"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {candidates.length === 0 ? (
+            <div className="text-center py-12 text-gray-500 text-sm">
+              Click <strong>"Run All 3 Scanners"</strong> above to scan the liquid momentum universe.
+            </div>
+          ) : filteredCandidates.length === 0 ? (
+            <div className="text-center py-8 text-gray-500 text-sm">
+              No scanner hits match the current filter criteria.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-sm min-w-[760px]">
+                <thead>
+                  <tr className="border-b border-gray-800 text-gray-400 text-xs uppercase">
+                    <th className="py-2.5 px-3">Ticker</th>
+                    <th className="py-2.5 px-3">Sector</th>
+                    <th className="py-2.5 px-3">LTP / Change</th>
+                    <th className="py-2.5 px-3">Scanners Matched</th>
+                    <th className="py-2.5 px-3">Filter Score</th>
+                    <th className="py-2.5 px-3">Checklist Gate</th>
+                    <th className="py-2.5 px-3 text-center">Inspect</th>
+                    <th className="py-2.5 px-3 text-right">Add to Watchlist</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-800/60">
+                  {filteredCandidates.map((cand) => {
+                    const qualifies = cand.qualifies_for_watchlist;
+                    const inWatchlist = watchlist.some((w) => w.ticker === cand.ticker);
+                    return (
+                      <tr key={cand.ticker} className="hover:bg-gray-800/40 transition-colors">
+                        <td className="py-3 px-3 font-bold text-white">{cand.ticker}</td>
+                        <td className="py-3 px-3 text-gray-300 text-xs">{cand.sector}</td>
+                        <td className="py-3 px-3 text-xs">
+                          <div className="font-mono text-white">{formatIndianCurrency(cand.cur_close)}</div>
+                          <div className={`text-[11px] ${cand.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {cand.change_pct >= 0 ? '+' : ''}{cand.change_pct}%
+                          </div>
+                        </td>
+                        <td className="py-3 px-3">
+                          <div className="flex flex-wrap gap-1">
+                            {cand.matched_scanners.map((sc, i) => (
+                              <span key={i} className="text-[10px] px-2 py-0.5 rounded bg-gray-800 text-gray-300 font-semibold border border-gray-700">
+                                {sc}
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="py-3 px-3">
+                          <span className={`px-2.5 py-1 rounded text-xs font-bold ${
+                            qualifies ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-red-950 text-red-300 border border-red-800'
+                          }`}>
+                            {Number(cand.composite_score || 0).toFixed(1)} / 100
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-xs">
+                          {qualifies ? (
+                            <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                              <CheckCircle2 className="w-3.5 h-3.5" /> Approved
+                            </span>
+                          ) : (
+                            <span className="text-red-400 font-semibold flex items-center gap-1">
+                              <XCircle className="w-3.5 h-3.5" /> Filtered Out
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-3 text-center">
+                          <button
+                            onClick={() => setSelectedCandidate(cand)}
+                            className="px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs font-semibold"
+                          >
+                            Details
+                          </button>
+                        </td>
+                        <td className="py-3 px-3 text-right">
+                          {inWatchlist ? (
+                            <span className="text-xs text-gray-500 font-semibold">On Watchlist</span>
+                          ) : (
+                            <button
+                              onClick={() => addToWatchlist(cand)}
+                              className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-semibold flex items-center gap-1 ml-auto"
+                            >
+                              <Plus className="w-3.5 h-3.5" /> Add
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </ErrorBoundary>
 
       {/* Candidate Checklist Detail Modal */}
       {selectedCandidate && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
-          <div className="bg-gray-900 border border-gray-800 rounded-xl max-w-2xl w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 animate-fadeIn"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="checklist-modal-title"
+        >
+          <div className="bg-gray-900 border border-gray-800 rounded-xl max-w-2xl w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto shadow-2xl">
             <div className="flex items-center justify-between border-b border-gray-800 pb-3">
               <div>
-                <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                <h3 id="checklist-modal-title" className="text-xl font-bold text-white flex items-center gap-2">
                   {selectedCandidate.ticker} — 8-Factor Quality Checklist Breakdown
                 </h3>
                 <p className="text-xs text-gray-400">Sector: {selectedCandidate.sector} | Score: {selectedCandidate.composite_score}/100</p>
               </div>
-              <button onClick={() => setSelectedCandidate(null)} className="text-gray-400 hover:text-white">✕</button>
+              <button
+                type="button"
+                onClick={() => setSelectedCandidate(null)}
+                aria-label="Close Checklist Modal"
+                className="text-gray-400 hover:text-white p-1 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                ✕
+              </button>
             </div>
 
             <div className="space-y-3">

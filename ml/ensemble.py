@@ -1,4 +1,5 @@
 import os
+import math
 import logging
 from typing import List, Dict, Any, Tuple
 import joblib
@@ -133,7 +134,12 @@ class EnsembleModel:
                         if col in df.columns:
                             val = last_row[col]
                             if pd.notnull(val):
-                                features_dict[col] = float(val)
+                                try:
+                                    f_val = float(val)
+                                    if not (math.isnan(f_val) or math.isinf(f_val)):
+                                        features_dict[col] = f_val
+                                except (ValueError, TypeError):
+                                    pass
             except Exception as e:
                 logger.debug(f"Error extracting features from df: {e}")
 
@@ -161,14 +167,25 @@ class EnsembleModel:
             logger.error("Model feature contract is incomplete: %s", missing_features)
             return self._fallback_voting(features_dict, expected_setups, setup_weights)
             
-        # Build feature vector matching scaler expectation to prevent sklearn warnings
+        # Build clean raw feature values matching scaler expectation
         import pandas as pd
-        raw_vals = [[features_dict[f] for f in self.feature_names]]
+        clean_vals = []
+        for f in self.feature_names:
+            val = features_dict.get(f)
+            if val is None or not isinstance(val, (int, float)) or math.isnan(val) or math.isinf(val):
+                val = MACRO_NEUTRAL_DEFAULTS.get(f, 0.0)
+            clean_vals.append(float(val))
+
+        raw_vals = [clean_vals]
         if hasattr(self.scaler, "feature_names_in_") and self.scaler.feature_names_in_ is not None:
             X_df = pd.DataFrame(raw_vals, columns=self.feature_names)
             X = self.scaler.transform(X_df)
         else:
             X = self.scaler.transform(raw_vals)
+
+        # Zero-variance or singular feature protection: sanitize NaN/Inf from scaler transform
+        if np.isnan(X).any() or np.isinf(X).any():
+            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Predict
         try:
@@ -178,7 +195,13 @@ class EnsembleModel:
             classes = list(self.model.classes_)
             
             def _get_prob(cls_val):
-                return probs[classes.index(cls_val)] if cls_val in classes else 0.0
+                if cls_val in classes:
+                    p = probs[classes.index(cls_val)]
+                    if math.isnan(p) or math.isinf(p):
+                        return 0.5
+                    # Probability calibration bounds: prevent uncalibrated extreme confidence
+                    return float(np.clip(p, 0.05, 0.95))
+                return 0.5
                 
             if pred_class == 1:
                 direction = "bullish"
@@ -206,6 +229,7 @@ class EnsembleModel:
                 driver = top_driver_feature.replace("_sig", "").replace("_conf", "")
                 alt_scenario = f"If {driver} reverses signal, this prediction may be invalidated."
             
+            prob = float(np.clip(prob, 0.0, 1.0))
             return {
                 "signal": direction,
                 "probability": float(prob),
@@ -226,8 +250,8 @@ class EnsembleModel:
             # Provide default weight of 1.0 if not found in setup_weights
             setup_weights = {s: setup_weights.get(s, 1.0) for s in setups_list}
             
-        bull_score = sum([features[f"{s}_conf"] * setup_weights[s] for s in setups_list if features[f"{s}_sig"] == 1])
-        bear_score = sum([features[f"{s}_conf"] * setup_weights[s] for s in setups_list if features[f"{s}_sig"] == -1])
+        bull_score = sum([features.get(f"{s}_conf", 0.0) * setup_weights.get(s, 1.0) for s in setups_list if features.get(f"{s}_sig", 0) == 1])
+        bear_score = sum([features.get(f"{s}_conf", 0.0) * setup_weights.get(s, 1.0) for s in setups_list if features.get(f"{s}_sig", 0) == -1])
         
         total = bull_score + bear_score
         
@@ -242,13 +266,16 @@ class EnsembleModel:
             
         if bull_score > bear_score:
             direction = "bullish"
-            prob = bull_score / total
-            sorted_drivers = sorted(setups_list, key=lambda s: features[f"{s}_conf"] if features[f"{s}_sig"] == 1 else 0, reverse=True)
+            raw_prob = bull_score / total
+            # Calibrate fallback heuristic: cap at 0.85 to prevent overconfidence
+            prob = float(np.clip(0.50 + raw_prob * 0.35, 0.50, 0.85))
+            sorted_drivers = sorted(setups_list, key=lambda s: features.get(f"{s}_conf", 0.0) if features.get(f"{s}_sig", 0) == 1 else 0, reverse=True)
             driver = sorted_drivers[0] if sorted_drivers else "Unknown"
         elif bear_score > bull_score:
             direction = "bearish"
-            prob = bear_score / total
-            sorted_drivers = sorted(setups_list, key=lambda s: features[f"{s}_conf"] if features[f"{s}_sig"] == -1 else 0, reverse=True)
+            raw_prob = bear_score / total
+            prob = float(np.clip(0.50 + raw_prob * 0.35, 0.50, 0.85))
+            sorted_drivers = sorted(setups_list, key=lambda s: features.get(f"{s}_conf", 0.0) if features.get(f"{s}_sig", 0) == -1 else 0, reverse=True)
             driver = sorted_drivers[0] if sorted_drivers else "Unknown"
         else:
             return {

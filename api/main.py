@@ -85,29 +85,46 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     if settings.environment.lower() == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://unpkg.com https://s3.tradingview.com https://*.tradingview.com; "
+            "script-src 'self' 'unsafe-inline' https://s3.tradingview.com https://*.tradingview.com; "
             "frame-src 'self' https://*.tradingview.com https://s3.tradingview.com; "
+            "frame-ancestors 'none'; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src https://fonts.gstatic.com; "
             "connect-src 'self' https://*.tradingview.com wss://*.tradingview.com; "
-            "img-src 'self' data: https://*.tradingview.com;"
+            "img-src 'self' data: https://*.tradingview.com; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self';"
         )
     return response
 
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
-        # Keep FastAPI's standard `detail` field for compatible clients while
-        # retaining the API's structured error shape.
-        content={"error": True, "detail": exc.detail, "message": exc.detail, "status_code": exc.status_code},
+        content={"error": True, "detail": exc.detail, "message": str(exc.detail), "status_code": exc.status_code},
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = []
+    for err in exc.errors():
+        err_dict = dict(err)
+        if "ctx" in err_dict and isinstance(err_dict["ctx"], dict):
+            err_dict["ctx"] = {k: str(v) for k, v in err_dict["ctx"].items()}
+        errors.append(err_dict)
+    return JSONResponse(
+        status_code=422,
+        content={"error": True, "detail": jsonable_encoder(errors), "message": "Request validation failed", "status_code": 422},
     )
 
 @app.exception_handler(Exception)
@@ -115,7 +132,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled Exception: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"error": True, "message": "Internal Server Error", "status_code": 500},
+        content={"error": True, "detail": "Internal Server Error", "message": "Internal Server Error", "status_code": 500},
     )
 
 from api.backtest_router import router as backtest_router

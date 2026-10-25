@@ -16,6 +16,7 @@ import os
 import csv
 import logging
 import datetime
+import threading
 from contextvars import ContextVar
 from typing import Dict, Any, List, Optional
 
@@ -25,6 +26,8 @@ TRADE_LOG_DIR = "logs"
 TRADE_LOG_FILE = os.path.join(TRADE_LOG_DIR, "trade_journal.jsonl")
 TRADE_LOG_CSV = os.path.join(TRADE_LOG_DIR, "trade_journal.csv")
 _active_log_file = ContextVar("active_trade_log_file", default=TRADE_LOG_FILE)
+_global_log_file: Optional[str] = None
+_journal_lock = threading.RLock()
 
 os.makedirs(TRADE_LOG_DIR, exist_ok=True)
 
@@ -40,15 +43,23 @@ class TradeLogger:
 
     @staticmethod
     def use_log_file(path: str):
+        global _global_log_file
+        _global_log_file = path
         return _active_log_file.set(path)
 
     @staticmethod
     def reset_log_file(token) -> None:
+        global _global_log_file
+        _global_log_file = None
         _active_log_file.reset(token)
 
     @staticmethod
     def _current_log_file() -> str:
-        return _active_log_file.get()
+        global _global_log_file
+        val = _active_log_file.get()
+        if val != TRADE_LOG_FILE:
+            return val
+        return _global_log_file or TRADE_LOG_FILE
 
     @staticmethod
     def log_entry(
@@ -195,40 +206,42 @@ class TradeLogger:
     def get_all_exits() -> List[Dict[str, Any]]:
         """Read all EXIT records from the journal."""
         exits = []
-        log_file = TradeLogger._current_log_file()
-        if not os.path.exists(log_file):
-            return exits
-        try:
-            with open(log_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    record = json.loads(line)
-                    if record.get("event") == "EXIT":
-                        exits.append(record)
-        except Exception as e:
-            logger.error(f"Error reading trade journal: {e}")
+        with _journal_lock:
+            log_file = TradeLogger._current_log_file()
+            if not os.path.exists(log_file):
+                return exits
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        record = json.loads(line)
+                        if record.get("event") == "EXIT":
+                            exits.append(record)
+            except Exception as e:
+                logger.error(f"Error reading trade journal: {e}")
         return exits
 
     @staticmethod
     def get_all_entries() -> List[Dict[str, Any]]:
         """Read all ENTRY records from the journal."""
         entries = []
-        log_file = TradeLogger._current_log_file()
-        if not os.path.exists(log_file):
-            return entries
-        try:
-            with open(log_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    record = json.loads(line)
-                    if record.get("event") == "ENTRY":
-                        entries.append(record)
-        except Exception as e:
-            logger.error(f"Error reading trade journal: {e}")
+        with _journal_lock:
+            log_file = TradeLogger._current_log_file()
+            if not os.path.exists(log_file):
+                return entries
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        record = json.loads(line)
+                        if record.get("event") == "ENTRY":
+                            entries.append(record)
+            except Exception as e:
+                logger.error(f"Error reading trade journal: {e}")
         return entries
 
     @staticmethod
@@ -248,11 +261,12 @@ class TradeLogger:
     @staticmethod
     def _append(record: Dict[str, Any]) -> None:
         """Append a single JSON record to the journal file."""
-        try:
-            with open(TradeLogger._current_log_file(), "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, default=str) + "\n")
-        except Exception as e:
-            logger.error(f"Failed to write trade journal: {e}")
+        with _journal_lock:
+            try:
+                with open(TradeLogger._current_log_file(), "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, default=str) + "\n")
+            except Exception as e:
+                logger.error(f"Failed to write trade journal: {e}")
 
     @staticmethod
     def export_csv() -> str:

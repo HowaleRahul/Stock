@@ -1,8 +1,11 @@
 import { Component, type ReactNode } from 'react';
+import { AlertTriangle, RefreshCw } from 'lucide-react';
 
 interface Props {
   children: ReactNode;
   fallback?: ReactNode | ((error: Error, reset: () => void) => ReactNode);
+  title?: string;
+  compact?: boolean;
 }
 
 interface State {
@@ -37,21 +40,50 @@ class ErrorBoundary extends Component<Props, State> {
         return this.props.fallback;
       }
 
+      if (this.props.compact) {
+        return (
+          <div
+            className="bg-gray-900/90 border border-red-800/80 rounded-lg p-5 text-center flex flex-col items-center justify-center my-2 shadow-inner"
+            role="alert"
+          >
+            <AlertTriangle className="w-6 h-6 text-red-400 mb-2 shrink-0" />
+            <h3 className="text-sm font-bold text-red-300 mb-1">
+              {this.props.title || 'Widget Encountered an Error'}
+            </h3>
+            <p className="text-gray-400 text-xs mb-3 max-w-sm line-clamp-2">
+              {this.state.error?.message || 'An unexpected rendering error occurred in this component.'}
+            </p>
+            <button
+              type="button"
+              onClick={this.handleReset}
+              className="bg-gray-800 hover:bg-gray-700 px-3.5 py-1.5 rounded text-xs text-white font-medium border border-gray-700 transition flex items-center gap-1.5"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Reload Widget
+            </button>
+          </div>
+        );
+      }
+
       return (
         <div className="min-h-screen bg-gray-950 flex items-center justify-center p-8">
           <div className="bg-gray-900 border border-red-800 rounded-lg p-8 max-w-lg text-center shadow-xl">
-            <h2 className="text-2xl font-bold text-red-400 mb-4">Something went wrong</h2>
+            <h2 className="text-2xl font-bold text-red-400 mb-4">
+              {this.props.title || 'Something went wrong'}
+            </h2>
             <p className="text-gray-400 mb-6 text-sm">
               {this.state.error?.message || 'An unexpected error occurred in this view.'}
             </p>
             <div className="flex gap-4 justify-center">
               <button
+                type="button"
                 onClick={this.handleReset}
                 className="bg-gray-800 hover:bg-gray-700 px-5 py-2 rounded text-white font-medium border border-gray-700 transition-colors"
               >
                 Try Again
               </button>
               <button
+                type="button"
                 onClick={() => {
                   this.handleReset();
                   window.location.href = '/app/';

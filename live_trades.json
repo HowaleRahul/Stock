@@ -1,0 +1,31 @@
+[
+    {
+        "order_id": "TEST_LIVE_ORDER_999",
+        "ticker": "NIFTY 23000 CE",
+        "direction": "bullish",
+        "entry_price": 120.0,
+        "quantity": 25,
+        "invested": 3000.0,
+        "tp": 240.0,
+        "sl": 60.0,
+        "is_open": true,
+        "entry_time": "2026-10-25T14:54:34.672904+00:00"
+    },
+    {
+        "order_id": "TEST_LIVE_ORDER_1000",
+        "ticker": "BANKNIFTY 50000 CE",
+        "direction": "bullish",
+        "entry_price": 250.0,
+        "quantity": 15,
+        "invested": 3750.0,
+        "tp": 500.0,
+        "sl": 125.0,
+        "is_options": true,
+        "is_open": false,
+        "entry_time": "2026-10-25T14:54:34.714404+00:00",
+        "exit_price": 300.0,
+        "exit_time": "2026-10-25T14:54:34.750427+00:00",
+        "pnl_pct": 20.0,
+        "cash_pnl": 750.0
+    }
+]

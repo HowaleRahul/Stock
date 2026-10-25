@@ -70,6 +70,9 @@ class RealTimeDataFeed:
         "ETH-USD": ("ETHUSD", "BINANCE", "crypto"),
         "SPY": ("SPY", "AMEX", "america"),
         "^GSPC": ("SPX", "SP", "america"),
+        "INDIAVIX": ("INDIAVIX", "NSE", "india"),
+        "^INDIAVIX": ("INDIAVIX", "NSE", "india"),
+        "INDIA VIX": ("INDIAVIX", "NSE", "india"),
     }
 
     INTERVAL_MAPPING = {
@@ -166,6 +169,8 @@ class RealTimeDataFeed:
                     yf_sym = "^NSEI"
                 elif ticker in ("BANKNIFTY", "NIFTY BANK"):
                     yf_sym = "^NSEBANK"
+                elif ticker in ("INDIAVIX", "INDIA VIX", "^INDIAVIX"):
+                    yf_sym = "^INDIAVIX"
                 yt = yf.Ticker(yf_sym)
                 fast_info = getattr(yt, "fast_info", None)
                 if fast_info:
@@ -387,3 +392,19 @@ class RealTimeDataFeed:
     async def get_chart_candles(cls, ticker: str, timeframe: str = "1d", limit: int = 300) -> List[Dict[str, Any]]:
         """Asynchronous wrapper for get_chart_candles_sync."""
         return await asyncio.to_thread(cls.get_chart_candles_sync, ticker, timeframe, limit)
+
+    @classmethod
+    def get_india_vix_sync(cls) -> float:
+        """
+        Synchronously fetches real-time India VIX level.
+        Returns percentage (e.g. 14.5 for 14.5%). Defaults to 14.0 if unreachable.
+        """
+        quote = cls.get_realtime_quote_sync("INDIAVIX")
+        if quote and isinstance(quote, dict) and quote.get("ltp", 0.0) > 0:
+            return float(quote["ltp"])
+        return 14.0
+
+    @classmethod
+    async def get_india_vix(cls) -> float:
+        """Asynchronous wrapper for get_india_vix_sync."""
+        return await asyncio.to_thread(cls.get_india_vix_sync)

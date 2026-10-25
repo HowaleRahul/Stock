@@ -13,7 +13,8 @@ This document establishes operational directives, architectural constraints, and
 
 ### 1.1 Non-Negotiable Operational Safety
 * **Fail-Closed Financial Execution**: Never allow automated orders or broker connections without an explicit `ENVIRONMENT=LIVE` setting, valid authenticated broker adapters, and static IP whitelisting. By default, live order injection throws a `RuntimeError` (verified in `api/broker.py` line 131).
-* **Option Buying Only**: Under SEBI retail algo regulations and system policy, derivative strategies are restricted to long options (`CE` or `PE` buying). Naked option writing (short calls/puts) is prohibited to prevent unlimited tail risk (verified in `ml/options_engine.py` line 11).
+* **Derivatives Execution Modes**: The derivatives engine supports long options (`BUY_OPTIONS`), directional option writing (`SELL_OPTIONS`), defined-risk credit spreads (`CREDIT_SPREAD`), and index futures (`FUTURES`). Naked unhedged options selling without exchange SPAN + Exposure margin allocation is prohibited. Retail accounts utilize defined-risk credit spreads (Bull Put / Bear Call) where maximum loss is strictly capped by the wing width.
+* **Positive Theta Notation**: Option selling and credit spreads harvest positive theta decay ($+\Theta > 0$ or $+₹\text{Theta/day}$), representing an income stream rather than a holding friction.
 * **Risk Envelope Enforcement**: The risk engine strictly enforces maximum risk per trade ($\le 2\%$, configurable up to $5\%$ ceiling) and minimum Risk-to-Reward ratio ($\ge 1.5:1$). Trades violating these constraints must be rejected and logged to the journal with explicit rejection reasons (verified in `ml/risk_engine.py`).
 * **Kill-Switch Thresholds**: If total Mark-to-Market (MTM) drawdown reaches or exceeds `max_portfolio_drawdown_pct` (default 10%), all trading activity is locked, a critical alert is dispatched via `api/notifier.py`, and the status transitions to `HALTED_DRAWDOWN` (verified in `paper_trader.py`).
 
@@ -28,8 +29,8 @@ This document establishes operational directives, architectural constraints, and
 * **Dual Scalp & Swing Framework**:
   - Scalp trading operates on `5m` (hold $\le 15$ bars) and `15m` (hold $\le 25$ bars) with rapid momentum targets.
   - Swing trading operates on `1h` (hold $\le 40$ bars) and `1d` (hold $\le 20$ bars) with wide trailing stops.
-* **F&O Execution Isolation**: All trade orders must pass through `DerivativeEngine.generate_derivative_plan()`. Under micro/small capital ($\le ₹1,00,000$), it buys Call/Put options (`CE`/`PE`) to strictly cap risk to premium invested; under growth capital ($\ge ₹5,00,000$) in strong trends, it allocates linear Index Futures.
-* **SEBI Compliance**: Naked options selling/writing is strictly prohibited. Only long options or defined futures risk are allowed.
+* **F&O Execution Isolation**: All trade orders must pass through `DerivativeEngine.generate_derivative_plan()`. Under micro/small capital ($\le ₹1,00,000$), it buys Call/Put options (`CE`/`PE`) or utilizes defined-risk Credit Spreads; under institutional capital ($\ge ₹5,00,000$) with SPAN margin clearance, it can write options or allocate linear Index Futures.
+* **SEBI Compliance**: Naked unhedged options selling without full SPAN margin coverage is strictly prohibited. Intraday MIS trades must auto-square-off at 15:15 IST.
 
 ---
 
@@ -121,10 +122,10 @@ Before committing any modifications or creating PRs, agents must execute the fol
 
 4. **Python Automated Test Suite**:
    ```powershell
-   # Run all 131 offline unit tests hermetically without requiring Docker/PostgreSQL:
+   # Run all 235 offline unit tests hermetically without requiring Docker/PostgreSQL:
    venv\Scripts\pytest -m "not database" -q
 
-   # Run full 148 unit and database integration tests when Docker is online:
+   # Run full 254 unit and database integration tests when Docker is online:
    venv\Scripts\pytest -q
    ```
    All hermetic unit tests must pass 100% offline. Full integration tests run automatically when `trading_timescaledb` is healthy.

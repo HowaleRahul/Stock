@@ -14,8 +14,15 @@ from ml.trade_logger import TradeLogger
 from ml.journal_analyzer import JournalAnalyzer
 from ml.reinforcement_learner import ReinforcementLearner
 from api.db import async_session_factory
-from models.models import Account, JournalEvent, Trade
+from models.models import Account, JournalEvent, Trade, TradeContext
 from api.auth import get_api_key, rate_limiter
+from api.config_store import (
+    CONFIG_PATH,
+    _config_file_lock,
+    load_config_atomic,
+    save_config_atomic,
+    update_config_atomic,
+)
 
 logger = logging.getLogger("trading.api.dashboard")
 
@@ -25,19 +32,16 @@ router = APIRouter(
     dependencies=[Depends(get_api_key)],
 )
 
-CONFIG_PATH = "config.json"
-_config_lock = asyncio.Lock()
-
 # Whitelist of allowed config keys to prevent arbitrary injection
 class ConfigUpdate(BaseModel):
     """Only allow values that preserve the trading configuration invariants."""
     model_config = ConfigDict(extra="forbid")
     environment: Optional[Literal["PAPER", "LIVE"]] = None
-    capital: Optional[float] = Field(default=None, gt=0, le=1_000_000_000)
-    risk_per_trade_pct: Optional[float] = Field(default=None, gt=0, le=0.05)
-    max_portfolio_drawdown_pct: Optional[float] = Field(default=None, gt=0, le=1)
-    min_ai_confidence: Optional[float] = Field(default=None, ge=0, le=1)
-    min_risk_reward_ratio: Optional[float] = Field(default=None, gt=0, le=100)
+    capital: Optional[float] = Field(default=None, gt=0, le=1_000_000_000, allow_inf_nan=False)
+    risk_per_trade_pct: Optional[float] = Field(default=None, gt=0, le=0.05, allow_inf_nan=False)
+    max_portfolio_drawdown_pct: Optional[float] = Field(default=None, gt=0, le=1, allow_inf_nan=False)
+    min_ai_confidence: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    min_risk_reward_ratio: Optional[float] = Field(default=None, gt=0, le=100, allow_inf_nan=False)
     retrain_interval_days: Optional[int] = Field(default=None, ge=1, le=365)
     drift_check_interval_hours: Optional[int] = Field(default=None, ge=1, le=8760)
 
@@ -63,56 +67,60 @@ async def get_portfolio(_rate_limit: bool = Depends(rate_limiter(60))):
     """Get paper trading portfolio stats and open trades from the database, with JSON fallback."""
     try:
         async with async_session_factory() as session:
-            acc_stmt = select(Account)
-            acc_res = await session.execute(acc_stmt)
-            account = acc_res.scalar_one_or_none()
-            
-            trade_stmt = select(Trade).where(Trade.is_open == True)
-            trade_res = await session.execute(trade_stmt)
-            open_trades = trade_res.scalars().all()
-            
-            account_data = {
-                "capital": account.capital if account else 0.0,
-                "peak_capital": account.peak_capital if account else 0.0,
-                "status": account.status if account else "UNKNOWN"
-            }
-            
-            trades_data = []
-            for t in open_trades:
-                # Extract context if present for F&O Greeks
-                ctx = {}
-                try:
-                    ctx_stmt = select(TradeContext).where(TradeContext.order_id == t.order_id)
-                    ctx_row = (await session.execute(ctx_stmt)).scalar_one_or_none()
-                    if ctx_row:
-                        ctx = json.loads(ctx_row.payload)
-                except Exception:
-                    pass
-
-                trades_data.append({
-                    "order_id": t.order_id,
-                    "ticker": t.ticker,
-                    "direction": t.direction,
-                    "entry_price": t.entry_price,
-                    "quantity": t.quantity,
-                    "invested": t.invested,
-                    "take_profit": t.take_profit,
-                    "stop_loss": t.stop_loss,
-                    "is_fo": ctx.get("is_fo", True),
-                    "instrument_type": ctx.get("instrument_type", "OPTION" if ("CE" in t.ticker or "PE" in t.ticker) else "FUTURE"),
-                    "opt_type": ctx.get("opt_type", "CE" if "CE" in t.ticker else ("PE" if "PE" in t.ticker else "FUT")),
-                    "opt_strike": ctx.get("opt_strike", 0.0),
-                    "opt_delta": ctx.get("opt_delta", 0.5),
-                    "opt_theta": ctx.get("opt_theta", 0.0),
-                    "unrealized_pnl": ctx.get("unrealized_pnl", 0.0),
-                    "strike_type": ctx.get("strike_type", "ATM"),
-                    "lot_size": ctx.get("lot_size", 25),
-                })
+            try:
+                acc_stmt = select(Account)
+                acc_res = await session.execute(acc_stmt)
+                account = acc_res.scalar_one_or_none()
                 
-            return {
-                "account": account_data,
-                "open_trades": trades_data
-            }
+                trade_stmt = select(Trade).where(Trade.is_open == True)
+                trade_res = await session.execute(trade_stmt)
+                open_trades = trade_res.scalars().all()
+                
+                account_data = {
+                    "capital": account.capital if account else 0.0,
+                    "peak_capital": account.peak_capital if account else 0.0,
+                    "status": account.status if account else "UNKNOWN"
+                }
+                
+                trades_data = []
+                for t in open_trades:
+                    # Extract context if present for F&O Greeks
+                    ctx = {}
+                    try:
+                        ctx_stmt = select(TradeContext).where(TradeContext.order_id == t.order_id)
+                        ctx_row = (await session.execute(ctx_stmt)).scalar_one_or_none()
+                        if ctx_row:
+                            ctx = json.loads(ctx_row.payload)
+                    except Exception:
+                        pass
+
+                    trades_data.append({
+                        "order_id": t.order_id,
+                        "ticker": t.ticker,
+                        "direction": t.direction,
+                        "entry_price": t.entry_price,
+                        "quantity": t.quantity,
+                        "invested": t.invested,
+                        "take_profit": t.take_profit,
+                        "stop_loss": t.stop_loss,
+                        "is_fo": ctx.get("is_fo", True),
+                        "instrument_type": ctx.get("instrument_type", "OPTION" if ("CE" in t.ticker or "PE" in t.ticker) else "FUTURE"),
+                        "opt_type": ctx.get("opt_type", "CE" if "CE" in t.ticker else ("PE" if "PE" in t.ticker else "FUT")),
+                        "opt_strike": ctx.get("opt_strike", 0.0),
+                        "opt_delta": ctx.get("opt_delta", 0.5),
+                        "opt_theta": ctx.get("opt_theta", 0.0),
+                        "unrealized_pnl": ctx.get("unrealized_pnl", 0.0),
+                        "strike_type": ctx.get("strike_type", "ATM"),
+                        "lot_size": ctx.get("lot_size", 25),
+                    })
+                    
+                return {
+                    "account": account_data,
+                    "open_trades": trades_data
+                }
+            except Exception:
+                await session.rollback()
+                raise
     except Exception as db_err:
         logger.warning(f"Database query failed in /portfolio; using local fallback: {db_err}")
         account_data = {"capital": 1000000.0, "peak_capital": 1000000.0, "status": "ACTIVE"}
@@ -160,91 +168,128 @@ async def get_portfolio(_rate_limit: bool = Depends(rate_limiter(60))):
 
 @router.get("/analytics")
 async def get_analytics(_rate_limit: bool = Depends(rate_limiter(30))):
-    """Compute equity curve, win rate by day, and probability of ruin."""
-    async with async_session_factory() as session:
-        stmt = select(Trade).where(Trade.is_open == False).order_by(Trade.exit_time.asc())
-        res = await session.execute(stmt)
-        closed_trades = res.scalars().all()
-        
-        starting_capital = 100000.0
-        if os.path.exists(CONFIG_PATH):
+    """Compute equity curve, win rate by day, and probability of ruin, with local fallback."""
+    closed_trades = []
+    try:
+        async with async_session_factory() as session:
             try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                starting_capital = float(config.get("capital", starting_capital))
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                logger.warning("Unable to read configured starting capital; using fallback.")
-        current_capital = starting_capital
-        
-        equity_curve = []
-        win_by_day = {0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0}
-        total_by_day = {0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0}
-        
-        wins = 0
-        losses = 0
-        
-        for t in closed_trades:
-            if t.pnl_pct is not None:
-                pnl_amt = (t.pnl_pct / 100.0) * t.invested
-                current_capital += pnl_amt
-                if t.pnl_pct > 0:
-                    wins += 1
-                else:
-                    losses += 1
-                
-                if t.exit_time:
-                    equity_curve.append({
-                        "time": t.exit_time.timestamp(),
-                        "value": current_capital
-                    })
-                    
-                    day = t.exit_time.weekday()
-                    total_by_day[day] += 1
-                    if t.pnl_pct > 0:
-                        win_by_day[day] += 1
-                        
-        completed_trades = wins + losses
-        win_rate = (wins / completed_trades * 100) if completed_trades > 0 else 0
-        
-        # Mathematically rigorous probability of ruin (Gambler's Ruin with asymmetric payoffs)
-        if completed_trades >= 5 and wins > 0 and losses > 0:
-            import math
-            win_pnls = [t.pnl_pct for t in closed_trades if t.pnl_pct is not None and t.pnl_pct > 0]
-            loss_pnls = [abs(t.pnl_pct) for t in closed_trades if t.pnl_pct is not None and t.pnl_pct <= 0]
-            avg_w = float(sum(win_pnls) / len(win_pnls)) if win_pnls else 1.0
-            avg_l = float(sum(loss_pnls) / len(loss_pnls)) if loss_pnls else 1.0
-            p = max(0.01, min(0.99, wins / completed_trades))
-            q = 1.0 - p
-            payoff = avg_w / avg_l if avg_l > 0 else 1.0
-            edge = (p * payoff) - q
-            if edge <= 0:
-                probability_of_ruin = 99.0
+                stmt = select(Trade).where(Trade.is_open == False).order_by(Trade.exit_time.asc())
+                res = await session.execute(stmt)
+                closed_trades = list(res.scalars().all())
+            except Exception:
+                await session.rollback()
+                raise
+    except Exception as db_err:
+        logger.warning(f"Database query failed in /analytics; using local fallback: {db_err}")
+        if os.path.exists("paper_trades.json"):
+            try:
+                import types
+                from datetime import datetime
+                with open("paper_trades.json", "r", encoding="utf-8") as f:
+                    all_trades = json.load(f)
+                    for pt in all_trades:
+                        if pt.get("status") in ("CLOSED_WIN", "CLOSED_LOSS", "TRAILING_SL", "TIME_EXIT", "STOP_LOSS", "TAKE_PROFIT", "INTRADAY_SQUARE_OFF"):
+                            t_obj = types.SimpleNamespace()
+                            # Database schema stores percentage as e.g. 2.5 for 2.5%
+                            t_obj.pnl_pct = (pt.get("pnl_pct", 0.0) or 0.0) * 100.0
+                            t_obj.invested = float(pt.get("invested", 10000.0))
+                            t_str = pt.get("closed_at")
+                            try:
+                                t_obj.exit_time = datetime.fromisoformat(t_str) if t_str else None
+                            except Exception:
+                                t_obj.exit_time = None
+                            closed_trades.append(t_obj)
+            except Exception as json_err:
+                logger.debug(f"JSON fallback in analytics failed: {json_err}")
+
+    import math
+    starting_capital = 100000.0
+    try:
+        config = load_config_atomic(CONFIG_PATH)
+        cfg_cap = float(config.get("capital", starting_capital))
+        if cfg_cap > 0 and math.isfinite(cfg_cap):
+            starting_capital = cfg_cap
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("Unable to read configured starting capital; using fallback.")
+    current_capital = starting_capital
+
+    equity_curve = []
+    win_by_day = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
+    total_by_day = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
+
+    wins = 0
+    losses = 0
+
+    for t in closed_trades:
+        raw_pnl = getattr(t, "pnl_pct", None)
+        if raw_pnl is not None and math.isfinite(raw_pnl):
+            invested = float(getattr(t, "invested", 10000.0) or 10000.0)
+            if not math.isfinite(invested) or invested <= 0:
+                invested = 10000.0
+            pnl_amt = (raw_pnl / 100.0) * invested
+            current_capital += pnl_amt
+            if raw_pnl > 0:
+                wins += 1
             else:
-                ratio = q / (p * payoff) if (p * payoff) > 0 else 1.0
-                n_units = -math.log(0.5) / 0.02  # 50% account drawdown threshold at 2% risk
-                probability_of_ruin = round(min(100.0, max(0.0, (ratio ** n_units) * 100.0)), 2)
-        elif completed_trades > 0 and wins == 0:
+                losses += 1
+
+            exit_t = getattr(t, "exit_time", None)
+            if exit_t:
+                equity_curve.append({
+                    "time": exit_t.timestamp(),
+                    "value": round(current_capital, 2)
+                })
+
+                day = exit_t.weekday()
+                total_by_day[day] += 1
+                if raw_pnl > 0:
+                    win_by_day[day] += 1
+
+    completed_trades = wins + losses
+    win_rate = (wins / completed_trades * 100) if completed_trades > 0 else 0
+
+    # Mathematically rigorous probability of ruin (Gambler's Ruin with asymmetric payoffs)
+    if completed_trades >= 5 and wins > 0 and losses > 0:
+        win_pnls = [t.pnl_pct for t in closed_trades if getattr(t, "pnl_pct", None) is not None and t.pnl_pct > 0]
+        loss_pnls = [abs(t.pnl_pct) for t in closed_trades if getattr(t, "pnl_pct", None) is not None and t.pnl_pct <= 0]
+        avg_w = float(sum(win_pnls) / len(win_pnls)) if win_pnls else 1.0
+        avg_l = float(sum(loss_pnls) / len(loss_pnls)) if loss_pnls else 1.0
+        p = max(0.01, min(0.99, wins / completed_trades))
+        q = 1.0 - p
+        payoff = avg_w / avg_l if avg_l > 0 else 1.0
+        edge = (p * payoff) - q
+        if edge <= 0:
             probability_of_ruin = 99.0
-        elif completed_trades > 0 and losses == 0:
-            probability_of_ruin = 0.01
         else:
-            probability_of_ruin = 0.0
-        
-        return {
-            "equity_curve": equity_curve,
-            "win_rate": round(win_rate, 2),
-            "total_trades": completed_trades,
-            "probability_of_ruin": probability_of_ruin,
-            "win_by_day": {
-                "Monday": round(win_by_day[0] / total_by_day[0] * 100, 2) if total_by_day[0] else 0,
-                "Tuesday": round(win_by_day[1] / total_by_day[1] * 100, 2) if total_by_day[1] else 0,
-                "Wednesday": round(win_by_day[2] / total_by_day[2] * 100, 2) if total_by_day[2] else 0,
-                "Thursday": round(win_by_day[3] / total_by_day[3] * 100, 2) if total_by_day[3] else 0,
-                "Friday": round(win_by_day[4] / total_by_day[4] * 100, 2) if total_by_day[4] else 0,
-                "Saturday": round(win_by_day[5] / total_by_day[5] * 100, 2) if total_by_day[5] else 0,
-                "Sunday": round(win_by_day[6] / total_by_day[6] * 100, 2) if total_by_day[6] else 0,
-            }
+            ratio = q / (p * payoff) if (p * payoff) > 0 else 1.0
+            n_units = -math.log(0.5) / 0.02  # 50% account drawdown threshold at 2% risk
+            try:
+                ruin_val = (ratio ** n_units) * 100.0
+                probability_of_ruin = round(min(100.0, max(0.0, ruin_val)), 2)
+            except (OverflowError, ValueError):
+                probability_of_ruin = 99.0
+    elif completed_trades > 0 and wins == 0:
+        probability_of_ruin = 99.0
+    elif completed_trades > 0 and losses == 0:
+        probability_of_ruin = 0.01
+    else:
+        probability_of_ruin = 0.0
+
+    return {
+        "equity_curve": equity_curve,
+        "win_rate": round(win_rate, 2),
+        "total_trades": completed_trades,
+        "probability_of_ruin": probability_of_ruin,
+        "win_by_day": {
+            "Monday": round(win_by_day[0] / total_by_day[0] * 100, 2) if total_by_day[0] else 0,
+            "Tuesday": round(win_by_day[1] / total_by_day[1] * 100, 2) if total_by_day[1] else 0,
+            "Wednesday": round(win_by_day[2] / total_by_day[2] * 100, 2) if total_by_day[2] else 0,
+            "Thursday": round(win_by_day[3] / total_by_day[3] * 100, 2) if total_by_day[3] else 0,
+            "Friday": round(win_by_day[4] / total_by_day[4] * 100, 2) if total_by_day[4] else 0,
+            "Saturday": round(win_by_day[5] / total_by_day[5] * 100, 2) if total_by_day[5] else 0,
+            "Sunday": round(win_by_day[6] / total_by_day[6] * 100, 2) if total_by_day[6] else 0,
         }
+    }
 
 
 @router.get("/trades")
@@ -257,13 +302,17 @@ async def get_trades(
     events = []
     try:
         async with async_session_factory() as session:
-            result = await session.execute(
-                select(JournalEvent)
-                .order_by(JournalEvent.timestamp.desc())
-                .offset(offset)
-                .limit(limit)
-            )
-            events = list(reversed(result.scalars().all()))
+            try:
+                result = await session.execute(
+                    select(JournalEvent)
+                    .order_by(JournalEvent.timestamp.desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+                events = list(reversed(result.scalars().all()))
+            except Exception:
+                await session.rollback()
+                raise
     except Exception as db_err:
         logger.warning(f"Database query failed in /trades; using JSON fallback: {db_err}")
 
@@ -288,18 +337,11 @@ async def get_trades(
 @router.get("/config")
 async def get_config():
     """Get current configuration."""
-    async with _config_lock:
-        if os.path.exists(CONFIG_PATH):
-            try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                if not isinstance(config, dict):
-                    raise ValueError("configuration root is not an object")
-                return config
-            except (OSError, ValueError, json.JSONDecodeError):
-                logger.exception("Configuration store is unreadable")
-                raise HTTPException(status_code=503, detail="Configuration store is unavailable.")
-        return {}
+    try:
+        return load_config_atomic(CONFIG_PATH)
+    except (OSError, ValueError, json.JSONDecodeError):
+        logger.exception("Configuration store is unreadable")
+        raise HTTPException(status_code=503, detail="Configuration store is unavailable.")
 
 
 @router.post("/config")
@@ -313,33 +355,12 @@ async def update_config(
     if not filtered:
         return {"status": "error", "message": "No valid configuration keys provided."}
     
-    async with _config_lock:
-        config = {}
-        if os.path.exists(CONFIG_PATH):
-            try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                if not isinstance(config, dict):
-                    raise ValueError("configuration root is not an object")
-            except (OSError, ValueError, json.JSONDecodeError):
-                logger.exception("Configuration store is unreadable")
-                raise HTTPException(status_code=503, detail="Configuration store is unavailable.")
-        
-        config.update(filtered)
-        
-        directory = os.path.dirname(os.path.abspath(CONFIG_PATH))
-        fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".config-", suffix=".json")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=4)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(temp_path, CONFIG_PATH)
-        finally:
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-            
+    try:
+        update_config_atomic(filtered, CONFIG_PATH)
         return {"status": "success", "updated_keys": list(filtered.keys())}
+    except (OSError, ValueError, json.JSONDecodeError):
+        logger.exception("Configuration store is unreadable")
+        raise HTTPException(status_code=503, detail="Configuration store is unavailable.")
 
 
 @router.get("/ai-journal")

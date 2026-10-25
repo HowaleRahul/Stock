@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import List, Dict, Any, Optional
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -11,26 +12,54 @@ from data.news_fetcher import NewsFetcher
 
 logger = logging.getLogger("trading.data.service")
 
+
+def _validate_service_ticker(ticker: str) -> str:
+    if not ticker or not isinstance(ticker, str):
+        raise ValueError("Ticker symbol cannot be empty.")
+    if "\x00" in ticker:
+        raise ValueError("Ticker symbol cannot contain null bytes.")
+    clean = ticker.upper().strip()
+    if not clean:
+        raise ValueError("Ticker symbol cannot be empty.")
+    if len(clean) > 64:
+        raise ValueError("Invalid ticker symbol length.")
+    if ".." in clean or "/" in clean or "\\" in clean:
+        raise ValueError("Ticker symbol cannot contain path traversal characters.")
+    if not re.match(r"^[A-Z0-9\._\-\^\=\&]+$", clean):
+        raise ValueError(f"Invalid characters in ticker symbol '{ticker}'.")
+    return clean
+
+
 class DataIngestionService:
     """
     Orchestrates data fetching, cleaning, and idempotent TimescaleDB bulk upserts for financial instruments.
     """
 
     @classmethod
-    async def get_or_create_symbol(cls, ticker: str, custom_info: Optional[Dict[str, Any]] = None, db: Optional[Any] = None) -> Symbol:
+    async def get_or_create_symbol(
+        cls,
+        ticker: str,
+        custom_info: Optional[Dict[str, Any]] = None,
+        db: Optional[Any] = None,
+        verify_external: bool = False
+    ) -> Symbol:
         """
         Retrieves a Symbol by ticker or creates a new entry using yfinance metadata / overrides.
         Supports session reuse if `db` (AsyncSession) is provided.
+        If `verify_external=True`, verifies that the instrument exists externally before creating DB record.
         """
-        ticker = ticker.upper().strip()
-        if not ticker:
-            raise ValueError("Ticker symbol cannot be empty.")
+        ticker = _validate_service_ticker(ticker)
         async def _execute(session):
             stmt = select(Symbol).where(Symbol.ticker == ticker)
             res = await session.execute(stmt)
             sym = res.scalar_one_or_none()
 
             if not sym:
+                if verify_external:
+                    has_data = await YFinanceFetcher.verify_symbol_exists(ticker)
+                    if not has_data:
+                        raise ValueError(f"External data verification failed for symbol '{ticker}'.")
+
                 info = await YFinanceFetcher.fetch_symbol_info(ticker)
                 if custom_info:
                     if custom_info.get("name"):
@@ -85,12 +114,10 @@ class DataIngestionService:
     ) -> Dict[str, Any]:
         """
         Fetches OHLCV bars for a ticker, cleans/verifies them, and performs idempotent chunked upserts.
+        Only creates a Symbol entry in the database if external data verification succeeds.
         """
-        ticker = ticker.upper().strip()
-        if not ticker:
-            raise ValueError("Ticker symbol cannot be empty.")
+        ticker = _validate_service_ticker(ticker)
         logger.info(f"Starting OHLCV sync for {ticker} (interval={interval})...")
-        symbol = await cls.get_or_create_symbol(ticker)
 
         if not start and not end:
             if interval in ["1m"]:
@@ -101,7 +128,7 @@ class DataIngestionService:
                 if period in ["5y", "max", "10y"]:
                     period = "730d"
 
-        # 1. Fetch raw data
+        # 1. Fetch raw data from external source
         raw_bars = await YFinanceFetcher.fetch_ohlcv_bars(
             ticker=ticker,
             period=period,
@@ -113,7 +140,7 @@ class DataIngestionService:
         if not raw_bars:
             return {
                 "ticker": ticker,
-                "symbol_id": symbol.id,
+                "symbol_id": None,
                 "bars_synced": 0,
                 "status": "no_data"
             }
@@ -124,12 +151,15 @@ class DataIngestionService:
         if not cleaned_bars:
             return {
                 "ticker": ticker,
-                "symbol_id": symbol.id,
+                "symbol_id": None,
                 "bars_synced": 0,
                 "status": "all_dropped"
             }
 
-        # 3. Batch upsert into ohlcv_bars hypertable using ON CONFLICT DO UPDATE
+        # 3. Only create/retrieve symbol after external data verification succeeds
+        symbol = await cls.get_or_create_symbol(ticker)
+
+        # 4. Batch upsert into ohlcv_bars hypertable using ON CONFLICT DO UPDATE
         chunk_size = 1000
         total_synced = 0
 
@@ -199,47 +229,50 @@ class DataIngestionService:
         """
         Fetches financial news headlines for a ticker and upserts them idempotently into news_headlines hypertable.
         """
-        ticker = ticker.upper().strip()
-        if not ticker:
-            raise ValueError("Ticker symbol cannot be empty.")
+        ticker = _validate_service_ticker(ticker)
         logger.info(f"Starting news sync for {ticker}...")
-        symbol = await cls.get_or_create_symbol(ticker)
 
         headlines = await NewsFetcher.fetch_ticker_news(ticker)
         if not headlines:
             return {
                 "ticker": ticker,
-                "symbol_id": symbol.id,
+                "symbol_id": None,
                 "news_synced": 0,
                 "status": "no_news"
             }
 
+        # Filter and validate headline records
+        records = []
+        for h in headlines:
+            if not (h.get("time") and h.get("url") and h.get("title")):
+                continue
+            clean_url = DataCleaner.sanitize_text(h["url"], 1024)
+            clean_title = DataCleaner.sanitize_text(h["title"], 512)
+            if not clean_url or not clean_title:
+                continue
+            records.append({
+                "time": h["time"],
+                "url": clean_url,
+                "title": clean_title,
+                "source": DataCleaner.sanitize_text(h.get("source"), 128) or "Unknown",
+                "summary": DataCleaner.sanitize_text(h.get("summary"), 65000)
+            })
+        if not records:
+            return {
+                "ticker": ticker,
+                "symbol_id": None,
+                "news_synced": 0,
+                "status": "no_valid_news"
+            }
+
+        # Only create/retrieve symbol after external data verification succeeds
+        symbol = await cls.get_or_create_symbol(ticker)
+
+        for r in records:
+            r["symbol_id"] = symbol.id
+
         async with async_session_factory() as session:
             try:
-                records = []
-                for h in headlines:
-                    if not (h.get("time") and h.get("url") and h.get("title")):
-                        continue
-                    clean_url = DataCleaner.sanitize_text(h["url"], 1024)
-                    clean_title = DataCleaner.sanitize_text(h["title"], 512)
-                    if not clean_url or not clean_title:
-                        continue
-                    records.append({
-                        "time": h["time"],
-                        "url": clean_url,
-                        "symbol_id": symbol.id,
-                        "title": clean_title,
-                        "source": DataCleaner.sanitize_text(h.get("source"), 128) or "Unknown",
-                        "summary": DataCleaner.sanitize_text(h.get("summary"), 65000)
-                    })
-                if not records:
-                    return {
-                        "ticker": ticker,
-                        "symbol_id": symbol.id,
-                        "news_synced": 0,
-                        "status": "no_valid_news"
-                    }
-
                 # Deduplicate records by composite unique key (time, url)
                 records = list({(r["time"], r["url"]): r for r in records}.values())
 

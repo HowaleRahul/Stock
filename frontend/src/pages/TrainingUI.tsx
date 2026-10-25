@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import axios from 'axios';
 import {
   Play,
@@ -22,10 +22,20 @@ import {
   Compass,
   Eye,
   X,
-  History
+  History,
+  Search,
 } from 'lucide-react';
 import { OptionChartViewer } from '../components/OptionChartViewer';
 import TradingViewWidget from '../components/TradingViewWidget';
+import ErrorBoundary from '../components/ErrorBoundary';
+import { formatIndianCurrency } from '../utils/formatters';
+import {
+  getExchangeLotSize,
+  formatContractSymbol,
+  isOptionSellingOrSpread,
+  getOptionStrategyLabel,
+  calculateOptionPayoffProfile,
+} from '../utils/foUtils';
 
 
 interface PortfolioState {
@@ -64,16 +74,18 @@ const CAPITAL_PRESETS = [
 ];
 
 const INDEX_PRESETS = [
-  { id: 'ALL', label: 'All F&O Indices', desc: 'NIFTY, BANKNIFTY, SENSEX, FINNIFTY' },
+  { id: 'ALL', label: 'All F&O Indices', desc: 'NIFTY, BANKNIFTY, SENSEX, FINNIFTY, MIDCPNIFTY' },
   { id: 'NIFTY', label: 'NIFTY 50', desc: 'Lot: 25 | Interval: 50 | Expiry: Thu' },
   { id: 'BANKNIFTY', label: 'BANK NIFTY', desc: 'Lot: 15 | Interval: 100 | Expiry: Wed' },
   { id: 'SENSEX', label: 'BSE SENSEX', desc: 'Lot: 10 | Interval: 100 | Expiry: Fri' },
   { id: 'FINNIFTY', label: 'FIN NIFTY', desc: 'Lot: 25 | Interval: 50 | Expiry: Tue' },
+  { id: 'MIDCPNIFTY', label: 'MIDCAP NIFTY', desc: 'Lot: 50 | Interval: 25 | Expiry: Mon' },
 ];
 
 const DERIVATIVE_PRESETS = [
   { id: 'AUTO', label: 'Auto (Budget-Optimized)', desc: 'Routes to Options (<₹1.2L) or Futures (≥₹1.2L)' },
   { id: 'OPTIONS', label: 'Options Only (CE / PE)', desc: 'Directional Call & Put Buying' },
+  { id: 'SPREADS', label: 'Credit Spreads & Selling', desc: 'Bull Put / Bear Call Spreads & Hedged Writing (Theta Harvesting)' },
   { id: 'FUTURES', label: 'Futures Only', desc: 'Index Futures (Requires Margin)' },
 ];
 
@@ -102,6 +114,11 @@ const TrainingUI = () => {
     underlying: string;
     strike: number;
     optionType: 'CE' | 'PE';
+    action?: 'BUY' | 'SELL';
+    strategyType?: string;
+    hedgeStrike?: number;
+    hedgePrice?: number;
+    netCredit?: number;
     entryPrice?: number;
     targetPrice?: number;
     stopLossPrice?: number;
@@ -110,6 +127,25 @@ const TrainingUI = () => {
   // Trade Specification Dossier Inspection Modal
   const [inspectedTrade, setInspectedTrade] = useState<any | null>(null);
   const [replayTelemetry, setReplayTelemetry] = useState<any | null>(null);
+  const [capitalError, setCapitalError] = useState<string | null>(null);
+  const [logDisplayCount, setLogDisplayCount] = useState<number>(300);
+  const [logFilter, setLogFilter] = useState<string>('');
+  const modalRef = useRef<HTMLDivElement>(null);
+  const modalCloseBtnRef = useRef<HTMLButtonElement>(null);
+  const triggerElementRef = useRef<HTMLElement | null>(null);
+
+  const openTradeDossier = (trade: any) => {
+    triggerElementRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setInspectedTrade(trade);
+  };
+
+  const closeTradeDossier = () => {
+    setInspectedTrade(null);
+    if (triggerElementRef.current) {
+      triggerElementRef.current.focus();
+      triggerElementRef.current = null;
+    }
+  };
 
   const [marketStatus, setMarketStatus] = useState<any>(null);
   const [portfolio, setPortfolio] = useState<PortfolioState | null>(null);
@@ -143,10 +179,10 @@ const TrainingUI = () => {
     loadConfig();
   }, []);
 
-  const fetchStatus = useCallback(async () => {
+  const fetchStatus = useCallback(async (isManual = false) => {
     if (isFetchingRef.current) return;
     isFetchingRef.current = true;
-    setIsRefreshing(true);
+    if (isManual) setIsRefreshing(true);
     try {
       const res = await axios.get('/api/v1/training/status');
       setIsTraining(Boolean(res.data.is_training));
@@ -173,14 +209,44 @@ const TrainingUI = () => {
       isFetchingRef.current = false;
       setIsRefreshing(false);
     }
-  }, []);
+  }, [setLogs]);
 
   useEffect(() => {
-    fetchStatus();
-    // Poll dynamically: 2s when running to catch live MTM ticks, 6s when idle
+    let ignore = false;
+    axios.get('/api/v1/training/status')
+      .then(res => {
+        if (ignore) return;
+        setIsTraining(Boolean(res.data.is_training));
+        setTrainingMode(res.data.mode || 'IDLE');
+        setMarketStatus(res.data.market_status || null);
+        if (res.data.portfolio) {
+          setPortfolio(res.data.portfolio);
+          if (res.data.portfolio.starting_capital) {
+            setUserCapital(res.data.portfolio.starting_capital);
+          }
+          if (res.data.target_index) setSelectedIndex(res.data.target_index);
+          if (res.data.derivative_type) setSelectedDerivative(res.data.derivative_type);
+          if (res.data.strike_preference) setSelectedStrikePref(res.data.strike_preference);
+        }
+        if (res.data.replay_telemetry) {
+          setReplayTelemetry(res.data.replay_telemetry);
+        }
+        setCycles(res.data.cycles || 0);
+        setLogs(Array.isArray(res.data.logs) ? res.data.logs : []);
+        setError(null);
+      })
+      .catch(() => {
+        if (!ignore) {
+          setError("Training service is offline. Start the API server and retry.");
+        }
+      });
+
     const pollInterval = isTraining ? 2000 : 6000;
-    const interval = setInterval(fetchStatus, pollInterval);
-    return () => clearInterval(interval);
+    const interval = setInterval(() => void fetchStatus(false), pollInterval);
+    return () => {
+      ignore = true;
+      clearInterval(interval);
+    };
   }, [fetchStatus, isTraining]);
 
   useEffect(() => {
@@ -196,18 +262,87 @@ const TrainingUI = () => {
     setAutoScroll(atBottom);
   };
 
+  useEffect(() => {
+    if (!inspectedTrade) return;
+    const timer = setTimeout(() => {
+      modalCloseBtnRef.current?.focus();
+    }, 50);
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        closeTradeDossier();
+        return;
+      }
+      if (e.key === 'Tab' && modalRef.current) {
+        const focusables = modalRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        );
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [inspectedTrade]);
+
   const handleSelectCapitalPreset = (val: number) => {
     setUserCapital(val);
     setCustomCapitalInput(String(val));
+    setCapitalError(null);
   };
 
   const handleCustomCapitalChange = (valStr: string) => {
     setCustomCapitalInput(valStr);
-    const parsed = parseFloat(valStr);
-    if (!isNaN(parsed) && parsed > 0) {
+    const trimmed = valStr.trim();
+    if (!trimmed) {
+      setCapitalError('Capital amount cannot be empty.');
+      return;
+    }
+    const parsed = parseFloat(trimmed);
+    if (!Number.isFinite(parsed) || parsed < 1000 || parsed > 100000000) {
+      setCapitalError('Capital must be between ₹1,000 and ₹10,00,00,000.');
+    } else {
       setUserCapital(parsed);
+      setCapitalError(null);
     }
   };
+
+  const handleCustomCapitalBlur = () => {
+    const trimmed = customCapitalInput.trim();
+    const parsed = parseFloat(trimmed);
+    if (!trimmed || !Number.isFinite(parsed) || parsed < 1000) {
+      setUserCapital(10000);
+      setCustomCapitalInput('10000');
+      setCapitalError(null);
+    } else if (parsed > 100000000) {
+      setUserCapital(100000000);
+      setCustomCapitalInput('100000000');
+      setCapitalError(null);
+    }
+  };
+
+  const visibleLogs = useMemo(() => {
+    let list = logs;
+    if (logFilter.trim()) {
+      const q = logFilter.toLowerCase();
+      list = list.filter(l => l.toLowerCase().includes(q));
+    }
+    if (logDisplayCount > 0 && list.length > logDisplayCount) {
+      return list.slice(-logDisplayCount);
+    }
+    return list;
+  }, [logs, logFilter, logDisplayCount]);
 
   const handleStart = async () => {
     try {
@@ -244,7 +379,6 @@ const TrainingUI = () => {
     }
   };
 
-  const latestLog = logs[logs.length - 1] || 'No training events recorded yet.';
   const isMarketOpen = marketStatus?.is_open;
   const mtm = portfolio?.unrealized_mtm || 0;
   const isMtmPositive = mtm >= 0;
@@ -300,7 +434,8 @@ const TrainingUI = () => {
       </div>
 
       {/* Capital Tier & Precision Tuning Surface */}
-      <section className="mb-6 p-5 rounded-xl border border-gray-800 bg-gray-900/80 shadow-lg">
+      <ErrorBoundary compact title="Capital Configuration Error">
+        <section className="mb-6 p-5 rounded-xl border border-gray-800 bg-gray-900/80 shadow-lg">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-gray-800 pb-4 mb-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-emerald-600/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
@@ -338,18 +473,27 @@ const TrainingUI = () => {
                 </button>
               ))}
 
-              <div className="flex items-center gap-1.5 ml-2">
-                <span className="text-xs text-gray-400">Custom ₹:</span>
-                <input
-                  type="number"
-                  min="1000"
-                  max="100000000"
-                  step="1000"
-                  value={customCapitalInput}
-                  onChange={e => handleCustomCapitalChange(e.target.value)}
-                  className="w-28 bg-gray-800 text-white font-mono text-xs px-2.5 py-1 rounded border border-gray-700 focus:outline-none focus:border-blue-500"
-                  placeholder="e.g. 10000"
-                />
+              <div className="flex flex-col ml-2">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-gray-400">Custom ₹:</span>
+                  <input
+                    type="number"
+                    min="1000"
+                    max="100000000"
+                    step="1000"
+                    value={customCapitalInput}
+                    onChange={e => handleCustomCapitalChange(e.target.value)}
+                    onBlur={handleCustomCapitalBlur}
+                    aria-label="Custom capital in rupees"
+                    className={`w-28 bg-gray-800 text-white font-mono text-xs px-2.5 py-1 rounded border ${
+                      capitalError ? 'border-red-500 focus:border-red-500' : 'border-gray-700 focus:border-blue-500'
+                    } focus:outline-none`}
+                    placeholder="e.g. 10000"
+                  />
+                </div>
+                {capitalError && (
+                  <span className="text-[10px] text-red-400 mt-0.5" role="alert">{capitalError}</span>
+                )}
               </div>
             </div>
           )}
@@ -390,9 +534,11 @@ const TrainingUI = () => {
           </div>
         </div>
       </section>
+      </ErrorBoundary>
 
       {/* Index & F&O Derivative Architecture Control Surface */}
-      <section className="mb-6 p-5 rounded-xl border border-gray-800 bg-gray-900/80 shadow-lg">
+      <ErrorBoundary compact title="F&O Instrument Configuration Error">
+        <section className="mb-6 p-5 rounded-xl border border-gray-800 bg-gray-900/80 shadow-lg">
         <div className="border-b border-gray-800 pb-4 mb-4 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
@@ -478,8 +624,8 @@ const TrainingUI = () => {
           </div>
         </div>
 
-        {/* 3. Strike Preference (When Options or Auto active) */}
-        {(selectedDerivative === 'AUTO' || selectedDerivative === 'OPTIONS') && (
+        {/* 3. Strike Preference (When Options, Spreads, or Auto active) */}
+        {(selectedDerivative === 'AUTO' || selectedDerivative === 'OPTIONS' || selectedDerivative === 'SPREADS') && (
           <div className="mb-4">
             <label className="text-xs text-gray-400 uppercase font-semibold mb-2 block flex items-center gap-1.5">
               <Cpu className="w-3.5 h-3.5 text-purple-400" /> 3. Options Strike Selection Strategy:
@@ -540,9 +686,11 @@ const TrainingUI = () => {
           </div>
         </div>
       </section>
+      </ErrorBoundary>
 
       {/* Frontpage-Style Virtual Wallet & Live MTM Bar */}
-      <section className="mb-6 p-5 rounded-xl border border-gray-800 bg-gray-900/60 shadow-lg">
+      <ErrorBoundary compact title="Virtual Account & Positions Error">
+        <section className="mb-6 p-5 rounded-xl border border-gray-800 bg-gray-900/60 shadow-lg">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-gray-800 pb-4 mb-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
@@ -553,7 +701,7 @@ const TrainingUI = () => {
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
                 ₹{userCapital.toLocaleString('en-IN')} Capital Portfolio
                 <span className="text-xs font-normal text-gray-400">
-                  ({portfolio ? `Cash: ₹${portfolio.cash_balance.toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : 'Ready'})
+                  ({portfolio ? `Cash: ₹${Number(portfolio.cash_balance || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : 'Ready'})
                 </span>
               </h2>
             </div>
@@ -594,7 +742,7 @@ const TrainingUI = () => {
               <span className="text-emerald-400">Ticking Real-Time</span>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
+              <table className="w-full text-left text-xs min-w-[850px]">
                 <thead>
                   <tr className="border-b border-gray-800 text-gray-500 uppercase">
                     <th className="py-1.5 px-3">Contract / Symbol</th>
@@ -611,20 +759,28 @@ const TrainingUI = () => {
                 </thead>
                 <tbody className="divide-y divide-gray-800/60 font-mono">
                   {portfolio.open_trades.map((pos: any, idx: number) => {
-                    const isLong = pos.direction === 'LONG' || pos.direction === 'bullish';
+                    const isShort = pos.action === 'SELL' || pos.direction === 'SELL' || pos.direction === 'SHORT' || isOptionSellingOrSpread(pos);
+                    const isLong = !isShort && (pos.direction === 'LONG' || pos.direction === 'bullish' || pos.direction === 'BUY');
                     const posPnl = pos.unrealized_pnl || 0;
                     const posPositive = posPnl >= 0;
-                    const isOption = pos.instrument_type === 'OPTION';
-                    const isFuture = pos.instrument_type === 'FUTURE';
+                    const isOption = pos.instrument_type === 'OPTION' || Boolean(pos.option_type) || Boolean(pos.opt_type);
+                    const isFuture = pos.instrument_type === 'FUTURE' || pos.instrument_type === 'FUT';
+                    const canonicalSymbol = pos.contract_symbol || formatContractSymbol(pos.ticker, pos.opt_strike || pos.strike, pos.opt_type || pos.option_type, pos.instrument_type);
+                    const stratLabel = getOptionStrategyLabel(pos);
 
                     return (
                       <tr key={pos.id || idx} className="hover:bg-gray-800/40">
                         <td className="py-2 px-3">
-                          <div className="font-bold text-white flex items-center gap-1.5">
-                            {pos.contract_symbol || pos.ticker}
+                          <div className="font-bold text-white flex flex-wrap items-center gap-1.5">
+                            {canonicalSymbol}
                             {isOption && (
                               <span className="text-[10px] text-purple-400 bg-purple-950/60 px-1 rounded">
-                                {pos.strike_type} (Δ {pos.delta || 0.5})
+                                {pos.strike_type || 'ATM'} (Δ {pos.delta || 0.5})
+                              </span>
+                            )}
+                            {isShort && (
+                              <span className="text-[9px] text-amber-300 bg-amber-950/80 border border-amber-700/80 px-1.5 py-0.2 rounded font-bold uppercase">
+                                {stratLabel}
                               </span>
                             )}
                           </div>
@@ -641,14 +797,21 @@ const TrainingUI = () => {
                           </span>
                         </td>
                         <td className="py-2 px-3">
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            isLong ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-red-950 text-red-400 border border-red-800'
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase transition-colors ${
+                            isShort
+                              ? 'bg-amber-950/90 text-amber-300 border border-amber-700/80 shadow-sm'
+                              : isLong
+                                ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                : 'bg-red-950 text-red-400 border border-red-800'
                           }`}>
-                            {pos.direction}
+                            {isShort ? 'SHORT / SELL' : pos.direction}
                           </span>
                         </td>
                         <td className="py-2 px-3 text-right text-gray-300">
-                          ₹{Number(pos.entry_price || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                          <div>₹{Number(pos.entry_price || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</div>
+                          {isShort && pos.net_credit && (
+                            <span className="text-[9px] text-emerald-400 block font-mono">Net Cr: ₹{pos.net_credit}</span>
+                          )}
                         </td>
                         <td className="py-2 px-3 text-right font-bold text-white">
                           ₹{Number(pos.current_ltp || pos.entry_price || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
@@ -657,7 +820,12 @@ const TrainingUI = () => {
                           {pos.quantity} {pos.lots ? `(${pos.lots}L)` : ''}
                         </td>
                         <td className="py-2 px-3 text-right text-gray-300">
-                          ₹{Number(pos.invested || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                          <div className="font-bold text-white">
+                            ₹{Number(pos.invested || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                          </div>
+                          <div className="text-[10px] text-gray-400">
+                            {isShort ? 'Margin Blocked' : 'Premium Deployed'}
+                          </div>
                         </td>
                         <td className={`py-2 px-3 text-right font-bold ${posPositive ? 'text-emerald-400' : 'text-red-400'}`}>
                           {posPositive ? '+' : ''}₹{posPnl.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
@@ -666,7 +834,7 @@ const TrainingUI = () => {
                         <td className="py-2 px-3 text-center">
                           <button
                             type="button"
-                            onClick={() => setInspectedTrade(pos)}
+                            onClick={() => openTradeDossier(pos)}
                             className="px-2 py-1 bg-purple-950/70 hover:bg-purple-900 text-purple-200 border border-purple-800 rounded text-[11px] font-semibold transition-all inline-flex items-center gap-1 shadow-sm"
                             title="Inspect Complete F&O Trade Specifications & Greeks"
                           >
@@ -681,11 +849,16 @@ const TrainingUI = () => {
                               onClick={() => {
                                 setFocusedOption({
                                   underlying: pos.underlying || (pos.ticker?.includes('BANK') ? 'BANKNIFTY' : pos.ticker?.includes('FIN') ? 'FINNIFTY' : 'NIFTY'),
-                                  strike: Number(pos.strike || 22800),
-                                  optionType: (pos.option_type === 'PE' ? 'PE' : 'CE'),
+                                  strike: Number(pos.strike || pos.opt_strike || 22800),
+                                  optionType: (pos.option_type === 'PE' || pos.opt_type === 'PE' ? 'PE' : 'CE'),
+                                  action: isShort ? 'SELL' : 'BUY',
+                                  strategyType: pos.strategy_type || (isShort ? 'CREDIT_SPREAD' : 'DIRECTIONAL'),
+                                  hedgeStrike: pos.hedge_strike_price,
+                                  hedgePrice: pos.hedge_entry_price,
+                                  netCredit: pos.net_credit,
                                   entryPrice: Number(pos.entry_price || 0),
-                                  targetPrice: Number(pos.target || 0),
-                                  stopLossPrice: Number(pos.stop_loss || 0),
+                                  targetPrice: Number(pos.target || pos.tp || 0),
+                                  stopLossPrice: Number(pos.stop_loss || pos.sl || 0),
                                 });
                                 setChartViewMode('option');
                               }}
@@ -732,7 +905,7 @@ const TrainingUI = () => {
               <span className="text-gray-500 font-mono text-[11px]">Last 50 Trades</span>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
+              <table className="w-full text-left text-xs min-w-[850px]">
                 <thead>
                   <tr className="border-b border-gray-800 text-gray-500 uppercase">
                     <th className="py-1.5 px-3">Contract / Symbol</th>
@@ -748,16 +921,25 @@ const TrainingUI = () => {
                 <tbody className="divide-y divide-gray-800/60 font-mono">
                   {portfolio.closed_trades.slice().reverse().map((trade: any, idx: number) => {
                     const isWin = (trade.cash_pnl || 0) > 0;
-                    const isOption = trade.instrument_type === 'OPTION';
-                    const isFuture = trade.instrument_type === 'FUTURE';
+                    const isTradeShort = trade.action === 'SELL' || trade.direction === 'SHORT' || trade.direction === 'SELL' || isOptionSellingOrSpread(trade);
+                    const isTradeLong = !isTradeShort && (trade.direction === 'BUY' || trade.direction === 'LONG' || trade.direction === 'bullish');
+                    const isOption = trade.instrument_type === 'OPTION' || Boolean(trade.option_type) || Boolean(trade.opt_type);
+                    const isFuture = trade.instrument_type === 'FUTURE' || trade.instrument_type === 'FUT';
+                    const canonicalSymbol = trade.contract_symbol || formatContractSymbol(trade.ticker, trade.opt_strike || trade.strike, trade.opt_type || trade.option_type, trade.instrument_type);
+                    const stratLabel = getOptionStrategyLabel(trade);
                     return (
                       <tr key={trade.id || idx} className="hover:bg-gray-800/40">
                         <td className="py-2 px-3">
-                          <div className="font-bold text-white flex items-center gap-1.5">
-                            {trade.contract_symbol || trade.ticker}
+                          <div className="font-bold text-white flex flex-wrap items-center gap-1.5">
+                            {canonicalSymbol}
                             {isOption && trade.strike_type && (
                               <span className="text-[10px] text-purple-400 bg-purple-950/60 px-1 rounded">
                                 {trade.strike_type}
+                              </span>
+                            )}
+                            {isTradeShort && (
+                              <span className="text-[9px] text-amber-300 bg-amber-950/80 border border-amber-700/80 px-1.5 py-0.2 rounded font-bold uppercase">
+                                {stratLabel}
                               </span>
                             )}
                           </div>
@@ -774,12 +956,14 @@ const TrainingUI = () => {
                           </span>
                         </td>
                         <td className="py-2 px-3">
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            trade.direction === 'BUY' || trade.direction === 'LONG' || trade.direction === 'bullish'
-                              ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                              : 'bg-red-950 text-red-400 border border-red-800'
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase transition-colors ${
+                            isTradeShort
+                              ? 'bg-amber-950/90 text-amber-300 border border-amber-700/80 shadow-sm'
+                              : isTradeLong
+                                ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                : 'bg-red-950 text-red-400 border border-red-800'
                           }`}>
-                            {trade.direction}
+                            {isTradeShort ? 'SHORT / SELL' : trade.direction}
                           </span>
                         </td>
                         <td className="py-2 px-3 text-right text-gray-300">
@@ -808,7 +992,7 @@ const TrainingUI = () => {
                         <td className="py-2 px-3 text-center">
                           <button
                             type="button"
-                            onClick={() => setInspectedTrade(trade)}
+                            onClick={() => openTradeDossier(trade)}
                             className="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 rounded text-[11px] font-semibold transition-all inline-flex items-center gap-1 shadow-sm"
                             title="Inspect Complete Trade Specifications & Greeks"
                           >
@@ -825,9 +1009,11 @@ const TrainingUI = () => {
           </div>
         )}
       </section>
+      </ErrorBoundary>
 
       {/* Real-Time Option Candlestick & Spot Chart Surface */}
-      <section className="mb-6 rounded-xl border border-gray-800 bg-gray-900/70 p-4 shadow-xl">
+      <ErrorBoundary compact title="Market Charts Viewer Error">
+        <section className="mb-6 rounded-xl border border-gray-800 bg-gray-900/70 p-4 shadow-xl">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800 pb-3 mb-4">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-purple-950 border border-purple-800 flex items-center justify-center text-purple-400">
@@ -878,6 +1064,11 @@ const TrainingUI = () => {
             initialUnderlying={focusedOption?.underlying || (selectedIndex === 'SENSEX' ? 'SENSEX' : selectedIndex === 'BANKNIFTY' ? 'BANKNIFTY' : selectedIndex === 'FINNIFTY' ? 'FINNIFTY' : 'NIFTY')}
             initialStrike={focusedOption?.strike || (selectedIndex === 'SENSEX' ? 80000 : selectedIndex === 'BANKNIFTY' ? 52000 : selectedIndex === 'FINNIFTY' ? 23500 : 24500)}
             initialOptionType={focusedOption?.optionType || 'CE'}
+            initialAction={focusedOption?.action}
+            strategyType={focusedOption?.strategyType}
+            hedgeStrike={focusedOption?.hedgeStrike}
+            hedgePrice={focusedOption?.hedgePrice}
+            netCredit={focusedOption?.netCredit}
             entryPrice={focusedOption?.entryPrice}
             targetPrice={focusedOption?.targetPrice}
             stopLossPrice={focusedOption?.stopLossPrice}
@@ -893,9 +1084,11 @@ const TrainingUI = () => {
           </div>
         )}
       </section>
+      </ErrorBoundary>
 
       {/* Command Control Bar */}
-      <section className="training-command-bar">
+      <ErrorBoundary compact title="Execution Controller Error">
+        <section className="training-command-bar">
         <div className="training-command-copy">
           <div className="training-icon"><BrainCircuit /></div>
           <div>
@@ -944,9 +1137,9 @@ const TrainingUI = () => {
           ) : (
             <button
               type="button"
-              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg flex items-center gap-2 transition-all shadow-md shadow-emerald-600/30"
+              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white text-xs font-bold rounded-lg flex items-center gap-2 transition-all shadow-md shadow-emerald-600/30"
               onClick={handleStart}
-              disabled={actionPending}
+              disabled={actionPending || !!capitalError || !Number.isFinite(userCapital) || userCapital < 1000}
             >
               <Play className="w-4 h-4 fill-white" /> Start Trading & Learning
             </button>
@@ -955,13 +1148,14 @@ const TrainingUI = () => {
           <button
             type="button"
             className="p-2.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg border border-gray-700"
-            onClick={fetchStatus}
+            onClick={() => void fetchStatus(true)}
             title="Refresh status"
           >
             <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </section>
+      </ErrorBoundary>
 
       {error && (
         <div className="training-banner error mb-4">
@@ -970,7 +1164,8 @@ const TrainingUI = () => {
       )}
 
       {/* Metric Tiles */}
-      <section className="training-metrics-grid">
+      <ErrorBoundary compact title="Training Metrics Error">
+        <section className="training-metrics-grid">
         <div className="training-metric-card">
           <div className="metric-header">
             <span className="eyebrow">Cycles Completed</span>
@@ -1015,67 +1210,116 @@ const TrainingUI = () => {
           </span>
         </div>
       </section>
+      </ErrorBoundary>
 
       {/* Historical Replay & Neural Training Telemetry Surface */}
       {replayTelemetry && (
-        <section className="mb-6 p-4 rounded-xl border border-gray-800 bg-gray-900/60 shadow-lg">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800 pb-3 mb-3">
-            <div className="flex items-center gap-2">
-              <BrainCircuit className="w-4 h-4 text-purple-400" />
-              <span className="text-xs font-semibold text-gray-300 uppercase tracking-wider">
-                Offline Historical Replay & Path-Dependent Simulation
+        <ErrorBoundary compact title="Historical Replay Telemetry Error">
+          <section className="mb-6 p-4 rounded-xl border border-gray-800 bg-gray-900/60 shadow-lg">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800 pb-3 mb-3">
+              <div className="flex items-center gap-2">
+                <BrainCircuit className="w-4 h-4 text-purple-400" />
+                <span className="text-xs font-semibold text-gray-300 uppercase tracking-wider">
+                  Offline Historical Replay &amp; Path-Dependent Simulation
+                </span>
+              </div>
+              <span className="text-[11px] text-gray-500 font-mono">
+                Cycle Updated: {replayTelemetry.last_updated}
               </span>
             </div>
-            <span className="text-[11px] text-gray-500 font-mono">
-              Cycle Updated: {replayTelemetry.last_updated}
-            </span>
-          </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 text-xs font-mono">
-            <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
-              <span className="text-gray-500 block text-[10px] uppercase">Replay Target</span>
-              <strong className="text-white text-sm">{replayTelemetry.target}</strong>
-              <span className="text-[10px] text-gray-400 block">{replayTelemetry.timeframe} timeframe</span>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 text-xs font-mono">
+              <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
+                <span className="text-gray-500 block text-[10px] uppercase">Replay Target</span>
+                <strong className="text-white text-sm">{replayTelemetry.target}</strong>
+                <span className="text-[10px] text-gray-400 block">{replayTelemetry.timeframe} timeframe</span>
+              </div>
+              <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
+                <span className="text-gray-500 block text-[10px] uppercase">Simulated Trades</span>
+                <strong className="text-blue-400 text-sm">{replayTelemetry.total_simulated?.toLocaleString()}</strong>
+                <span className="text-[10px] text-gray-400 block">Path-dependent</span>
+              </div>
+              <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
+                <span className="text-gray-500 block text-[10px] uppercase">Simulation Win Rate</span>
+                <strong className="text-emerald-400 text-sm">{replayTelemetry.win_rate}%</strong>
+                <span className="text-[10px] text-gray-400 block">{replayTelemetry.wins}W / {replayTelemetry.losses}L</span>
+              </div>
+              <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
+                <span className="text-gray-500 block text-[10px] uppercase">Timeouts (No Hit)</span>
+                <strong className="text-gray-300 text-sm">{replayTelemetry.timeouts?.toLocaleString()}</strong>
+                <span className="text-[10px] text-gray-400 block">Max hold expired</span>
+              </div>
+              <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
+                <span className="text-gray-500 block text-[10px] uppercase">Target / Stop ATR</span>
+                <strong className="text-amber-400 text-sm">+{replayTelemetry.tp_atr} / -{replayTelemetry.sl_atr} ATR</strong>
+                <span className="text-[10px] text-gray-400 block">Triple-barrier</span>
+              </div>
+              <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
+                <span className="text-gray-500 block text-[10px] uppercase">Max Hold Horizon</span>
+                <strong className="text-purple-400 text-sm">{replayTelemetry.max_hold} bars</strong>
+                <span className="text-[10px] text-gray-400 block">Time barrier</span>
+              </div>
             </div>
-            <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
-              <span className="text-gray-500 block text-[10px] uppercase">Simulated Trades</span>
-              <strong className="text-blue-400 text-sm">{replayTelemetry.total_simulated?.toLocaleString()}</strong>
-              <span className="text-[10px] text-gray-400 block">Path-dependent</span>
-            </div>
-            <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
-              <span className="text-gray-500 block text-[10px] uppercase">Simulation Win Rate</span>
-              <strong className="text-emerald-400 text-sm">{replayTelemetry.win_rate}%</strong>
-              <span className="text-[10px] text-gray-400 block">{replayTelemetry.wins}W / {replayTelemetry.losses}L</span>
-            </div>
-            <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
-              <span className="text-gray-500 block text-[10px] uppercase">Timeouts (No Hit)</span>
-              <strong className="text-gray-300 text-sm">{replayTelemetry.timeouts?.toLocaleString()}</strong>
-              <span className="text-[10px] text-gray-400 block">Max hold expired</span>
-            </div>
-            <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
-              <span className="text-gray-500 block text-[10px] uppercase">Target / Stop ATR</span>
-              <strong className="text-amber-400 text-sm">+{replayTelemetry.tp_atr} / -{replayTelemetry.sl_atr} ATR</strong>
-              <span className="text-[10px] text-gray-400 block">Triple-barrier</span>
-            </div>
-            <div className="p-2.5 rounded bg-gray-950/70 border border-gray-800">
-              <span className="text-gray-500 block text-[10px] uppercase">Max Hold Horizon</span>
-              <strong className="text-purple-400 text-sm">{replayTelemetry.max_hold} bars</strong>
-              <span className="text-[10px] text-gray-400 block">Time barrier</span>
-            </div>
-          </div>
-        </section>
+          </section>
+        </ErrorBoundary>
       )}
 
       {/* Terminal Logs Console */}
-      <section className="training-terminal-section">
-        <div className="terminal-header flex items-center justify-between">
+      <ErrorBoundary compact title="Autonomous Terminal Stream Error">
+        <section className="training-terminal-section">
+        <div className="terminal-header flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <Terminal className="w-4 h-4 text-emerald-400" />
             <span className="font-mono text-xs text-gray-300">live_market_learner.log</span>
-            <span className="text-[10px] text-gray-500 font-mono">({logs.length} lines)</span>
+            <span className="text-[10px] text-gray-500 font-mono">
+              ({logs.length} lines{logs.length > visibleLogs.length ? `, showing latest ${visibleLogs.length}` : ''})
+            </span>
           </div>
 
-          <div className="flex items-center gap-3 text-xs">
+          <div className="flex flex-wrap items-center gap-3 text-xs">
+            {/* Search filter */}
+            <div className="flex items-center gap-1 bg-gray-900 border border-gray-800 px-2 py-0.5 rounded text-[11px]">
+              <Search className="w-3 h-3 text-gray-500" />
+              <input
+                type="text"
+                placeholder="Filter logs..."
+                value={logFilter}
+                onChange={e => setLogFilter(e.target.value)}
+                aria-label="Filter terminal logs"
+                className="bg-transparent border-none text-gray-300 placeholder-gray-600 text-[11px] focus:outline-none w-24 sm:w-32"
+              />
+              {logFilter && (
+                <button
+                  type="button"
+                  onClick={() => setLogFilter('')}
+                  aria-label="Clear filter"
+                  className="text-gray-500 hover:text-white text-[10px]"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* Display limit buttons */}
+            <div className="flex items-center gap-1 bg-gray-900 border border-gray-800 p-0.5 rounded text-[10px] font-mono">
+              {[
+                { label: '300', n: 300 },
+                { label: '1k', n: 1000 },
+                { label: 'All', n: 0 },
+              ].map(opt => (
+                <button
+                  key={opt.label}
+                  type="button"
+                  onClick={() => setLogDisplayCount(opt.n)}
+                  className={`px-1.5 py-0.5 rounded ${
+                    logDisplayCount === opt.n ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
             <label className="flex items-center gap-1.5 cursor-pointer text-gray-400">
               <input
                 type="checkbox"
@@ -1085,8 +1329,13 @@ const TrainingUI = () => {
               />
               Auto-scroll
             </label>
-            <span className="text-gray-600">|</span>
-            <span className="text-gray-400 font-mono text-[11px]">Latest: {latestLog.slice(0, 40)}...</span>
+            <button
+              type="button"
+              onClick={() => setLogs([])}
+              className="text-[11px] text-gray-500 hover:text-gray-300 underline"
+            >
+              Clear
+            </button>
           </div>
         </div>
 
@@ -1095,12 +1344,14 @@ const TrainingUI = () => {
           onScroll={handleScroll}
           className="terminal-body font-mono text-xs overflow-y-auto max-h-[380px] p-4 bg-gray-950 text-gray-300"
         >
-          {logs.length === 0 ? (
+          {visibleLogs.length === 0 ? (
             <div className="text-gray-600 italic py-8 text-center">
-              No training events recorded yet. Click "Start Trading & Learning" to begin.
+              {logs.length === 0
+                ? 'No training events recorded yet. Click "Start Trading & Learning" to begin.'
+                : 'No log lines match current filter.'}
             </div>
           ) : (
-            logs.map((logLine, index) => {
+            visibleLogs.map((logLine, index) => {
               const isError = logLine.includes('🛑') || logLine.includes('ERROR') || logLine.includes('REJECTED');
               const isSuccess = logLine.includes('✅') || logLine.includes('CLOSED') || logLine.includes('Checkpoint');
               const isEntry = logLine.includes('ENTRY');
@@ -1109,7 +1360,7 @@ const TrainingUI = () => {
 
               return (
                 <div
-                  key={index}
+                  key={`${index}-${logLine.slice(0, 20)}`}
                   className={`py-0.5 leading-relaxed ${
                     isError
                       ? 'text-red-400'
@@ -1132,245 +1383,376 @@ const TrainingUI = () => {
           <div ref={logsEndRef} />
         </div>
       </section>
+      </ErrorBoundary>
 
       {/* Complete Trade Specification Dossier Modal */}
-      {inspectedTrade && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl p-6 text-gray-200">
-            {/* Modal Header */}
-            <div className="flex items-start justify-between border-b border-gray-800 pb-4 mb-4">
-              <div>
-                <div className="flex items-center gap-2 mb-1">
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                    inspectedTrade.instrument_type === 'OPTION'
-                      ? (inspectedTrade.option_type === 'CE' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-red-950 text-red-400 border border-red-800')
-                      : 'bg-amber-950 text-amber-400 border border-amber-800'
-                  }`}>
-                    {inspectedTrade.instrument_type || 'DERIVATIVE'} {inspectedTrade.option_type || ''}
-                  </span>
-                  {inspectedTrade.strike_type && (
-                    <span className="text-[10px] bg-purple-950 text-purple-300 border border-purple-800 px-2 py-0.5 rounded font-bold">
-                      {inspectedTrade.strike_type}
-                    </span>
-                  )}
-                  <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
-                    inspectedTrade.status === 'OPEN'
-                      ? 'bg-blue-950 text-blue-400 border border-blue-800 animate-pulse'
-                      : inspectedTrade.status === 'TAKE_PROFIT'
-                        ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                        : inspectedTrade.status === 'TRAILING_SL'
-                          ? 'bg-blue-950 text-blue-400 border border-blue-800'
-                          : 'bg-red-950 text-red-400 border border-red-800'
-                  }`}>
-                    {(inspectedTrade.status || 'ACTIVE').replace(/_/g, ' ')}
-                  </span>
-                </div>
-                <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                  {inspectedTrade.contract_symbol || inspectedTrade.ticker}
-                </h3>
-                <p className="text-xs text-gray-400 mt-0.5">
-                  Underlying: <span className="text-white font-semibold">{inspectedTrade.underlying_ticker || inspectedTrade.underlying || inspectedTrade.ticker}</span> • Direction: <span className="text-emerald-400 font-bold">{inspectedTrade.direction}</span>
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setInspectedTrade(null)}
-                className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+      {inspectedTrade && (() => {
+        const isTradeSeller = inspectedTrade.action === 'SELL' || isOptionSellingOrSpread(inspectedTrade);
+        const isTradeSpread = inspectedTrade.strategy_type?.includes('SPREAD') || inspectedTrade.instrument_type === 'SPREAD' || Boolean(inspectedTrade.hedge_strike_price);
+        const tradeStratLabel = getOptionStrategyLabel(inspectedTrade);
+        const isTradeOpt = inspectedTrade.instrument_type === 'OPTION' || Boolean(inspectedTrade.option_type) || Boolean(inspectedTrade.opt_type);
+        const dossierPayoff = isTradeOpt || isTradeSeller
+          ? calculateOptionPayoffProfile({
+              underlying: inspectedTrade.underlying_ticker || inspectedTrade.underlying || inspectedTrade.ticker,
+              strike: Number(inspectedTrade.strike || inspectedTrade.opt_strike || 22800),
+              optionType: inspectedTrade.option_type || inspectedTrade.opt_type || 'CE',
+              entryPrice: Number(inspectedTrade.entry_price || 0),
+              currentSpot: Number(inspectedTrade.current_spot || inspectedTrade.entry_spot || inspectedTrade.strike || 0),
+              action: isTradeSeller ? 'SELL' : 'BUY',
+              strategyType: inspectedTrade.strategy_type || (isTradeSpread ? 'CREDIT_SPREAD' : isTradeSeller ? 'WRITING' : 'DIRECTIONAL'),
+              hedgeStrike: inspectedTrade.hedge_strike_price,
+              hedgePrice: inspectedTrade.hedge_entry_price,
+              lotSize: inspectedTrade.lot_size || getExchangeLotSize(inspectedTrade.underlying_ticker || inspectedTrade.ticker),
+              quantity: inspectedTrade.quantity,
+              rawTheta: inspectedTrade.theta || inspectedTrade.opt_theta,
+            })
+          : null;
 
-            {/* Grid 1: Execution & Financial Specs */}
-            <div className="mb-4">
-              <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
-                1. Execution & Capital Specifications
-              </span>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
-                <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
-                  <span className="text-gray-500 block text-[10px] uppercase">Entry Premium/Price</span>
-                  <strong className="text-white text-sm">₹{Number(inspectedTrade.entry_price || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>
-                </div>
-                <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
-                  <span className="text-gray-500 block text-[10px] uppercase">{inspectedTrade.status === 'OPEN' ? 'Live LTP' : 'Exit Price'}</span>
-                  <strong className="text-white text-sm">₹{Number(inspectedTrade.exit_price || inspectedTrade.current_ltp || inspectedTrade.entry_price || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>
-                </div>
-                <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
-                  <span className="text-gray-500 block text-[10px] uppercase">Quantity Traded</span>
-                  <strong className="text-white text-sm">{inspectedTrade.quantity} ({inspectedTrade.lots || 1} Lots)</strong>
-                  <span className="text-[10px] text-gray-500 block">Lot Size: {inspectedTrade.lot_size || (inspectedTrade.quantity / (inspectedTrade.lots || 1))}</span>
-                </div>
-                <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
-                  <span className="text-gray-500 block text-[10px] uppercase">Capital Deployed</span>
-                  <strong className="text-purple-400 text-sm">₹{Number(inspectedTrade.invested || 0).toLocaleString('en-IN')}</strong>
-                  <span className="text-[10px] text-gray-500 block">Capped Max Risk</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Grid 2: Risk Management & PnL */}
-            <div className="mb-4">
-              <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
-                2. Risk Envelope & Asymmetric Barriers
-              </span>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
-                <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
-                  <span className="text-gray-500 block text-[10px] uppercase">Target Price (TP)</span>
-                  <strong className="text-emerald-400 text-sm">₹{Number(inspectedTrade.tp || inspectedTrade.target || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>
-                  <span className="text-[10px] text-emerald-500 block">2.0× ATR Barrier</span>
-                </div>
-                <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
-                  <span className="text-gray-500 block text-[10px] uppercase">Stop Loss (SL)</span>
-                  <strong className="text-red-400 text-sm">₹{Number(inspectedTrade.sl || inspectedTrade.stop_loss || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>
-                  <span className="text-[10px] text-red-500 block">1.0× ATR Barrier</span>
-                </div>
-                <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
-                  <span className="text-gray-500 block text-[10px] uppercase">Trailing Ratchet</span>
-                  <strong className="text-blue-400 text-sm">₹{Number(inspectedTrade.trailing_stop || inspectedTrade.sl || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>
-                  <span className="text-[10px] text-gray-500 block">Breakeven Lock</span>
-                </div>
-                <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
-                  <span className="text-gray-500 block text-[10px] uppercase">{inspectedTrade.status === 'OPEN' ? 'Unrealized MTM' : 'Realized PnL'}</span>
-                  <strong className={`text-sm ${
-                    Number(inspectedTrade.cash_pnl || inspectedTrade.unrealized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
-                  }`}>
-                    {Number(inspectedTrade.cash_pnl || inspectedTrade.unrealized_pnl || 0) >= 0 ? '+' : ''}₹{Number(inspectedTrade.cash_pnl || inspectedTrade.unrealized_pnl || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                  </strong>
-                  <span className="text-[10px] opacity-80 block">
-                    {Number(inspectedTrade.pnl_pct ? inspectedTrade.pnl_pct * 100 : inspectedTrade.unrealized_pnl_pct || 0).toFixed(2)}% net
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Grid 3: F&O Greeks & Black-Scholes Analytics */}
-            <div className="mb-4">
-              <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
-                3. Option Greeks & Black-Scholes Derivatives Metrics
-              </span>
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs font-mono">
-                <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800">
-                  <span className="text-gray-500 block text-[10px]">Delta (Δ)</span>
-                  <strong className="text-blue-400 text-sm">{Number(inspectedTrade.delta || 0.5).toFixed(3)}</strong>
-                  <span className="text-[10px] text-gray-500 block">{inspectedTrade.direction} exposure</span>
-                </div>
-                <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800">
-                  <span className="text-gray-500 block text-[10px]">Theta (Θ)</span>
-                  <strong className="text-amber-400 text-sm">{Number(inspectedTrade.theta || -4.5).toFixed(2)}</strong>
-                  <span className="text-[10px] text-gray-500 block">₹/day decay</span>
-                </div>
-                <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800">
-                  <span className="text-gray-500 block text-[10px]">Gamma (Γ)</span>
-                  <strong className="text-indigo-400 text-sm">{Number(inspectedTrade.gamma || 0.0012).toFixed(4)}</strong>
-                  <span className="text-[10px] text-gray-500 block">Curvature</span>
-                </div>
-                <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800">
-                  <span className="text-gray-500 block text-[10px]">Implied Vol (IV)</span>
-                  <strong className="text-purple-400 text-sm">{(Number(inspectedTrade.iv || 0.15) * 100).toFixed(1)}%</strong>
-                  <span className="text-[10px] text-gray-500 block">Annualized</span>
-                </div>
-                <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800">
-                  <span className="text-gray-500 block text-[10px]">Spot Reference</span>
-                  <strong className="text-white text-sm">₹{Number(inspectedTrade.entry_spot || inspectedTrade.current_spot || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}</strong>
-                  <span className="text-[10px] text-gray-500 block">Strike: {inspectedTrade.strike || 'N/A'}</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Grid 4: AI Confluence & Setup Signals */}
-            <div className="mb-5">
-              <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
-                4. AI Confluence & Fired Setup Triggers
-              </span>
-              <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800 space-y-2 text-xs">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-800/80 pb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-gray-400">AI Confidence:</span>
-                    <span className="font-bold text-emerald-400 font-mono">{(Number(inspectedTrade.probability || 0.72) * 100).toFixed(0)}%</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-gray-400">Regime:</span>
-                    <span className="font-bold text-blue-400 uppercase font-mono">{inspectedTrade.regime || 'TRENDING'}</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-gray-400">TradingView:</span>
-                    <span className="font-bold text-amber-400 uppercase font-mono">{inspectedTrade.tv_recommendation || 'BUY'}</span>
-                  </div>
-                </div>
-
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="dossier-modal-title"
+            onClick={e => {
+              if (e.target === e.currentTarget) closeTradeDossier();
+            }}
+          >
+            <div
+              ref={modalRef}
+              tabIndex={-1}
+              className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl p-6 text-gray-200 focus:outline-none"
+            >
+              {/* Modal Header */}
+              <div className="flex items-start justify-between border-b border-gray-800 pb-4 mb-4">
                 <div>
-                  <span className="text-[10px] text-gray-500 uppercase block mb-1.5">Confluence Signals at Entry:</span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {Array.isArray(inspectedTrade.setup_signals) && inspectedTrade.setup_signals.length > 0 ? (
-                      inspectedTrade.setup_signals.map((sig: any, sIdx: number) => (
-                        <span
-                          key={sIdx}
-                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold ${
-                            sig.signal === 'bullish'
-                              ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                              : sig.signal === 'bearish'
-                                ? 'bg-red-950 text-red-400 border border-red-800'
-                                : 'bg-gray-800 text-gray-400 border border-gray-700'
-                          }`}
-                        >
-                          {(sig.name || '').replace(/_/g, ' ').toUpperCase()}: {sig.signal.toUpperCase()} ({(sig.confidence * 100).toFixed(0)}%)
-                        </span>
-                      ))
-                    ) : (
-                      <span className="text-gray-500 text-xs italic">Multi-indicator F&O momentum & breakout confluence</span>
+                  <div className="flex flex-wrap items-center gap-2 mb-1">
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                      isTradeOpt
+                        ? (inspectedTrade.option_type === 'CE' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-red-950 text-red-400 border border-red-800')
+                        : 'bg-amber-950 text-amber-400 border border-amber-800'
+                    }`}>
+                      {inspectedTrade.instrument_type || 'DERIVATIVE'} {inspectedTrade.option_type || ''}
+                    </span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                      isTradeSeller
+                        ? 'bg-amber-950/90 text-amber-300 border border-amber-700/80 shadow-sm'
+                        : 'bg-blue-950/90 text-blue-300 border border-blue-700/80'
+                    }`}>
+                      {isTradeSeller ? 'SHORT / SELL' : 'LONG / BUY'}
+                    </span>
+                    {(isTradeSpread || isTradeSeller) && (
+                      <span className="text-[10px] bg-rose-950 text-rose-300 border border-rose-800 px-2 py-0.5 rounded font-bold uppercase">
+                        {tradeStratLabel}
+                      </span>
+                    )}
+                    {inspectedTrade.strike_type && (
+                      <span className="text-[10px] bg-purple-950 text-purple-300 border border-purple-800 px-2 py-0.5 rounded font-bold">
+                        {inspectedTrade.strike_type}
+                      </span>
+                    )}
+                    <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
+                      inspectedTrade.status === 'OPEN'
+                        ? 'bg-blue-950 text-blue-400 border border-blue-800 animate-pulse'
+                        : inspectedTrade.status === 'TAKE_PROFIT'
+                          ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                          : inspectedTrade.status === 'TRAILING_SL'
+                            ? 'bg-blue-950 text-blue-400 border border-blue-800'
+                            : 'bg-red-950 text-red-400 border border-red-800'
+                    }`}>
+                      {(inspectedTrade.status || 'ACTIVE').replace(/_/g, ' ')}
+                    </span>
+                  </div>
+                  <h3 id="dossier-modal-title" className="text-xl font-bold text-white flex items-center gap-2">
+                    {inspectedTrade.contract_symbol || inspectedTrade.ticker}
+                  </h3>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    Underlying: <span className="text-white font-semibold">{inspectedTrade.underlying_ticker || inspectedTrade.underlying || inspectedTrade.ticker}</span> • 
+                    Direction: <span className={isTradeSeller ? 'text-amber-300 font-bold' : 'text-emerald-400 font-bold'}>{isTradeSeller ? 'SELL (Short)' : inspectedTrade.direction}</span>
+                  </p>
+                </div>
+                <button
+                  ref={modalCloseBtnRef}
+                  type="button"
+                  onClick={closeTradeDossier}
+                  aria-label="Close Trade Dossier"
+                  className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Grid 1: Execution & Capital Specifications */}
+              <div className="mb-4">
+                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
+                  1. Execution &amp; Capital Specifications
+                </span>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
+                  <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
+                    <span className="text-gray-400 block text-[10px] uppercase font-semibold">
+                      {isTradeSeller ? 'Premium Collected (Credit)' : 'Entry Premium/Price'}
+                    </span>
+                    <strong className="text-white text-sm">{formatIndianCurrency(inspectedTrade.entry_price || 0)}</strong>
+                    {inspectedTrade.net_credit && (
+                      <span className="text-[10px] text-emerald-400 block font-mono">Net: ₹{inspectedTrade.net_credit}/sh</span>
                     )}
                   </div>
+                  <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
+                    <span className="text-gray-400 block text-[10px] uppercase font-semibold">{inspectedTrade.status === 'OPEN' ? 'Live LTP' : 'Exit Price'}</span>
+                    <strong className="text-white text-sm">{formatIndianCurrency(inspectedTrade.exit_price || inspectedTrade.current_ltp || inspectedTrade.entry_price || 0)}</strong>
+                  </div>
+                  <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
+                    <span className="text-gray-400 block text-[10px] uppercase font-semibold">Quantity Traded</span>
+                    <strong className="text-white text-sm">{inspectedTrade.quantity} ({inspectedTrade.lots || Math.max(1, Math.round(inspectedTrade.quantity / getExchangeLotSize(inspectedTrade.underlying_ticker || inspectedTrade.ticker)))} Lots)</strong>
+                    <span className="text-[10px] text-gray-400 block">Lot Size: {inspectedTrade.lot_size || getExchangeLotSize(inspectedTrade.underlying_ticker || inspectedTrade.ticker)} Qty</span>
+                  </div>
+                  <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
+                    <span className="text-gray-400 block text-[10px] uppercase font-semibold">
+                      {isTradeSeller ? 'Margin Required (Blocked)' : 'Capital Deployed'}
+                    </span>
+                    <strong className="text-purple-400 text-sm">{formatIndianCurrency(inspectedTrade.invested || 0)}</strong>
+                    <span className="text-[10px] text-gray-400 block">
+                      {isTradeSpread ? 'Defined Spread Risk' : isTradeSeller ? 'SPAN + Exposure Margin' : 'Capped Premium Risk'}
+                    </span>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* Modal Actions */}
-            <div className="flex items-center justify-between pt-3 border-t border-gray-800">
-              {inspectedTrade.instrument_type === 'OPTION' ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFocusedOption({
-                      underlying: inspectedTrade.underlying_ticker || inspectedTrade.underlying || (inspectedTrade.ticker?.includes('BANK') ? 'BANKNIFTY' : inspectedTrade.ticker?.includes('FIN') ? 'FINNIFTY' : 'NIFTY'),
-                      strike: Number(inspectedTrade.strike || 22800),
-                      optionType: (inspectedTrade.option_type === 'PE' ? 'PE' : 'CE'),
-                      entryPrice: Number(inspectedTrade.entry_price || 0),
-                      targetPrice: Number(inspectedTrade.tp || 0),
-                      stopLossPrice: Number(inspectedTrade.sl || 0),
-                    });
-                    setChartViewMode('option');
-                    setInspectedTrade(null);
-                  }}
-                  className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 transition"
-                >
-                  <Zap className="w-3.5 h-3.5" />
-                  View Option Candlestick Chart
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setChartViewMode('spot');
-                    setInspectedTrade(null);
-                  }}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 transition"
-                >
-                  <TrendingUp className="w-3.5 h-3.5" />
-                  View Underlying Chart
-                </button>
+              {/* Breakeven & Payoff Representation Card for Options & Spreads */}
+              {dossierPayoff && (
+                <div className="mb-4 p-3.5 bg-gray-950/90 rounded-xl border border-gray-800 font-mono text-xs">
+                  <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2 font-sans">
+                    Payoff &amp; Breakeven Mechanics ({tradeStratLabel})
+                  </span>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    <div className="p-2.5 bg-gray-900/90 rounded border border-gray-800">
+                      <span className="text-gray-400 block text-[10px] uppercase font-bold">Breakeven Spot</span>
+                      <strong className="text-amber-400 text-sm">
+                        ₹{dossierPayoff.breakeven.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      </strong>
+                      <span className="text-[9px] text-gray-400 block mt-0.5">
+                        {dossierPayoff.safetyBufferPct}% margin to spot
+                      </span>
+                    </div>
+                    <div className="p-2.5 bg-gray-900/90 rounded border border-gray-800">
+                      <span className="text-gray-400 block text-[10px] uppercase font-bold">Max Profit</span>
+                      <strong className="text-emerald-400 text-sm">
+                        +{formatIndianCurrency(dossierPayoff.maxProfit)}
+                      </strong>
+                      <span className="text-[9px] text-emerald-400 block mt-0.5">
+                        {isTradeSeller ? 'Net credit capped' : 'Unlimited'}
+                      </span>
+                    </div>
+                    <div className="p-2.5 bg-gray-900/90 rounded border border-gray-800">
+                      <span className="text-gray-400 block text-[10px] uppercase font-bold">Max Risk</span>
+                      <strong className="text-red-400 text-sm">
+                        -{formatIndianCurrency(dossierPayoff.maxLoss)}
+                      </strong>
+                      <span className="text-[9px] text-gray-400 block mt-0.5">
+                        {isTradeSpread ? 'Hedged wing barrier' : 'SL controlled'}
+                      </span>
+                    </div>
+                    <div className="p-2.5 bg-gray-900/90 rounded border border-gray-800">
+                      <span className="text-gray-400 block text-[10px] uppercase font-bold">Risk-to-Reward</span>
+                      <strong className="text-blue-400 text-sm">
+                        {dossierPayoff.riskRewardRatio != null ? `1 : ${dossierPayoff.riskRewardRatio}` : 'N/A'}
+                      </strong>
+                      <span className="text-[9px] text-gray-400 block mt-0.5">
+                        {isTradeSeller ? 'High POP setup' : 'Asymmetric setup'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
               )}
 
-              <button
-                type="button"
-                onClick={() => setInspectedTrade(null)}
-                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold text-xs rounded-lg transition"
-              >
-                Close Dossier
-              </button>
+              {/* Grid 2: Risk Management & PnL */}
+              <div className="mb-4">
+                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
+                  2. Risk Envelope &amp; Asymmetric Barriers
+                </span>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
+                  <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
+                    <span className="text-gray-400 block text-[10px] uppercase font-semibold">Target Price (TP)</span>
+                    <strong className="text-emerald-400 text-sm">₹{Number(inspectedTrade.tp || inspectedTrade.target || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>
+                    <span className="text-[10px] text-emerald-400 block">{isTradeSeller ? 'Decay Target' : '2.0× ATR Barrier'}</span>
+                  </div>
+                  <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
+                    <span className="text-gray-400 block text-[10px] uppercase font-semibold">Stop Loss (SL)</span>
+                    <strong className="text-red-400 text-sm">₹{Number(inspectedTrade.sl || inspectedTrade.stop_loss || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>
+                    <span className="text-[10px] text-red-400 block">1.0× ATR Barrier</span>
+                  </div>
+                  <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
+                    <span className="text-gray-400 block text-[10px] uppercase font-semibold">Trailing Ratchet</span>
+                    <strong className="text-blue-400 text-sm">₹{Number(inspectedTrade.trailing_stop || inspectedTrade.sl || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>
+                    <span className="text-[10px] text-gray-400 block">Breakeven Lock</span>
+                  </div>
+                  <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800">
+                    <span className="text-gray-400 block text-[10px] uppercase font-semibold">{inspectedTrade.status === 'OPEN' ? 'Unrealized MTM' : 'Realized PnL'}</span>
+                    <strong className={`text-sm ${
+                      Number(inspectedTrade.cash_pnl || inspectedTrade.unrealized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                    }`}>
+                      {Number(inspectedTrade.cash_pnl || inspectedTrade.unrealized_pnl || 0) >= 0 ? '+' : ''}₹{Number(inspectedTrade.cash_pnl || inspectedTrade.unrealized_pnl || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </strong>
+                    <span className="text-[10px] opacity-80 block">
+                      {Number(inspectedTrade.pnl_pct ? inspectedTrade.pnl_pct * 100 : inspectedTrade.unrealized_pnl_pct || 0).toFixed(2)}% net
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Grid 3: F&O Greeks & Black-Scholes Analytics */}
+              <div className="mb-4">
+                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
+                  3. Full Option Greeks &amp; Black-Scholes Derivatives Metrics
+                </span>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-xs font-mono">
+                  <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800 text-center">
+                    <span className="text-gray-400 block text-[10px]">Delta (Δ)</span>
+                    <strong className="text-blue-400 text-sm">{Number(inspectedTrade.delta || 0.5).toFixed(3)}</strong>
+                    <span className="text-[10px] text-gray-400 block">{inspectedTrade.direction} exposure</span>
+                  </div>
+
+                  {/* Positive Theta notation for sellers */}
+                  <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800 text-center">
+                    <span className={`block text-[10px] font-bold ${isTradeSeller ? 'text-emerald-400' : 'text-gray-400'}`}>
+                      {isTradeSeller ? 'Theta Gain (Θ)' : 'Theta Decay (Θ)'}
+                    </span>
+                    <strong className={`text-sm ${isTradeSeller ? 'text-emerald-400 font-bold' : 'text-amber-400'}`}>
+                      {isTradeSeller ? '+' : ''}{formatIndianCurrency(isTradeSeller ? Math.abs(inspectedTrade.theta || -12.50) : (inspectedTrade.theta || -12.50))}
+                    </strong>
+                    <span className={`text-[10px] block font-semibold ${isTradeSeller ? 'text-emerald-400' : 'text-gray-400'}`}>
+                      {isTradeSeller ? '/day decay profit' : '/day time decay'}
+                    </span>
+                  </div>
+
+                  <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800 text-center">
+                    <span className="text-gray-400 block text-[10px]">Gamma (Γ)</span>
+                    <strong className="text-indigo-400 text-sm">{Number(inspectedTrade.gamma || 0.0012).toFixed(4)}</strong>
+                    <span className="text-[10px] text-gray-400 block">Delta acceleration</span>
+                  </div>
+                  <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800 text-center">
+                    <span className="text-gray-400 block text-[10px]">Vega (ν)</span>
+                    <strong className="text-emerald-400 text-sm">{formatIndianCurrency(inspectedTrade.vega || 14.20)}</strong>
+                    <span className="text-[10px] text-gray-400 block">/ 1% IV shift</span>
+                  </div>
+                  <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800 text-center">
+                    <span className="text-gray-400 block text-[10px]">Implied Vol (IV)</span>
+                    <strong className="text-purple-400 text-sm">{(Number(inspectedTrade.iv || 0.15) * 100).toFixed(1)}%</strong>
+                    <span className="text-[10px] text-gray-400 block">Annualized IV</span>
+                  </div>
+                  <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800 text-center">
+                    <span className="text-gray-400 block text-[10px]">Spot Reference</span>
+                    <strong className="text-white text-sm">{formatIndianCurrency(inspectedTrade.entry_spot || inspectedTrade.current_spot || 0)}</strong>
+                    <span className="text-[10px] text-gray-400 block">Strike: {inspectedTrade.strike || 'N/A'}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Grid 4: AI Confluence & Setup Signals */}
+              <div className="mb-5">
+                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
+                  4. AI Confluence &amp; Fired Setup Triggers
+                </span>
+                <div className="p-3 bg-gray-950/80 rounded-lg border border-gray-800 space-y-2 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-800/80 pb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-gray-400">AI Confidence:</span>
+                      <span className="font-bold text-emerald-400 font-mono">{(Number(inspectedTrade.probability || 0.72) * 100).toFixed(0)}%</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-gray-400">Regime:</span>
+                      <span className="font-bold text-blue-400 uppercase font-mono">{inspectedTrade.regime || 'TRENDING'}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-gray-400">TradingView:</span>
+                      <span className="font-bold text-amber-400 uppercase font-mono">{inspectedTrade.tv_recommendation || 'BUY'}</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] text-gray-400 uppercase block mb-1.5">Confluence Signals at Entry:</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {Array.isArray(inspectedTrade.setup_signals) && inspectedTrade.setup_signals.length > 0 ? (
+                        inspectedTrade.setup_signals.map((sig: any, sIdx: number) => {
+                          const sigName = String(sig?.name || '').replace(/_/g, ' ').toUpperCase();
+                          const sigDirection = String(sig?.signal || 'NEUTRAL').toUpperCase();
+                          const sigConfidence = Number.isFinite(Number(sig?.confidence)) ? (Number(sig.confidence) * 100).toFixed(0) : '0';
+                          return (
+                            <span
+                              key={sIdx}
+                              className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold ${
+                                sigDirection === 'BULLISH'
+                                  ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                                  : sigDirection === 'BEARISH'
+                                    ? 'bg-red-950 text-red-400 border border-red-800'
+                                    : 'bg-gray-800 text-gray-400 border border-gray-700'
+                              }`}
+                            >
+                              {sigName}: {sigDirection} ({sigConfidence}%)
+                            </span>
+                          );
+                        })
+                      ) : (
+                        <span className="text-gray-400 text-xs italic">Multi-indicator F&O momentum &amp; breakout confluence</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Modal Actions */}
+              <div className="flex items-center justify-between pt-3 border-t border-gray-800">
+                {isTradeOpt ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFocusedOption({
+                        underlying: inspectedTrade.underlying_ticker || inspectedTrade.underlying || (inspectedTrade.ticker?.includes('BANK') ? 'BANKNIFTY' : inspectedTrade.ticker?.includes('FIN') ? 'FINNIFTY' : 'NIFTY'),
+                        strike: Number(inspectedTrade.strike || 22800),
+                        optionType: (inspectedTrade.option_type === 'PE' ? 'PE' : 'CE'),
+                        action: isTradeSeller ? 'SELL' : 'BUY',
+                        strategyType: inspectedTrade.strategy_type || (isTradeSpread ? 'CREDIT_SPREAD' : isTradeSeller ? 'WRITING' : 'DIRECTIONAL'),
+                        hedgeStrike: inspectedTrade.hedge_strike_price,
+                        hedgePrice: inspectedTrade.hedge_entry_price,
+                        netCredit: inspectedTrade.net_credit,
+                        entryPrice: Number(inspectedTrade.entry_price || 0),
+                        targetPrice: Number(inspectedTrade.tp || 0),
+                        stopLossPrice: Number(inspectedTrade.sl || 0),
+                      });
+                      setChartViewMode('option');
+                      closeTradeDossier();
+                    }}
+                    className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 transition"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    View Option Candlestick Chart
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChartViewMode('spot');
+                      closeTradeDossier();
+                    }}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-lg flex items-center gap-1.5 transition"
+                  >
+                    <TrendingUp className="w-3.5 h-3.5" />
+                    View Underlying Chart
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={closeTradeDossier}
+                  className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold text-xs rounded-lg transition"
+                >
+                  Close Dossier
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 };

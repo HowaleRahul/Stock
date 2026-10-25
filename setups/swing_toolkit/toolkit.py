@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 from typing import Dict, Any, List, Optional
 import pandas as pd
 
@@ -23,6 +24,7 @@ from setups.swing_toolkit.universe import DEFAULT_SWING_UNIVERSE, BENCHMARK_TICK
 logger = logging.getLogger("trading.setups.swing_toolkit")
 
 WATCHLIST_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "swing_watchlist.json")
+_watchlist_lock = threading.RLock()
 
 
 class SwingToolkitManager:
@@ -76,42 +78,66 @@ class SwingToolkitManager:
 
     def load_watchlist(self) -> List[Dict[str, Any]]:
         """Loads the persisted active swing watchlist."""
-        if os.path.exists(WATCHLIST_FILE):
-            try:
-                with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"Error loading swing watchlist: {e}")
-        return []
+        with _watchlist_lock:
+            if os.path.exists(WATCHLIST_FILE):
+                try:
+                    with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except Exception as e:
+                    logger.error(f"Error loading swing watchlist: {e}")
+            return []
 
     def save_watchlist(self, items: List[Dict[str, Any]]) -> None:
-        """Atomically saves the active swing watchlist."""
-        tmp_path = f"{WATCHLIST_FILE}.tmp"
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(items, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, WATCHLIST_FILE)
-        except Exception as e:
-            logger.error(f"Error saving swing watchlist: {e}")
+        """Atomically saves the active swing watchlist using a unique temp file."""
+        import tempfile
+        with _watchlist_lock:
+            directory = os.path.dirname(os.path.abspath(WATCHLIST_FILE))
+            os.makedirs(directory, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".watchlist-", suffix=".json")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(items, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                import time
+                replaced = False
+                last_err = None
+                for attempt in range(5):
+                    try:
+                        os.replace(tmp_path, WATCHLIST_FILE)
+                        replaced = True
+                        break
+                    except PermissionError as pe:
+                        last_err = pe
+                        time.sleep(0.02 * (attempt + 1))
+                if not replaced and last_err:
+                    raise last_err
+            except Exception as e:
+                logger.error(f"Error saving swing watchlist: {e}")
+                if os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
 
     def add_to_watchlist(self, candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Adds a candidate to the active watchlist if not already present."""
-        items = self.load_watchlist()
-        ticker = candidate["ticker"].upper().strip()
-        # Remove existing if present to update
-        items = [it for it in items if it["ticker"] != ticker]
-        items.append(candidate)
-        self.save_watchlist(items)
-        return items
+        with _watchlist_lock:
+            items = self.load_watchlist()
+            ticker = candidate["ticker"].upper().strip()
+            # Remove existing if present to update
+            items = [it for it in items if it["ticker"] != ticker]
+            items.append(candidate)
+            self.save_watchlist(items)
+            return items
 
     def remove_from_watchlist(self, ticker: str) -> List[Dict[str, Any]]:
         """Removes a ticker from the active swing watchlist."""
-        clean_ticker = ticker.upper().strip()
-        items = [it for it in self.load_watchlist() if it["ticker"] != clean_ticker]
-        self.save_watchlist(items)
-        return items
+        with _watchlist_lock:
+            clean_ticker = ticker.upper().strip()
+            items = [it for it in self.load_watchlist() if it["ticker"] != clean_ticker]
+            self.save_watchlist(items)
+            return items
 
     async def run_scanners_and_filter(
         self,

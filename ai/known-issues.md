@@ -194,3 +194,195 @@ This document catalogs all verified defects, technical debt, incomplete features
 - **Possible Impact**: Users had zero visibility into trade execution reasoning or historical closed trade performance.
 - **Status**: Resolved / Verified (Pass 18)
 - **Remediation**: Comprehensive Trade Dossier Modal and telemetry pipeline implemented and verified with clean Vite build and full test suite pass.
+
+---
+
+### Issue 14: Capital Accounting Deficit & Futures PnL Understatement
+- **Severity**: Critical (Quant Math)
+- **Evidence**: `paper_trader.py` and `ml/live_market_learner.py` failed to deduct required margin/premium from free portfolio capital on order entry, allowing concurrent double-spending and infinite leverage. Furthermore, Futures PnL was calculated as spot percentage change times margin rather than notional points difference times contract quantity, understating risk by ~6.67x.
+- **Affected Area**: `paper_trader.py`, `ml/live_market_learner.py`, `api/broker_adapter.py`
+- **Current Behavior**: Margin/premium is immediately deducted from free portfolio capital on order creation (`invested_deducted = True`). Upon trade exit, initial margin plus net cash PnL is credited back. Futures PnL is calculated exactly as $\Delta\text{Points} \times \text{Quantity} - \text{Friction}$. Gap slippage on stop-loss is liquidated at `bar_open` when gaps occur.
+- **Status**: Resolved / Verified (Pass 21)
+
+---
+
+### Issue 15: React 19 Cascading Renders & Canvas Thrashing (10 Oxlint Violations)
+- **Severity**: High (Frontend Performance & UX)
+- **Evidence**: 10 `react(set-state-in-effect)` violations across 7 files (`OptionChartViewer.tsx`, `Dashboard.tsx`, `Portfolio.tsx`, `TrainingUI.tsx`, `Analytics.tsx`, `StrategyBuilder.tsx`, `SwingToolkit.tsx`, `AIJournal.tsx`). 2-second polling tick in `OptionChartViewer.tsx` triggered continuous lightweight-charts canvas destruction and redraws every 2 seconds.
+- **Affected Area**: `frontend/src/`
+- **Current Behavior**: All synchronous state mutations inside `useEffect` bodies were removed or decoupled into promise resolutions. Live tick state was separated from historical candles, eliminating the 2s canvas thrashing. Chart instances are synchronized on container resize.
+- **Status**: Resolved / Verified (Pass 21; `oxlint` returns 0 warnings and 0 errors).
+
+---
+
+### Issue 16: Authentication Dev Mode Bypass & Missing `math` Import
+- **Severity**: High (Security & Reliability)
+- **Evidence**: `_allows_keyless_development()` in `api/auth.py` checked server bind host (`settings.api_host`) instead of request client host (`request.client.host`), allowing remote access when port-forwarded. `api/backtest_router.py` called `math.isfinite()` without importing `math`, causing 100% 500 error crashes on backtests.
+- **Affected Area**: `api/auth.py`, `api/backtest_router.py`
+- **Current Behavior**: `api/auth.py` strictly validates `request.client.host` (loopback / testclient only). `import math` added to `api/backtest_router.py`.
+- **Status**: Resolved / Verified (Pass 21).
+
+---
+
+### Issue 17: Database Pollution via Unverified GET Queries
+- **Severity**: High (Database Integrity & Resource Exhaustion)
+- **Evidence**: `sync_symbol_ohlcv` and `sync_symbol_news` in `data/service.py` inserted `Symbol` rows before verifying if the ticker existed in external financial data.
+- **Affected Area**: `data/service.py`, `data/fetcher.py`
+- **Current Behavior**: External data is verified first via `YFinanceFetcher.verify_symbol_exists(ticker)` or non-empty fetched bars before inserting into the database. Tickers without external data return `status: "no_data"` without writing anything to PostgreSQL.
+- **Status**: Resolved / Verified (Pass 22).
+
+---
+
+### Issue 18: SSRF, Parameter Injection & XML Entity Expansion in News Ingestion
+- **Severity**: Critical (AppSec & DoS)
+- **Evidence**: Un-encoded search queries in `data/news_fetcher.py`, unvalidated HTTP redirects, and raw `xml.etree.ElementTree` parsing without entity defense.
+- **Affected Area**: `data/news_fetcher.py`
+- **Current Behavior**: Queries are quoted with `urllib.parse.quote_plus`; `_is_safe_redirect` resolves destination IPs to reject loopback, RFC 1918 private subnets, and cloud metadata (`169.254.169.254`); `_safe_parse_xml` rejects XML declaring `<!DOCTYPE` or `<!ENTITY` (Billion Laughs defense).
+- **Status**: Resolved / Verified (Pass 22).
+
+---
+
+### Issue 19: Doji Candle Feature Singularity & Quant Gradient Explosions
+- **Severity**: Critical (Quant ML Math)
+- **Evidence**: In `ml/features.py`, normalizing lower wicks by `candle_body + 1e-5` on Doji candles produced panic index values exceeding $5 \times 10^6$, blowing up `StandardScaler` variance and causing `SGDClassifier` weights to explode.
+- **Affected Area**: `ml/features.py`
+- **Current Behavior**: Denominator is clamped to $\max(\text{candle\_body}, \text{candle\_range} \times 0.1)$, and `psych_panic_index` is strictly clamped to $[0.0, 50.0]$.
+- **Status**: Resolved / Verified (Pass 22).
+
+---
+
+### Issue 20: Starlette Validation Exception 500 Crash on Custom Validators
+- **Severity**: High (API Stability)
+- **Evidence**: Pydantic v2 `RequestValidationError` contains raw `ValueError` objects in `ctx['error']`. Calling `JSONResponse` directly threw `TypeError: Object of type ValueError is not JSON serializable`, converting 422 errors into 500 crashes.
+- **Affected Area**: `api/main.py`
+- **Current Behavior**: `validation_exception_handler` wraps errors with `jsonable_encoder` after stringifying all `ctx` dictionary entries, returning proper 422 JSON bodies.
+- **Status**: Resolved / Verified (Pass 22).
+
+---
+
+### Issue 21: Virtual Broker Bankruptcy Circuit Breaker Bypass
+- **Severity**: Critical (Financial Risk)
+- **Evidence**: In `ml/replay_engine.py`, when `peak_capital <= 0` (blown account), `drawdown_pct` returned `0.0`, allowing bankrupt accounts to bypass the 10% drawdown kill-switch and continue trading.
+- **Affected Area**: `ml/replay_engine.py`, `backtest/engine.py`
+- **Current Behavior**: When `capital <= 0` or `peak_capital <= 0`, `drawdown_pct` immediately returns `1.0` (100% drawdown) and locks trading activity.
+- **Status**: Resolved / Verified (Pass 22).
+
+---
+
+### Issue 22: Monolithic Error Boundaries & Streaming Log UI Freezes
+- **Severity**: Medium-High (Frontend Resilience & UX)
+- **Evidence**: Full-page error boundary caused entire UI crashes when a single chart or panel failed. Slicing was missing for 1,000+ training log streams, freezing browser threads.
+- **Affected Area**: `frontend/src/components/ErrorBoundary.tsx`, `frontend/src/pages/Dashboard.tsx`, `frontend/src/pages/TrainingUI.tsx`
+- **Current Behavior**: `ErrorBoundary` supports `compact` mode with localized "Reload Widget" buttons; `TrainingUI` slices logs to 300 lines with real-time text filtering; `TradeDossierModal` enforces WCAG AA focus trapping.
+- **Status**: Resolved / Verified (Pass 22).
+
+---
+
+### Issue 23: Live Trader Safeguard Disconnect (Circuit Breaker & Consensus Bypassed)
+- **Severity**: Critical (Financial Risk)
+- **Evidence**: `live_trader.py` lacked `DrawdownCircuitBreaker` gating, `MultiAgentConsensusEngine` rulings, feature enrichment, and dynamic India VIX IV.
+- **Affected Area**: `live_trader.py`
+- **Current Behavior**: Integrated circuit breaker pre-scan gate, multi-agent consensus gate, feature enrichment, dynamic India VIX, and disk state persistence (`live_trades.json`).
+- **Status**: Resolved / Verified (Pass 23).
+
+---
+
+### Issue 24: Static 7-Day DTE Assumption Distortion on 0-DTE Expiries
+- **Severity**: High (Options Pricing & Greeks)
+- **Evidence**: `ml/options_engine.py` hardcoded `DAYS_TO_EXPIRY = 7.0`, causing distorted Delta, Theta, and Gamma on non-7DTE trading days.
+- **Affected Area**: `ml/options_engine.py`
+- **Current Behavior**: Implemented dynamic DTE per index (`MIDCPNIFTY` Mon, `FINNIFTY` Tue, `BANKNIFTY` Wed, `NIFTY` Thu, `SENSEX` Fri) calculating fractional trading days to 15:30 IST close with automatic weekly rollover.
+- **Status**: Resolved / Verified (Pass 23).
+
+---
+
+### Issue 25: Dashboard Analytics Indentation Bug Returning None
+- **Severity**: High (API Stability & UX)
+- **Evidence**: In `api/dashboard_router.py`, `/analytics` logic was indented inside the database exception block, returning `None` when database queries succeeded.
+- **Affected Area**: `api/dashboard_router.py`
+- **Current Behavior**: Indentation corrected so metrics, equity curve, and Gambler's Ruin probability of ruin are computed and returned consistently.
+- **Status**: Resolved / Verified (Pass 23).
+
+---
+
+### Issue 26: Unrealistic F&O Slippage Assumption vs Statutory SEBI Costs
+- **Severity**: High (Financial Modeling)
+- **Evidence**: Previous flat 0.05% slippage failed to account for flat ₹20 buy/sell brokerage, SEBI STT (0.1% on options sell), NSE txn charges, GST 18%, and Stamp Duty.
+- **Affected Area**: `ml/risk_engine.py`, `paper_trader.py`
+- **Current Behavior**: Implemented `IndianFOFrictionModel` with exact analytical breakeven calculation and risk gating against high-friction setups.
+- **Status**: Resolved / Verified (Pass 23).
+
+---
+
+### Issue 27: Missing Intraday MIS Square-Off Cutoff at 15:15 IST
+- **Severity**: Medium-High (Operational Risk)
+- **Evidence**: Intraday positions held past 15:15 IST risked broker RMS auto-square-off penalties.
+- **Affected Area**: `paper_trader.py`, `ml/live_market_learner.py`
+- **Current Behavior**: Enforced automatic exit at 15:15 IST with `exit_reason = "INTRADAY_SQUARE_OFF"`.
+- **Status**: Resolved / Verified (Pass 23).
+
+---
+
+### Issue 28: React 19 State Closure Race Condition in Setup Selector
+- **Severity**: Medium (Frontend Functional Integrity)
+- **Evidence**: In `BacktestUI.tsx`, strategy presets called `setSetup()` followed by `setTimeout(runBacktest)`, which read stale closed-over state.
+- **Affected Area**: `frontend/src/pages/BacktestUI.tsx`
+- **Current Behavior**: `runBacktest` accepts an explicit override parameter, eliminating closure delay.
+- **Status**: Resolved / Verified (Pass 23).
+
+---
+
+### Issue 29: Path Parameter Rate Limit Permutation Bypass
+- **Severity**: High (Security & Abuse)
+- **Evidence**: `api/auth.py` previously keyed rate limit buckets by concrete request path (`request.scope.get('path')`), allowing clients to bypass the 60 req/min limit by cycling through ticker symbols (e.g. `/quote/TCS`, `/quote/INFY`).
+- **Affected Area**: `api/auth.py`
+- **Current Behavior**: Keying is now bound to the endpoint route template (`route.path`), sharing the quota bucket across all parameter variants. In addition, client IPs extracted from `X-Forwarded-For` are verified with `ipaddress.ip_address()`, and IPv4-mapped IPv6 loopbacks (`::ffff:127.0.0.1`) are normalized.
+- **Status**: Resolved / Verified (Pass 24).
+
+---
+
+### Issue 30: Windows File Lock Race Condition & 503 Crashes in Strategy Store
+- **Severity**: Medium-High (Concurrency & Reliability)
+- **Evidence**: In `api/strategy_router.py`, `setups/swing_toolkit/toolkit.py`, and `ml/trade_logger.py`, concurrent asynchronous requests caused Windows file-lock contention and `json.JSONDecodeError` when reading during an atomic file replace (`os.replace`), yielding HTTP 503 errors.
+- **Affected Area**: `api/strategy_router.py`, `setups/swing_toolkit/toolkit.py`, `ml/trade_logger.py`
+- **Current Behavior**: Synchronized all read and atomic write operations with `threading.RLock()`, and safely defaulted empty uninitialized strategy files to an empty array `[]`.
+- **Status**: Resolved / Verified (Pass 24).
+
+---
+
+### Issue 31: SSRF Port Probing & 0.0.0.0 IP Bypass in News Fetcher
+- **Severity**: High (Security)
+- **Evidence**: In `data/news_fetcher.py`, the redirect validator allowed non-standard ports (8443, 8000) and `0.0.0.0` (which connects to localhost on Windows and Linux), and XML payloads were parsed without length caps when `defusedxml` was installed.
+- **Affected Area**: `data/news_fetcher.py`
+- **Current Behavior**: Strictly restricted redirects to HTTPS port 443, blocked `ip.is_unspecified` (`0.0.0.0` and `::`), and enforced a 5MB payload limit prior to XML parsing.
+- **Status**: Resolved / Verified (Pass 24).
+
+---
+
+### Issue 32: Silent Null-Byte Stripping & Path Traversal in Data Ingestion
+- **Severity**: Medium-High (Security & Data Integrity)
+- **Evidence**: `data/service.py` silently replaced null bytes with `""` instead of raising validation errors, and ticker parameters permitted directory traversal sequences (`..`).
+- **Affected Area**: `data/service.py`, `api/router.py`, `api/schemas.py`, `api/backtest_router.py`
+- **Current Behavior**: Standardized centralized `_validate_service_ticker()` across all ingestion and API entrypoints, strictly rejecting null bytes, path traversal sequences (`..`, `/`, `\`), and URI fragments (`#`).
+- **Status**: Resolved / Verified (Pass 24).
+
+---
+
+### Issue 33: Multi-threaded ContextVar Isolation Failure in TradeLogger
+- **Severity**: Medium (Concurrency & Audit Logging)
+- **Evidence**: In `ml/trade_logger.py`, Python `ContextVar` values set in a parent thread did not propagate into child worker threads, causing background worker events to fail to write to custom log files.
+- **Affected Area**: `ml/trade_logger.py`
+- **Current Behavior**: Implemented a synchronized `_global_log_file` fallback so spawned threads inherit the active test or worker log file.
+- **Status**: Resolved / Verified (Pass 24).
+
+---
+
+### Issue 34: Option Selling Exit Direction Inversion in Broker Executors
+- **Severity**: Critical (Trading Execution)
+- **Evidence**: In `paper_trader.py` and `live_trader.py`, position close logic defaulted to placing `SELL` orders, which incorrectly attempted to sell more contracts when exiting a short option position.
+- **Affected Area**: `paper_trader.py`, `live_trader.py`
+- **Current Behavior**: Corrected exit logic to submit a `BUY` order at current ask price when exiting a position with `side == "SELL"`.
+- **Status**: Resolved / Verified (Pass 24).
+
+
+

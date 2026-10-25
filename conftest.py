@@ -40,6 +40,8 @@ DB_INTEGRATION_TESTS = {
     "tests/test_phase2_setups.py::test_setups_endpoint_404_unknown_ticker",
     "tests/test_phase2_setups.py::test_indicators_endpoint_returns_all_series",
     "tests/test_phase2_setups.py::test_indicators_endpoint_series_lengths_match",
+    "tests/test_backend_hardening.py::test_sync_symbol_ohlcv_does_not_pollute_db_on_invalid_ticker",
+    "tests/test_backend_hardening.py::test_get_or_create_symbol_verify_external_flag",
 }
 
 def pytest_collection_modifyitems(config, items):
@@ -53,6 +55,19 @@ def pytest_collection_modifyitems(config, items):
                         reason="PostgreSQL/TimescaleDB is offline (run 'docker compose up -d' to enable integration tests)"
                     )
                 )
+
+from api.auth import _RATE_LIMITS, _RATE_LOCK
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limits():
+    """Clear sliding window rate limits between tests to avoid cross-test false 429s."""
+    with _RATE_LOCK:
+        _RATE_LIMITS.clear()
+    yield
+    with _RATE_LOCK:
+        _RATE_LIMITS.clear()
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def dispose_db_engine():

@@ -552,3 +552,262 @@
 - Full regression suite: `pytest -q` passed **176/176 tests** with 0 failures in 50.37s.
 - Brain synchronization complete: `ai/current-state.md`, `ai/decisions.md` (Decision 22), and `REVIEW_LOG.md` fully up to date.
 
+---
+
+## Pass 21 — Full-System Adversarial Audit, Quant Risk Engineering, AppSec Hardening, and React 19 Compiler Optimization
+
+### 1. Quant & Financial Business Logic Hardening
+- **Capital Double-Spending Elimination (`paper_trader.py`, `ml/live_market_learner.py`)**:
+  - Required margin/premium is immediately deducted from free portfolio capital on order entry (`invested_deducted = True`).
+  - Upon trade exit, initial margin plus net cash PnL is credited back (`trade['invested'] + cash_pnl`), enforcing true purchasing power constraints.
+- **Futures Notional Points PnL (`paper_trader.py`, `ml/live_market_learner.py`)**:
+  - Calculated as $(\Delta \text{Points} \times \text{Quantity}) - \text{Friction}$, eliminating a 6.67x understatement of futures risk caused by treating futures as cash equity spot returns.
+- **Stop-Loss Adverse Gap Slippage (`paper_trader.py`, `ml/live_market_learner.py`)**:
+  - When the market gaps beyond a stop loss at bar open, execution liquidates at `bar_open` (`min(sl, open)` for Long, `max(sl, open)` for Short) rather than capping slippage at exact stop loss.
+- **Drawdown Circuit Breaker Portfolio Scaling & Disk Persistence (`ml/circuit_breaker.py`)**:
+  - Normalized daily realized loss to total portfolio capital (`cash_loss / capital`), preventing a ₹50 loss from shutting down a ₹10,00,000 account.
+  - State persisted to `logs/circuit_breaker_state.json` via atomic rename.
+  - Added `_normalize_dt()` to prevent offset-naive vs. offset-aware datetime comparison crashes.
+- **Multi-Agent Consensus Rejection Activation (`paper_trader.py`, `ml/live_market_learner.py`)**:
+  - Replaced dead-code check (`consensus.recommended_action == "REJECT_TRADE"`) with inspection of `consensus.recommended_action.startswith("STAND ASIDE")`, `consensus.consensus_signal == "neutral"`, and `consensus.chief_risk_ruling`.
+- **Broker Adapter Average Cost Preservation (`api/broker_adapter.py`)**:
+  - Preserves `pos["avg_price"]` on partial position reductions; only reassigns `avg_price` if the position flips direction.
+- **Black-Scholes Mathematical Convergence (`ml/options_engine.py`)**:
+  - Fixed boundary math at $T \le 0$ and $\sigma \le 10^{-9}$ to settle intrinsic value $\max(0.05, S - K)$ for CE and $\max(0.05, K - S)$ for PE with `math.isfinite()` bounds.
+- **Live Execution Engine (`live_trader.py`)**:
+  - Fixed F&O ticker matching using `fo_name = get_fo_name(ticker)`.
+  - Added active position deduplication check before placing new live orders.
+  - Implemented exchange routing to `"BFO"` for SENSEX and `"NFO"` for NSE indices.
+
+### 2. Application Security & Runtime Reliability
+- **Development Keyless Auth Loopback Verification (`api/auth.py`)**:
+  - Hardened `_allows_keyless_development()` to verify `request.client.host` is loopback or testclient, preventing remote auth bypasses.
+- **Backtest Runtime Restoration (`api/backtest_router.py`)**:
+  - Added missing `import math` to eliminate 100% HTTP 500 error crashes on `math.isfinite()`.
+- **Atomic Watchlist Persistence (`setups/swing_toolkit/toolkit.py`)**:
+  - Replaced predictable static `.tmp` files with `tempfile.mkstemp` atomic renames.
+- **Dashboard Fallback & Context Model (`api/dashboard_router.py`)**:
+  - Imported `TradeContext` from `models.models`.
+  - Added resilient local JSON fallback when database is offline.
+
+### 3. Frontend Architecture, Performance & Accessibility (React 19)
+- **Zero Oxlint Warnings**:
+  - Eliminated all 10 `react(set-state-in-effect)` violations across 7 files (`OptionChartViewer.tsx`, `Dashboard.tsx`, `Portfolio.tsx`, `TrainingUI.tsx`, `Analytics.tsx`, `StrategyBuilder.tsx`, `SwingToolkit.tsx`, `AIJournal.tsx`).
+- **2-Second Canvas Thrashing Elimination (`OptionChartViewer.tsx`)**:
+  - Decoupled live Greeks/LTP ticks from historical candles, preventing continuous 2-second canvas recalculations.
+- **Lightweight Charts Resize Resilience (`ChartWidget.tsx`, `OptionChartViewer.tsx`)**:
+  - Synchronized chart instances to ensure data rehydration when container height changes.
+- **TradingView Widget Teardown (`TradingViewWidget.tsx`)**:
+  - Replaced hardcoded DOM ID with dynamic `useId()` and removed detached script handlers.
+- **Runtime Defensive Guards**:
+  - Added safe fallbacks for `item.recommendation.includes`, `sig.signal.toUpperCase`, `avgPnlPct.toFixed`, and `portfolio.cash_balance.toLocaleString`.
+- **Form Validation (`StrategyBuilder.tsx`)**:
+  - Enforced numeric bounds (RSI 0-100, price/volume > 0).
+- **Accessibility & Contrast (WCAG AA)**:
+  - Overrode `.main-content .text-white` to preserve high contrast (#f8fafc) over dark `.bg-gray-950` backgrounds.
+  - Added global `:focus-visible` outline rings across all buttons and inputs.
+  - Added `role="dialog"`, `aria-modal="true"`, `aria-labelledby`, and `Escape` key listeners to all modals.
+  - Adjusted dashboard grid breakpoint to 1100px.
+
+### Verification — Pass 21
+- Full test suite: **159 passed**, 17 skipped (database offline), 0 failed in 48.45s (`pytest -q`).
+- Frontend lint: **0 warnings, 0 errors** on 20 files (`oxlint`).
+- Frontend production build: **Vite build succeeded** in 4.89s with 0 errors (`npm run build`).
+- Compulsory project brain synchronization verified across `ai/current-state.md`, `ai/decisions.md` (Decision 23), `ai/known-issues.md`, and `REVIEW_LOG.md`.
+
+---
+
+## Pass 22 — Principal Multi-Disciplinary Adversarial Audit, Quant Financial Singularities Elimination, AppSec Vulnerability Hardening, and Frontend UI Resilience
+
+### 1. Backend Security & Data Resilience Engineering
+- **Database Pollution Elimination (`data/service.py`, `data/fetcher.py`)**:
+  - `sync_symbol_ohlcv` and `sync_symbol_news` verified external market data *before* inserting or retrieving symbols from the PostgreSQL `symbols` hypertable.
+  - Implemented `verify_symbol_exists(ticker)` in `YFinanceFetcher` to eliminate bogus ticker database pollution attacks.
+- **SSRF, URL Parameter Injection & XML Entity Expansion Defense (`data/news_fetcher.py`)**:
+  - Implemented `_is_safe_redirect(target_url)` inspecting target IPs with `socket.getaddrinfo` to prevent SSRF against loopback, private subnets (RFC 1918), and cloud metadata endpoints (`169.254.169.254`).
+  - Added strict URL query quoting via `urllib.parse.quote_plus`.
+  - Implemented `_safe_parse_xml` enforcing a 5MB payload limit and rejecting XML payloads declaring `<!DOCTYPE` or `<!ENTITY` (Billion Laughs / quadratic blowup defense).
+- **NSE Feed Hardening & Akamai Cookie Refresh (`data/nse_feed.py`)**:
+  - URL-encoded option chain symbol queries with `urllib.parse.quote` while preserving standard symbol contracts.
+  - Invalidate and refresh Akamai sessions on 401/403 responses.
+  - Hardened `calculate_max_pain` against NaN/Inf strike values.
+- **Unified Atomic Configuration Store (`api/config_store.py`)**:
+  - Replaced disparate, uncoordinated `_lock` and `_config_lock` across `api/training_router.py` and `api/dashboard_router.py` with a unified re-entrant `threading.RLock()`.
+  - Implemented `load_config_atomic`, `save_config_atomic`, and `update_config_atomic` using `tempfile.mkstemp`, `os.fsync`, and Windows-resilient 5-retry atomic replace.
+- **Pydantic Validation Serialization Fix & Security Headers (`api/main.py`)**:
+  - Sanitized Pydantic v2 `RequestValidationError` exceptions via `jsonable_encoder` stringifying `ctx` exceptions, resolving 500 error crashes on custom validators.
+  - Hardened Content-Security-Policy (CSP) by removing open CDN `unpkg.com` and adding `frame-ancestors 'none'`, `object-src 'none'`, `base-uri 'self'`, and `form-action 'self'`.
+  - Added strict `Permissions-Policy: camera=(), microphone=(), geolocation=()`.
+- **Strategy Input Validation & Path Traversal / IDOR Defense (`api/strategy_router.py`)**:
+  - Whitelisted condition operators (`VALID_OPERATORS`), validated indicator names (`^[A-Za-z0-9_]{1,64}$`), and sanitized strategy names against path traversal (`..`, `/`, `\`).
+
+### 2. Quant Financial & Mathematical SDET Hardening
+- **Psychology Features Doji Candle Singularity (`ml/features.py`)**:
+  - Replaced `candle_body + 1e-5` denominator with $\max(\text{candle\_body}, \text{candle\_range} \times 0.1)$ and clamped `psych_panic_index` strictly to $[0.0, 50.0]$ to eliminate $5 \times 10^6$ gradient explosions.
+- **Virtual Broker Bankruptcy Circuit Breaker Bypass (`ml/replay_engine.py`)**:
+  - Enforced that when `capital <= 0` or `peak_capital <= 0`, `drawdown_pct` immediately returns `1.0` (100% drawdown), halting bankrupt accounts from continuing to trade.
+- **Black-Scholes Fallback Delta Inversion & Greeks Bounds (`ml/options_engine.py`)**:
+  - Replaced arbitrary fallback `delta = 1.0` with `0.0` for OTM contracts; clamped Call $\Delta \in [0.0, 1.0]$, Put $\Delta \in [-1.0, 0.0]$, $\Gamma \ge 0$, $\nu \ge 0$.
+  - Fixed boundary math at $T \le 0$ and $\sigma \le 10^{-9}$ to settle intrinsic value $\max(0.05, S - K)$ for CE and $\max(0.05, K - S)$ for PE.
+- **GEX Gamma Flip Linear Interpolation & Zero Call OI Division (`ml/gex_engine.py`)**:
+  - Implemented exact linear interpolation root-finding for `gamma_flip` level where net GEX crosses 0.
+  - Guarded Put-Call Ratio against zero call OI division by capping at 100.0.
+- **Multi-Agent Consensus Tie Deadlock & NaN Protection (`ml/multi_agent_consensus.py`)**:
+  - Added `_safe_float` sanitizer, probability clipping $[0.0, 1.0]$, and deterministic Technical Analyst & CRO tie-breaker for balanced bull/bear conviction states.
+- **StandardScaler Zero-Variance Blowup & Heuristic Calibration (`ml/ensemble.py`)**:
+  - Added `np.nan_to_num` protection against zero-scale division in flat regimes; calibrated fallback voting probabilities to $[0.05, 0.95]$ to protect Kelly sizing.
+- **Heap Leak Prevention & Clean Thread Teardown (`ml/continuous_trainer.py`, `ml/live_market_learner.py`)**:
+  - Capped rolling `closed_trades` to 500 items and added periodic `gc.collect()`.
+  - Wrapped training loop in `try...finally` ensuring `_current_mode = "STOPPED"` on exit.
+- **Sharpe Ratio Zero Return Variance Singularity (`backtest/engine.py`)**:
+  - Guarded Sharpe ratio denominator ($ret\_std \le 10^{-9}$ returns `0.0`) and guarded drawdown calculation against non-positive peak capital.
+
+### 3. Frontend Architecture, UX Resilience & Accessibility
+- **Backtest UI Resilience (`frontend/src/pages/BacktestUI.tsx`)**:
+  - Added client-side ticker regex validation, allowed character checks, length bounds, and F&O preset shortcuts.
+  - Implemented start/end date range pickers with presets (`All`, `3M`, `6M`, `1Y`, `3Y`), date order validation, and safe division-by-zero math ($0/0 \to 0$, $N/0 \to \infty$).
+  - Added in-place "Retry Backtest" action on network failure.
+- **Dashboard Widget Isolation & Localized Error Boundaries (`frontend/src/pages/Dashboard.tsx`)**:
+  - Wrapped chart modes (`TradingViewWidget`, `OptionChartViewer`, `ChartWidget`), Technical Gauge, and News Sentiment in localized `<ErrorBoundary compact>` wrappers with in-panel "Reload Widget" buttons.
+  - Implemented `DEFAULT_FALLBACK_WATCHLIST` so watchlist navigation never disappears during network lag.
+  - Added `AbortController` cancellation for rapid timeframe changes.
+- **Training UI Terminal Virtualization & Focus Trapping (`frontend/src/pages/TrainingUI.tsx`)**:
+  - Sliced terminal rendering to latest 300 lines with log filter search, eliminating UI freezes on 1,000+ streaming lines.
+  - Added `capitalError` validation and clamping on custom capital inputs (₹1,000 to ₹10,00,00,000).
+  - Implemented WCAG AA focus trapping, backdrop dismiss, and focus restoration on `TradeDossierModal`.
+- **Portfolio Financial Currency & Empty State (`frontend/src/pages/Portfolio.tsx`)**:
+  - Implemented `formatFinancialCurrency` helper correctly placing negative signs (`-₹5,000.00` instead of `₹-5,000.00`).
+  - Added rich empty portfolio state with navigation shortcuts and responsive horizontal scroll wrapper.
+- **Strategy Builder Rule Group Validation (`frontend/src/pages/StrategyBuilder.tsx`)**:
+  - Supported entry-only and exit-only strategies with rule count $\ge 1$ validation and cleaned notification timeout leaks.
+- **Swing Toolkit Scanner Timeout & Candidate Filtering (`frontend/src/pages/SwingToolkit.tsx`)**:
+  - Added 45s scanner timeout with explicit "Cancel Scan" button and timeout retry alerts.
+  - Implemented multi-criteria candidate filtering toolbar (Status: All / Approved / Filtered; Scanner: All / Momentum / DWIB / ATH; and real-time search).
+  - Enhanced empty approved watchlist card with one-click scanner activation.
+- **AI Journal Sanitization (`frontend/src/pages/AIJournal.tsx`)**:
+  - Sanitized zero-trade metric cards (win rate, max drawdown, Sharpe) to neutral gray styling without negative zeros (`0.0%`).
+  - Hardened timestamp parser supporting numeric timestamps (seconds and milliseconds), ISO strings, and space-separated date strings.
+- **Compact Error Boundary Architecture (`frontend/src/components/ErrorBoundary.tsx`)**:
+  - Added `compact` mode rendering localized panel error alerts with dedicated "Reload Widget" buttons.
+
+### Verification — Pass 22
+- Backend Test Suite: **191 passed, 19 skipped, 0 failed in 39.34s** (`pytest -q` across 210 collected tests).
+- Frontend Lint: **0 warnings, 0 errors** on 20 files (`oxlint`).
+- Frontend TypeScript: **0 errors** (`npx tsc -b`).
+- Frontend Production Build: **Vite build succeeded** in 1.07s (`npm run build`).
+- Compulsory project brain synchronization verified across `ai/current-state.md`, `ai/decisions.md` (Decision 24), `ai/known-issues.md`, and `REVIEW_LOG.md`.
+
+---
+
+## Pass 23 — Indian F&O Trading Realism, Dynamic Expiry Modeling, Multi-Agent Derivatives Context, and Backend/Frontend Hardening
+
+### 1. Indian F&O Quantitative Risk & Expiry Engineering
+- **Dynamic Days to Expiry (DTE) per Index (`ml/options_engine.py`)**:
+  - Replaced static `DAYS_TO_EXPIRY = 7.0` with exact dynamic DTE mapping per Indian index (`MIDCPNIFTY` Mon, `FINNIFTY` Tue, `BANKNIFTY` Wed, `NIFTY` Thu, `SENSEX` Fri).
+  - Fractional trading days calculated precisely until 15:30 IST close with automatic weekly rollover at market expiry.
+- **Real-Time Derivatives & Sentiment Multi-Agent Context (`ml/multi_agent_consensus.py`, `paper_trader.py`, `ml/live_market_learner.py`)**:
+  - Replaced hardcoded dummy options data (`{"pcr_oi": 1.0, "gex_regime": "NEUTRAL"}`) with dynamic real-time data queried from `NSEFeed` (live Put-Call Ratio, Max Pain strike, FII/DII cash flows) and `GEXEngine` (dealer GEX regime).
+- **Mandatory Intraday MIS Square-Off Rule (`ml/risk_engine.py`, `paper_trader.py`, `ml/live_market_learner.py`)**:
+  - Enforced automatic square-off at 15:15 IST (`exit_reason = "INTRADAY_SQUARE_OFF"`) to eliminate broker RMS liquidation penalty fees.
+- **Statutory Indian F&O Regulatory Friction Model (`ml/risk_engine.py`)**:
+  - Implemented `IndianFOFrictionModel` calculating statutory costs: flat ₹20 buy/sell brokerage, SEBI STT (0.1% on options sell / 0.02% on futures sell), NSE txn charges (0.05% / 0.0019%), GST 18%, Stamp duty, and exact analytical breakeven gating ($Net\ PnL = ₹0.00$ within ₹0.01 tolerance).
+- **Dynamic India VIX Resolution (`ml/options_engine.py`)**:
+  - Dynamically retrieves real-time India VIX from candle `macro_vix`, `RealTimeDataFeed`, or `NSEFeed` instead of assuming static 14%.
+
+### 2. Backend Security, Concurrency & Live Trader Safeguards
+- **Live Trader Parity & Fail-Closed Safeguards (`live_trader.py`)**:
+  - Integrated `DrawdownCircuitBreaker` gate preventing live orders under active drawdown cooldowns.
+  - Integrated `MultiAgentConsensusEngine` gate enforcing Chief Risk Officer and consensus approval before live execution.
+  - Added candle feature enrichment (`enrich_with_macro_and_options`, `enrich_with_psychology_features`, ATR-14) and dynamic India VIX IV.
+  - Added database session rollback on disconnects and offline disk state persistence (`live_trades.json`).
+- **Critical Dashboard Analytics Indentation Bug (`api/dashboard_router.py`)**:
+  - Fixed indentation where `/analytics` calculations were indented inside the database exception block, causing successful database calls to return `None`.
+- **Database Transaction Integrity (`api/db.py`, `papertrade/persistence.py`)**:
+  - Added explicit `await session.rollback()` on exceptions across dependencies and persistence services, with automatic fallbacks to disk JSON stores.
+- **Router Input Sanitization & Concurrency (`api/market_router.py`, `api/strategy_router.py`, `api/swing_router.py`)**:
+  - Bound strike queries (`ge=1.0, le=10_000_000.0, allow_inf_nan=False`), validated option types (`CE`, `PE`), sanitized tickers against path traversal, and routed training config mutations through `api/config_store.py`.
+
+### 3. Frontend Architecture, Accessibility & Indian F&O Realism
+- **State Closure Race Condition in Setup Selector (`frontend/src/pages/BacktestUI.tsx`)**:
+  - Refactored `runBacktest` to accept explicit override parameters, resolving React 19 closure delay when clicking preset strategies.
+- **Black-Scholes Greeks Bar & Vega Display (`OptionChartViewer.tsx`, `TrainingUI.tsx`)**:
+  - Added Vega (ν per 1% IV shift) across the live Greeks ribbon and the Trade Specification Dossier modal.
+- **Live Market Session Badge & Expiry Countdown (`MarketSessionBadge.tsx`, `index.css`)**:
+  - Added live IST clock, session status badges (Pre-Open, Regular, Post-Market, Closed), and dynamic countdown pills to nearest weekly expiry.
+  - Fixed mobile topbar viewport breaking with responsive flex wrapping.
+- **Dense Table Overflow & Layout Resilience**:
+  - Wrapped multi-column financial tables across all 8 pages in `overflow-x-auto` with explicit minimum widths (`min-w-[760px]` to `min-w-[880px]`), preventing header collision on mobile devices.
+- **SEBI/NSE Financial Formatting (`formatters.ts`, `foUtils.ts`)**:
+  - Enforced `-₹5,000.00` placement and Indian numbering grouping (Lakhs & Crores).
+  - Standardized exchange lot sizes (Nifty 25, BankNifty 15, Sensex 10, Finnifty 25, Midcpnifty 50) and canonical contract notation (`NIFTY 24500 CE`, `BANKNIFTY FUT`).
+- **No-Code Strategy Builder F&O Presets (`StrategyBuilder.tsx`)**:
+  - Added instant template population for Nifty/BankNifty/Sensex intraday momentum setups.
+
+### Verification — Pass 23
+- Backend Test Suite: **235 passed, 19 skipped, 0 failed in 44.97s** (`pytest -q` across 254 collected tests).
+- Frontend Lint: **0 warnings, 0 errors** on 23 files (`oxlint`).
+- Frontend TypeScript: **0 errors** (`npx tsc -b`).
+- Frontend Production Build: **Vite build succeeded** in 1.16s (`npm run build`).
+- Compulsory project brain synchronization verified across `ai/current-state.md`, `ai/decisions.md` (Decision 25), `ai/known-issues.md`, and `REVIEW_LOG.md`.
+
+---
+
+## Pass 24 — Indian F&O Option Selling, Credit Spreads & Positive Theta Decay, Adversarial Security & Concurrency Hardening
+
+### 1. Indian F&O Quantitative Architecture (Option Writing, Credit Spreads & Positive Theta)
+- **Directional Option Selling (`ml/options_engine.py`)**:
+  - Implemented `SELL_OPTIONS` strategy writing OTM Call (CE) contracts in bearish regimes and OTM Put (PE) contracts in bullish regimes.
+  - Modeled positive daily theta income ($+\Theta > 0$, e.g. `+₹125.00/day`) harvesting time decay as an income stream.
+  - Short option MTM formula implemented: $\text{P&L} = (\text{Entry Premium} - \text{Current Premium}) \times \text{Quantity}$.
+- **Defined-Risk Credit Spreads (`ml/options_engine.py`)**:
+  - Implemented `CREDIT_SPREAD` strategy generating Bull Put Credit Spreads (sell higher strike PE, buy lower strike PE) and Bear Call Credit Spreads (sell lower strike CE, buy higher strike CE).
+  - Risk is mathematically bounded: $\text{Max Loss} = (\text{Spread Width} - \text{Net Credit}) \times \text{Lot Size}$.
+- **Exchange SPAN + Exposure Margin Gating (`ml/options_engine.py`, `ml/risk_engine.py`)**:
+  - Implemented exchange margin requirement checks (approx. ₹1.25L - ₹1.5L per naked lot) with trade rejection if `available_capital < span_margin`.
+  - Credit spreads benefit from exchange margin offsets, requiring only spread width margin minus credit.
+- **Payoff Curve Analysis Engine (`api/market_router.py`)**:
+  - Created `/api/v1/market/option-strategy-payoff` returning analytical payoff curves, maximum profit, maximum loss, R:R ratio, and exact breakeven spot prices for arbitrary multi-leg options combinations.
+- **Execution Parity for Short Options (`paper_trader.py`, `live_trader.py`)**:
+  - Fixed exit direction: exiting a short position (`side == "SELL"`) places a `BUY` order at current ask price.
+
+### 2. Adversarial Security, SDET & Concurrency Hardening
+- **Path Parameter Rate Limit Permutation Fix (`api/auth.py`)**:
+  - Bound rate limiter buckets to route templates (`route.path`) instead of concrete request paths, preventing quota bypasses via cycling ticker symbols (`/quote/TCS`, `/quote/INFY`).
+- **Client IP Sanitization & Loopback Normalization (`api/auth.py`)**:
+  - Validated `X-Forwarded-For` extracted IPs with `ipaddress.ip_address()`, rejecting malformed headers.
+  - Added IPv4-mapped IPv6 normalization (`::ffff:127.0.0.1`) so dual-stack Windows sockets are correctly recognized as loopback.
+- **SSRF & Pre-Parse XML DoS Defense (`data/news_fetcher.py`)**:
+  - Restricted redirect targets strictly to HTTPS port 443, blocking non-standard ports (8443, 8000) and `0.0.0.0` (`ip.is_unspecified`), private subnets, and loopbacks.
+  - Enforced a 5MB payload size limit prior to XML parsing to prevent memory exhaustion DoS attacks.
+- **Centralized Ticker Traversal & Null-Byte Defense (`data/service.py`, `api/router.py`, `api/schemas.py`, `api/backtest_router.py`)**:
+  - Standardized `_validate_service_ticker()`, strictly rejecting null bytes (`\x00`), path traversals (`..`, `/`, `\`), and URI fragments (`#`) while permitting underscores (`^[A-Z0-9\._\-\^\=\&]+$`).
+- **Windows File Lock Race Condition Fix (`api/strategy_router.py`, `setups/swing_toolkit/toolkit.py`, `ml/trade_logger.py`)**:
+  - Wrapped file reads and atomic writes in `threading.RLock()`, eliminating Windows file contention, JSON decode errors, and HTTP 503 crashes during concurrent requests.
+  - Handled empty strategy files gracefully with `[]` fallback.
+- **Multi-Threaded ContextVar Fallback (`ml/trade_logger.py`)**:
+  - Implemented `_global_log_file` fallback so background worker threads spawned without inheriting `ContextVar` log to the correct trade journal.
+- **Financial Bounds & Clampings (`api/dashboard_router.py`, `api/market_router.py`)**:
+  - Enforced `allow_inf_nan=False` on user configuration floats.
+  - Guarded compound return exponent math against `OverflowError`.
+  - Clamped live bid/ask spreads to non-negative values (`max(0.0, ...)`).
+
+### 3. Frontend Architecture, Visualization & Positive Theta UX
+- **Interactive Multi-Leg Strategy Payoff Chart (`OptionChartViewer.tsx`)**:
+  - Added payoff curve visualization with dynamic strike markers, maximum profit, maximum loss, risk-to-reward ratio, and exact breakeven spot prices.
+- **Positive Theta Decay Badges (`OptionChartViewer.tsx`, `TrainingUI.tsx`, `Portfolio.tsx`, `Dashboard.tsx`)**:
+  - Displayed positive theta notation (`+₹Theta/day`) in green for short options and credit spreads, contrasting with negative theta holding costs for long options.
+- **Credit Spread Builder Presets (`StrategyBuilder.tsx`)**:
+  - Added Bull Put and Bear Call credit spread templates with automated strike offsets and margin estimates.
+- **Margin vs Premium Displays (`Portfolio.tsx`, `Analytics.tsx`, `AIJournal.tsx`)**:
+  - Clarified capital deployed vs margin blocked for Indian F&O positions.
+
+### Verification — Pass 24
+- Backend Test Suite: **288 passed, 19 skipped, 0 failed in 64.37s** (`pytest -q` across 307 collected tests).
+  - New test suite: `tests/test_fo_options_selling_and_security.py` (46 automated tests passing in 19.35s).
+- Frontend Lint: **0 warnings, 0 errors** on 23 files (`oxlint`).
+- Frontend TypeScript: **0 errors** (`npx tsc -b`).
+- Frontend Production Build: **Vite build succeeded** in 2.28s (`npm run build`).
+- Compulsory project brain synchronization verified across `ai/current-state.md`, `ai/decisions.md` (Decisions 26 & 27), `ai/known-issues.md`, `ai/instructions.md`, and `REVIEW_LOG.md`.
+
+
+

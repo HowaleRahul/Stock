@@ -1,4 +1,4 @@
-import { useEffect, useRef, memo } from 'react';
+import { useEffect, useRef, useId, memo } from 'react';
 import { formatTradingViewSymbol } from './tradingViewUtils';
 
 interface TradingViewWidgetProps {
@@ -17,34 +17,32 @@ const TradingViewWidget = ({
   interval = 'D',
 }: TradingViewWidgetProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const rawId = useId();
+  const containerId = `tv_widget_${rawId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const tvSymbol = formatTradingViewSymbol(symbol);
 
   useEffect(() => {
+    let isCancelled = false;
     const currentContainer = containerRef.current;
     if (!currentContainer) return;
 
-    // Clear any previous chart instances
     currentContainer.innerHTML = '';
-
     const widgetDiv = document.createElement('div');
-    widgetDiv.id = 'tradingview_advanced_chart';
+    widgetDiv.id = containerId;
     widgetDiv.style.height = autosize ? '100%' : `${height}px`;
     widgetDiv.style.width = '100%';
     currentContainer.appendChild(widgetDiv);
 
-    const script = document.createElement('script');
-    script.src = 'https://s3.tradingview.com/tv.js';
-    script.type = 'text/javascript';
-    script.async = true;
-    script.onload = () => {
+    const initWidget = () => {
+      if (isCancelled || !document.getElementById(containerId)) return;
       if (typeof (window as any).TradingView !== 'undefined') {
         new (window as any).TradingView.widget({
-          autosize: autosize,
-          height: height,
+          autosize,
+          height,
           symbol: tvSymbol,
-          interval: interval,
+          interval,
           timezone: 'Asia/Kolkata',
-          theme: theme,
+          theme,
           style: '1',
           locale: 'en',
           toolbar_bg: '#131722',
@@ -52,24 +50,37 @@ const TradingViewWidget = ({
           hide_side_toolbar: false,
           allow_symbol_change: true,
           save_image: false,
-          container_id: 'tradingview_advanced_chart',
-          studies: [
-            'RSI@tv-basicstudies',
-            'MASimple@tv-basicstudies',
-            'MACD@tv-basicstudies'
-          ],
+          container_id: containerId,
+          studies: ['RSI@tv-basicstudies', 'MASimple@tv-basicstudies', 'MACD@tv-basicstudies'],
         });
       }
     };
 
-    currentContainer.appendChild(script);
+    if (typeof (window as any).TradingView !== 'undefined') {
+      initWidget();
+    } else {
+      let script = document.getElementById('tradingview-tvjs') as HTMLScriptElement;
+      if (!script) {
+        script = document.createElement('script');
+        script.id = 'tradingview-tvjs';
+        script.src = 'https://s3.tradingview.com/tv.js';
+        script.type = 'text/javascript';
+        script.async = true;
+        document.head.appendChild(script);
+      }
+      script.addEventListener('load', initWidget);
+      return () => {
+        isCancelled = true;
+        script.removeEventListener('load', initWidget);
+        if (currentContainer) currentContainer.innerHTML = '';
+      };
+    }
 
     return () => {
-      if (currentContainer) {
-        currentContainer.innerHTML = '';
-      }
+      isCancelled = true;
+      if (currentContainer) currentContainer.innerHTML = '';
     };
-  }, [tvSymbol, theme, autosize, height, interval]);
+  }, [containerId, tvSymbol, theme, autosize, height, interval]);
 
   return (
     <div

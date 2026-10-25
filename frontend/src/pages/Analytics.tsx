@@ -2,7 +2,9 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { createChart, ColorType, LineSeries } from 'lightweight-charts';
 import type { Time } from 'lightweight-charts';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Calendar } from 'lucide-react';
+import ErrorBoundary from '../components/ErrorBoundary';
+import { formatIndianCurrency } from '../utils/formatters';
 
 interface AnalyticsData {
   win_rate?: number;
@@ -30,8 +32,6 @@ const Analytics = () => {
 
     if (isManual) {
       setRefreshing(true);
-    } else {
-      setLoading(true);
     }
     setError(null);
 
@@ -53,27 +53,44 @@ const Analytics = () => {
   }, []);
 
   useEffect(() => {
-    fetchAnalytics();
+    let ignore = false;
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    axios.get('/api/v1/dashboard/analytics', { signal: controller.signal })
+      .then(res => {
+        if (!ignore) {
+          setData(res.data);
+          setLoading(false);
+        }
+      })
+      .catch((err: any) => {
+        if (!ignore && !axios.isCancel(err)) {
+          console.error('Failed to load analytics:', err);
+          setError('Analytics are unavailable. Please check that the backend is running and retry.');
+          setLoading(false);
+        }
+      });
+
     return () => {
-      if (abortRef.current) {
-        abortRef.current.abort();
-      }
+      ignore = true;
+      controller.abort();
     };
-  }, [fetchAnalytics]);
+  }, []);
 
   useEffect(() => {
     if (!loading && data && chartContainerRef.current) {
       const chart = createChart(chartContainerRef.current, {
         layout: {
           background: { type: ColorType.Solid, color: 'transparent' },
-          textColor: '#68757a',
+          textColor: '#94a3b8',
         },
         grid: {
-          vertLines: { color: '#eeeae1' },
-          horzLines: { color: '#eeeae1' },
+          vertLines: { color: 'rgba(255, 255, 255, 0.05)' },
+          horzLines: { color: 'rgba(255, 255, 255, 0.05)' },
         },
-        rightPriceScale: { borderColor: '#dfdcd3' },
-        timeScale: { borderColor: '#dfdcd3' },
+        rightPriceScale: { borderColor: '#334155' },
+        timeScale: { borderColor: '#334155' },
         width: chartContainerRef.current.clientWidth,
         height: 400,
         localization: {
@@ -166,52 +183,96 @@ const Analytics = () => {
         </div>
       )}
       
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-gray-900 p-6 rounded-lg border border-gray-800">
-          <p className="text-gray-400 text-sm">Overall Win Rate</p>
-          <p className="text-3xl font-bold text-emerald-400">{winRate.toFixed(1)}%</p>
-          <p className="text-sm text-gray-500 mt-2">Across {totalTrades} historical closed trades</p>
+      <ErrorBoundary compact title="Performance Summary Error">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 md:gap-6">
+          <div className="bg-gray-900 p-6 rounded-lg border border-gray-800">
+            <p className="text-gray-400 text-sm">Overall Win Rate</p>
+            <p className={`text-3xl font-bold mt-1 ${
+              totalTrades === 0
+                ? 'text-gray-400'
+                : winRate >= 50
+                  ? 'text-emerald-400'
+                  : 'text-red-400'
+            }`}>
+              {totalTrades === 0 ? '0.0%' : `${winRate.toFixed(1)}%`}
+            </p>
+            <p className="text-sm text-gray-500 mt-2">Across {totalTrades} historical closed trades</p>
+          </div>
+          <div className="bg-gray-900 p-6 rounded-lg border border-gray-800">
+            <p className="text-gray-400 text-sm">Probability of Ruin</p>
+            <p className={`text-3xl font-bold mt-1 ${
+              totalTrades === 0
+                ? 'text-gray-400'
+                : probRuin > 30
+                  ? 'text-red-400'
+                  : 'text-emerald-400'
+            }`}>
+              {totalTrades === 0 ? '0.0%' : `${probRuin.toFixed(1)}%`}
+            </p>
+            <p className="text-sm text-gray-500 mt-2">Risk model hitting 0 capital</p>
+          </div>
+          <div className="bg-gray-900 p-6 rounded-lg border border-gray-800 col-span-1 sm:col-span-2 md:col-span-1">
+            <p className="text-gray-400 text-sm">Current Equity</p>
+            <p className="text-3xl font-bold text-blue-400 mt-1">
+              {currentEquity > 0 ? formatIndianCurrency(currentEquity) : '—'}
+            </p>
+            <p className="text-sm text-gray-500 mt-2">Simulated portfolio equity balance</p>
+          </div>
         </div>
-        <div className="bg-gray-900 p-6 rounded-lg border border-gray-800">
-          <p className="text-gray-400 text-sm">Probability of Ruin</p>
-          <p className={`text-3xl font-bold ${probRuin > 30 ? 'text-red-400' : 'text-emerald-400'}`}>
-            {probRuin.toFixed(1)}%
-          </p>
-          <p className="text-sm text-gray-500 mt-2">Risk model hitting 0 capital</p>
-        </div>
-        <div className="bg-gray-900 p-6 rounded-lg border border-gray-800">
-          <p className="text-gray-400 text-sm">Current Equity</p>
-          <p className="text-3xl font-bold text-blue-400">
-            {currentEquity > 0 ? `₹${Number(currentEquity).toLocaleString('en-IN', { maximumFractionDigits: 0 })}` : '—'}
-          </p>
-          <p className="text-sm text-gray-500 mt-2">Simulated portfolio equity balance</p>
-        </div>
-      </div>
+      </ErrorBoundary>
 
       <div className="bg-gray-900 p-6 rounded-lg border border-gray-800">
         <h3 className="text-lg font-bold text-white mb-4">Equity Curve</h3>
-        {equityCurve.length > 0 ? (
-          <div ref={chartContainerRef} className="w-full" />
-        ) : (
-          <div className="text-gray-500 py-8 text-center">Not enough closed trades to plot an equity curve.</div>
-        )}
+        <ErrorBoundary compact title="Equity Curve Error">
+          {equityCurve.length > 0 ? (
+            <div ref={chartContainerRef} className="w-full" />
+          ) : (
+            <div className="text-gray-500 py-8 text-center">Not enough closed trades to plot an equity curve.</div>
+          )}
+        </ErrorBoundary>
       </div>
 
       {Object.keys(winByDay).length > 0 && (
-        <div className="bg-gray-900 p-6 rounded-lg border border-gray-800">
-          <h3 className="text-lg font-bold text-white mb-4">Win Rate by Day of Week</h3>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-            {Object.entries(winByDay).map(([day, rate]) => {
-              const numRate = Number(rate) || 0;
-              return (
-                <div key={day} className="bg-gray-800 p-4 rounded text-center">
-                  <div className="text-gray-400 text-sm">{day}</div>
-                  <div className="text-xl font-bold mt-1 text-blue-400">{numRate.toFixed(0)}%</div>
-                </div>
-              );
-            })}
+        <ErrorBoundary compact title="Day of Week Expiry Analysis Error">
+          <div className="bg-gray-900 p-6 rounded-lg border border-gray-800">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-purple-400" /> Win Rate by Day of Week &amp; F&amp;O Expiry Cycle
+                </h3>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Historical edge distribution across Indian exchange expiry trading sessions
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+              {Object.entries(winByDay).map(([day, rate]) => {
+                const numRate = Number(rate) || 0;
+                const lower = day.toLowerCase();
+                const expiryBadge =
+                  lower.includes('thu') ? 'NIFTY Expiry' :
+                  lower.includes('wed') ? 'BANKNIFTY Expiry' :
+                  lower.includes('fri') ? 'SENSEX Expiry' :
+                  lower.includes('tue') ? 'FINNIFTY Expiry' :
+                  lower.includes('mon') ? 'MIDCPNIFTY Expiry' : null;
+
+                return (
+                  <div key={day} className="bg-gray-800/80 border border-gray-700/80 p-3.5 rounded-lg text-center flex flex-col justify-between">
+                    <div>
+                      <div className="text-gray-300 font-semibold text-sm">{day}</div>
+                      {expiryBadge && (
+                        <span className="inline-block text-[10px] px-1.5 py-0.5 mt-1 rounded bg-purple-950 text-purple-300 border border-purple-800 font-mono font-bold">
+                          {expiryBadge}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xl font-bold font-mono mt-2 text-blue-400">{numRate.toFixed(0)}%</div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        </ErrorBoundary>
       )}
     </div>
   );

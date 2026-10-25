@@ -1,5 +1,6 @@
 import os
 import re
+import math
 import logging
 import yfinance as yf
 from fastapi import APIRouter, HTTPException, Query, Depends
@@ -26,7 +27,9 @@ def _validate_ticker(ticker: str) -> str:
     cleaned = ticker.upper().strip().replace("\x00", "")
     if not cleaned or len(cleaned) > 64:
         raise HTTPException(status_code=400, detail="Invalid ticker length.")
-    if not re.match(r"^[A-Z0-9\.\-\^\=]+$", cleaned):
+    if ".." in cleaned or "/" in cleaned or "\\" in cleaned:
+        raise HTTPException(status_code=400, detail="Invalid ticker: forbidden characters detected.")
+    if not re.match(r"^[A-Z0-9\._\-\^\=]+$", cleaned):
         raise HTTPException(status_code=400, detail="Invalid characters in ticker.")
     return cleaned
 
@@ -207,6 +210,12 @@ def _download_and_backtest(ticker: str, timeframe: str, setup: str) -> dict:
     wins = len([t for t in trades if t["pnl_pct"] > 0])
     win_rate = (wins / len(trades) * 100) if trades else 0.0
     total_pnl = ((capital - 10000.0) / 10000.0) * 100
+    if not math.isfinite(total_pnl):
+        total_pnl = 0.0
+    if not math.isfinite(win_rate):
+        win_rate = 0.0
+    if not math.isfinite(max_dd):
+        max_dd = 0.0
 
     return {
         "win_rate": round(win_rate, 2),

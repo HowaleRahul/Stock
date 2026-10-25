@@ -174,8 +174,12 @@ class PaperMatchingEngine:
             pos["realized_pnl"] += pnl
             self.cash_balance += pnl
             pos["quantity"] = new_q
-            if new_q != 0:
+            if new_q == 0:
+                pos["avg_price"] = 0.0
+            elif (curr_q > 0 and new_q < 0) or (curr_q < 0 and new_q > 0):
+                # Position flipped direction
                 pos["avg_price"] = order.fill_price
+            # When position is merely reduced (same sign), existing avg_price remains unchanged
 
 
 class UnifiedBrokerAdapter:

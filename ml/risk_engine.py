@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import logging
+import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -24,6 +25,316 @@ import pandas as pd
 from setups.indicators import find_support_resistance
 
 logger = logging.getLogger("trading.risk_engine")
+
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+
+def is_intraday_square_off_time(dt: Optional[datetime.datetime] = None) -> bool:
+    """
+    Checks if current or candle time has reached or exceeded Indian intraday
+    MIS auto square-off threshold (15:15 IST).
+    Broker RMS triggers automatic square-off between 15:15 and 15:30 IST on trading days.
+    """
+    if dt is None:
+        dt_ist = datetime.datetime.now(IST)
+        # Live clock check: only trigger during active weekday session within MIS window
+        if dt_ist.weekday() >= 5:
+            return False
+        return datetime.time(15, 15) <= dt_ist.time() <= datetime.time(15, 30)
+
+    if dt.tzinfo is None:
+        dt_ist = dt.replace(tzinfo=IST)
+    else:
+        dt_ist = dt.astimezone(IST)
+
+    return datetime.time(15, 15) <= dt_ist.time() <= datetime.time(15, 30)
+
+
+# ---------------------------------------------------------------------------
+# Indian F&O Transaction Friction & Regulatory Cost Model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FOFrictionBreakdown:
+    """Detailed breakdown of Indian regulatory and broker transaction costs."""
+    instrument_type: str        # "OPTION" or "FUTURE"
+    brokerage: float            # ₹40 round-trip (₹20 entry + ₹20 exit)
+    stt: float                  # Securities Transaction Tax
+    exchange_txn_charge: float  # Exchange transaction fee
+    sebi_charges: float         # SEBI turnover charge (₹10/crore)
+    gst: float                  # 18% on (Brokerage + Exchange Txn Charge)
+    stamp_duty: float           # Stamp duty on buy turnover
+    total_friction: float       # Sum of all regulatory and broker fees
+    gross_pnl: float            # Gross profit / loss in ₹
+    net_pnl: float              # Gross PnL - Total Friction in ₹
+    breakeven_exit_price: float # Exit price where net_pnl == 0.0
+    breakeven_points_required: float # Points move required to cover all friction
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "instrument_type": self.instrument_type,
+            "brokerage": round(self.brokerage, 2),
+            "stt": round(self.stt, 2),
+            "exchange_txn_charge": round(self.exchange_txn_charge, 2),
+            "sebi_charges": round(self.sebi_charges, 4),
+            "gst": round(self.gst, 2),
+            "stamp_duty": round(self.stamp_duty, 2),
+            "total_friction": round(self.total_friction, 2),
+            "gross_pnl": round(self.gross_pnl, 2),
+            "net_pnl": round(self.net_pnl, 2),
+            "breakeven_exit_price": round(self.breakeven_exit_price, 2),
+            "breakeven_points_required": round(self.breakeven_points_required, 2),
+        }
+
+
+class IndianFOFrictionModel:
+    """
+    Real-world Indian F&O regulatory and brokerage transaction friction model.
+    Accurately computes Brokerage, STT, Exchange Transaction Charges, GST, Stamp Duty,
+    SEBI turnover charges, and Breakeven price thresholds.
+
+    Regulatory specifications:
+    - Options:
+      - Brokerage: ₹20 buy + ₹20 sell = ₹40 flat per round trip
+      - STT: 0.1% on sell premium turnover
+      - NSE txn charge: 0.05% on premium turnover
+      - GST: 18% on (Brokerage + Exchange Txn Charge)
+      - Stamp duty: 0.003% on buy premium turnover
+      - SEBI turnover charge: ₹10/crore (0.0001%)
+    - Futures:
+      - Brokerage: ₹20 buy + ₹20 sell = ₹40 flat per round trip
+      - STT: 0.02% on sell turnover
+      - Exchange txn charge: 0.0019% on total turnover
+      - GST: 18% on (Brokerage + Exchange Txn Charge)
+      - Stamp duty: 0.002% on buy turnover
+      - SEBI turnover charge: ₹10/crore (0.0001%)
+    """
+
+    # Flat brokerages
+    OPTIONS_BROKERAGE_BUY = 20.0
+    OPTIONS_BROKERAGE_SELL = 20.0
+    FUTURES_BROKERAGE_BUY = 20.0
+    FUTURES_BROKERAGE_SELL = 20.0
+
+    # Options statutory rates
+    OPTIONS_STT_SELL_RATE = 0.001           # 0.1% on sell premium
+    OPTIONS_EXCHANGE_TXN_RATE = 0.0005      # 0.05% on premium turnover
+    OPTIONS_GST_RATE = 0.18                 # 18% on (Brokerage + Txn Charge)
+    OPTIONS_STAMP_DUTY_BUY_RATE = 0.00003   # 0.003% on buy premium
+    OPTIONS_SEBI_CHARGES_RATE = 0.000001    # ₹10 per crore
+
+    # Futures statutory rates
+    FUTURES_STT_SELL_RATE = 0.0002          # 0.02% on sell turnover
+    FUTURES_EXCHANGE_TXN_RATE = 0.000019    # 0.0019% on turnover
+    FUTURES_GST_RATE = 0.18                 # 18% on (Brokerage + Txn Charge)
+    FUTURES_STAMP_DUTY_BUY_RATE = 0.00002   # 0.002% on buy turnover
+    FUTURES_SEBI_CHARGES_RATE = 0.000001    # ₹10 per crore
+
+    @classmethod
+    def calculate_options_friction(
+        cls,
+        buy_premium: float,
+        sell_premium: float,
+        quantity: int,
+        action: str = "BUY"
+    ) -> FOFrictionBreakdown:
+        """
+        Calculates exact round-trip transaction friction for Indian Options.
+        Supports both Option Buying (action='BUY') and Option Selling (action='SELL').
+        """
+        qty = max(1, int(quantity))
+        b_prem = max(0.0, float(buy_premium))
+        s_prem = max(0.0, float(sell_premium))
+        act = str(action).upper().strip()
+
+        buy_turnover = b_prem * qty
+        sell_turnover = s_prem * qty
+        total_turnover = buy_turnover + sell_turnover
+
+        brokerage = cls.OPTIONS_BROKERAGE_BUY + cls.OPTIONS_BROKERAGE_SELL
+        stt = sell_turnover * cls.OPTIONS_STT_SELL_RATE
+        exchange_txn = total_turnover * cls.OPTIONS_EXCHANGE_TXN_RATE
+        sebi_charges = total_turnover * cls.OPTIONS_SEBI_CHARGES_RATE
+        gst = (brokerage + exchange_txn) * cls.OPTIONS_GST_RATE
+        stamp_duty = buy_turnover * cls.OPTIONS_STAMP_DUTY_BUY_RATE
+
+        total_friction = brokerage + stt + exchange_txn + sebi_charges + gst + stamp_duty
+        gross_pnl = sell_turnover - buy_turnover
+        net_pnl = gross_pnl - total_friction
+
+        sell_cost_rate = (
+            cls.OPTIONS_STT_SELL_RATE
+            + cls.OPTIONS_EXCHANGE_TXN_RATE * (1.0 + cls.OPTIONS_GST_RATE)
+            + cls.OPTIONS_SEBI_CHARGES_RATE
+        )
+        buy_cost_rate = (
+            cls.OPTIONS_STAMP_DUTY_BUY_RATE
+            + cls.OPTIONS_EXCHANGE_TXN_RATE * (1.0 + cls.OPTIONS_GST_RATE)
+            + cls.OPTIONS_SEBI_CHARGES_RATE
+        )
+
+        if act == "SELL":
+            # For Option Selling: s_prem is entry sell premium, b_prem is exit buyback premium
+            # Breakeven buyback premium: Buy_Turnover * (1 + buy_cost_rate) = Sell_Turnover * (1 - sell_cost_rate) - Brokerage * (1 + GST)
+            net_proceeds = sell_turnover * (1.0 - sell_cost_rate) - brokerage * (1.0 + cls.OPTIONS_GST_RATE)
+            denom_sell = qty * (1.0 + buy_cost_rate)
+            breakeven_exit = max(0.05, net_proceeds / denom_sell) if denom_sell > 0 else s_prem
+            breakeven_points = max(0.0, s_prem - breakeven_exit)
+        else:
+            # For Option Buying: b_prem is entry buy premium, s_prem is exit sell premium
+            buy_side_costs = (
+                brokerage * (1.0 + cls.OPTIONS_GST_RATE)
+                + buy_turnover * (
+                    cls.OPTIONS_STAMP_DUTY_BUY_RATE
+                    + cls.OPTIONS_EXCHANGE_TXN_RATE * (1.0 + cls.OPTIONS_GST_RATE)
+                    + cls.OPTIONS_SEBI_CHARGES_RATE
+                )
+            )
+            denom_buy = qty * (1.0 - sell_cost_rate)
+            breakeven_exit = (buy_turnover + buy_side_costs) / denom_buy if denom_buy > 0 else b_prem
+            breakeven_points = max(0.0, breakeven_exit - b_prem)
+
+        return FOFrictionBreakdown(
+            instrument_type="OPTION",
+            brokerage=brokerage,
+            stt=stt,
+            exchange_txn_charge=exchange_txn,
+            sebi_charges=sebi_charges,
+            gst=gst,
+            stamp_duty=stamp_duty,
+            total_friction=total_friction,
+            gross_pnl=gross_pnl,
+            net_pnl=net_pnl,
+            breakeven_exit_price=breakeven_exit,
+            breakeven_points_required=breakeven_points,
+        )
+
+    @classmethod
+    def calculate_spread_friction(
+        cls,
+        short_entry_prem: float,
+        short_exit_prem: float,
+        long_entry_prem: float,
+        long_exit_prem: float,
+        quantity: int
+    ) -> FOFrictionBreakdown:
+        """
+        Calculates exact round-trip transaction friction for 2-leg Indian Option Spreads
+        (e.g. Bull Put Credit Spread or Bear Call Credit Spread).
+        """
+        qty = max(1, int(quantity))
+        p_short_in = max(0.0, float(short_entry_prem))
+        p_short_out = max(0.0, float(short_exit_prem))
+        p_long_in = max(0.0, float(long_entry_prem))
+        p_long_out = max(0.0, float(long_exit_prem))
+
+        # 4 orders total: Short Entry (SELL), Short Exit (BUY), Long Entry (BUY), Long Exit (SELL)
+        brokerage = 4.0 * cls.OPTIONS_BROKERAGE_BUY
+
+        total_sell_turnover = (p_short_in + p_long_out) * qty
+        total_buy_turnover = (p_long_in + p_short_out) * qty
+        total_turnover = total_sell_turnover + total_buy_turnover
+
+        stt = total_sell_turnover * cls.OPTIONS_STT_SELL_RATE
+        exchange_txn = total_turnover * cls.OPTIONS_EXCHANGE_TXN_RATE
+        sebi_charges = total_turnover * cls.OPTIONS_SEBI_CHARGES_RATE
+        gst = (brokerage + exchange_txn) * cls.OPTIONS_GST_RATE
+        stamp_duty = total_buy_turnover * cls.OPTIONS_STAMP_DUTY_BUY_RATE
+
+        total_friction = brokerage + stt + exchange_txn + sebi_charges + gst + stamp_duty
+        gross_pnl = total_sell_turnover - total_buy_turnover
+        net_pnl = gross_pnl - total_friction
+
+        return FOFrictionBreakdown(
+            instrument_type="SPREAD",
+            brokerage=brokerage,
+            stt=stt,
+            exchange_txn_charge=exchange_txn,
+            sebi_charges=sebi_charges,
+            gst=gst,
+            stamp_duty=stamp_duty,
+            total_friction=total_friction,
+            gross_pnl=gross_pnl,
+            net_pnl=net_pnl,
+            breakeven_exit_price=round(p_short_in - p_long_in, 2),
+            breakeven_points_required=round(total_friction / qty, 2)
+        )
+
+    @classmethod
+    def calculate_futures_friction(
+        cls,
+        entry_price: float,
+        exit_price: float,
+        quantity: int,
+        direction: str = "LONG"
+    ) -> FOFrictionBreakdown:
+        """
+        Calculates exact round-trip transaction friction for Indian Futures.
+        """
+        qty = max(1, int(quantity))
+        p_entry = max(0.0, float(entry_price))
+        p_exit = max(0.0, float(exit_price))
+        is_long = str(direction).upper() in ("LONG", "BULLISH")
+
+        if is_long:
+            buy_turnover = p_entry * qty
+            sell_turnover = p_exit * qty
+            gross_pnl = (p_exit - p_entry) * qty
+        else:
+            sell_turnover = p_entry * qty
+            buy_turnover = p_exit * qty
+            gross_pnl = (p_entry - p_exit) * qty
+
+        total_turnover = buy_turnover + sell_turnover
+
+        brokerage = cls.FUTURES_BROKERAGE_BUY + cls.FUTURES_BROKERAGE_SELL
+        stt = sell_turnover * cls.FUTURES_STT_SELL_RATE
+        exchange_txn = total_turnover * cls.FUTURES_EXCHANGE_TXN_RATE
+        sebi_charges = total_turnover * cls.FUTURES_SEBI_CHARGES_RATE
+        gst = (brokerage + exchange_txn) * cls.FUTURES_GST_RATE
+        stamp_duty = buy_turnover * cls.FUTURES_STAMP_DUTY_BUY_RATE
+
+        total_friction = brokerage + stt + exchange_txn + sebi_charges + gst + stamp_duty
+        net_pnl = gross_pnl - total_friction
+
+        # Exact analytical breakeven exit price:
+        sell_cost_rate = (
+            cls.FUTURES_STT_SELL_RATE
+            + cls.FUTURES_EXCHANGE_TXN_RATE * (1.0 + cls.FUTURES_GST_RATE)
+            + cls.FUTURES_SEBI_CHARGES_RATE
+        )
+        buy_cost_rate = (
+            cls.FUTURES_STAMP_DUTY_BUY_RATE
+            + cls.FUTURES_EXCHANGE_TXN_RATE * (1.0 + cls.FUTURES_GST_RATE)
+            + cls.FUTURES_SEBI_CHARGES_RATE
+        )
+
+        if is_long:
+            buy_side_costs = brokerage * (1.0 + cls.FUTURES_GST_RATE) + buy_turnover * buy_cost_rate
+            denom = qty * (1.0 - sell_cost_rate)
+            breakeven_exit = (buy_turnover + buy_side_costs) / denom if denom > 0 else p_entry
+            breakeven_points = max(0.0, breakeven_exit - p_entry)
+        else:
+            # Short Futures: sell at entry, buy back at exit
+            net_entry_cash = sell_turnover * (1.0 - sell_cost_rate) - brokerage * (1.0 + cls.FUTURES_GST_RATE)
+            denom = qty * (1.0 + buy_cost_rate)
+            breakeven_exit = net_entry_cash / denom if denom > 0 else p_entry
+            breakeven_points = max(0.0, p_entry - breakeven_exit)
+
+        return FOFrictionBreakdown(
+            instrument_type="FUTURE",
+            brokerage=brokerage,
+            stt=stt,
+            exchange_txn_charge=exchange_txn,
+            sebi_charges=sebi_charges,
+            gst=gst,
+            stamp_duty=stamp_duty,
+            total_friction=total_friction,
+            gross_pnl=gross_pnl,
+            net_pnl=net_pnl,
+            breakeven_exit_price=breakeven_exit,
+            breakeven_points_required=breakeven_points,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -37,12 +348,12 @@ class TradePlan:
     # Identification
     ticker: str
     direction: str  # "LONG" or "SHORT"
-    timeframe: str  # "1h" or "1d"
 
     # Prices
     entry_price: float
     stop_loss: float
     take_profit: float
+    timeframe: str = "1h"  # "1h" or "1d"
     trailing_stop: Optional[float] = None
 
     # Risk Metrics
@@ -69,6 +380,11 @@ class TradePlan:
     max_hold_bars: int = 0
     reasoning: str = ""
 
+    # Real-World Indian F&O Friction & Breakeven
+    estimated_friction: float = 0.0
+    net_profit_amount: float = 0.0
+    breakeven_price: float = 0.0
+
     # Gating
     is_approved: bool = True
     rejection_reasons: List[str] = field(default_factory=list)
@@ -88,6 +404,9 @@ class TradePlan:
             "position_value": round(self.position_value, 2),
             "max_loss_amount": round(self.max_loss_amount, 2),
             "max_profit_amount": round(self.max_profit_amount, 2),
+            "estimated_friction": round(self.estimated_friction, 2),
+            "net_profit_amount": round(self.net_profit_amount, 2),
+            "breakeven_price": round(self.breakeven_price, 2),
             "ai_probability": round(self.ai_probability, 4),
             "kelly_fraction": round(self.kelly_fraction, 4),
             "probability_of_ruin": round(self.probability_of_ruin, 6),
@@ -319,7 +638,18 @@ class RiskEngine:
             risk_fraction=risk_pct
         )
 
-        # 7. Build the Trade Plan
+        # 7. Indian F&O Friction and Breakeven Calculation
+        f_breakdown = IndianFOFrictionModel.calculate_futures_friction(
+            entry_price=entry,
+            exit_price=tp_price,
+            quantity=max(1, qty),
+            direction=trade_dir
+        )
+        est_friction = f_breakdown.total_friction
+        be_price = f_breakdown.breakeven_exit_price
+        net_profit = max(0.0, max_profit - est_friction)
+
+        # 8. Build the Trade Plan
         plan = TradePlan(
             ticker=ticker,
             direction=trade_dir,
@@ -334,6 +664,9 @@ class RiskEngine:
             position_value=position_val,
             max_loss_amount=max_loss,
             max_profit_amount=max_profit,
+            estimated_friction=est_friction,
+            net_profit_amount=net_profit,
+            breakeven_price=be_price,
             ai_probability=ai_probability,
             kelly_fraction=kelly_f,
             probability_of_ruin=p_ruin,
@@ -347,10 +680,10 @@ class RiskEngine:
             max_hold_bars=max_hold,
         )
 
-        # 8. Apply Rejection Gates
+        # 9. Apply Rejection Gates
         self._apply_gates(plan, open_positions or [])
 
-        # 9. Build reasoning string
+        # 10. Build reasoning string
         plan.reasoning = self._build_reasoning(plan)
 
         return plan
@@ -748,6 +1081,13 @@ class RiskEngine:
                 f"for {tier['tier']} capital tier. High-precision confluence standard not met."
             )
 
+        # Gate 6: Real-World Indian F&O Friction & Breakeven Check
+        if plan.max_profit_amount > 0 and plan.max_profit_amount <= plan.estimated_friction:
+            rejections.append(
+                f"Friction Deficit: Expected profit (₹{plan.max_profit_amount:,.2f}) does not cover "
+                f"estimated Indian transaction friction (₹{plan.estimated_friction:,.2f}). Breakeven price: ₹{plan.breakeven_price:,.2f}."
+            )
+
         if rejections:
             plan.is_approved = False
             plan.rejection_reasons = rejections
@@ -775,7 +1115,8 @@ class RiskEngine:
             f"  ⚖️  R:R Ratio: {plan.risk_reward_ratio:.2f}:1\n"
             f"  📐 Position: {plan.position_size_qty} units × ₹{plan.entry_price:,.2f} = ₹{plan.position_value:,.2f}\n"
             f"  💰 Max Loss: ₹{plan.max_loss_amount:,.2f} ({plan.risk_per_trade_pct*100:.2f}% of capital)\n"
-            f"  💎 Max Profit: ₹{plan.max_profit_amount:,.2f}\n"
+            f"  💎 Max Profit: ₹{plan.max_profit_amount:,.2f} (Net after friction: ₹{plan.net_profit_amount:,.2f})\n"
+            f"  🏷️  Est. Friction: ₹{plan.estimated_friction:,.2f} | Breakeven: ₹{plan.breakeven_price:,.2f}\n"
             f"  🧠 AI Confidence: {plan.ai_probability*100:.1f}% | Kelly: {plan.kelly_fraction*100:.2f}%\n"
             f"  📉 P(Ruin): {plan.probability_of_ruin*100:.4f}% | Win Rate: {plan.win_rate*100:.1f}%\n"
             f"  ⏱️  Max Hold: {plan.max_hold_bars} bars | Regime: {plan.regime}\n"

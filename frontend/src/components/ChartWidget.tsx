@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import { CandlestickSeries, createChart, createSeriesMarkers } from 'lightweight-charts';
 import type { Time } from 'lightweight-charts';
@@ -22,6 +22,7 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({
   const chartRef = useRef<any>(null);
   const seriesRef = useRef<any>(null);
   const markersRef = useRef<any>(null);
+  const [chartInstance, setChartInstance] = useState<any>(null);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -60,6 +61,7 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({
     chartRef.current = chart;
     seriesRef.current = candleSeries;
     markersRef.current = createSeriesMarkers(candleSeries, []);
+    setChartInstance(chart);
 
     const handleResize = () => {
       if (chartContainerRef.current) {
@@ -73,18 +75,25 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({
 
     return () => {
       resizeObserver.disconnect();
-      markersRef.current?.detach();
-      chart.remove();
+      try {
+        if (typeof markersRef.current?.detach === 'function') {
+          markersRef.current.detach();
+        }
+        chart.remove();
+      } catch (err) {
+        console.warn('Error cleaning up chart instance:', err);
+      }
       chartRef.current = null;
       seriesRef.current = null;
       markersRef.current = null;
+      setChartInstance(null);
     };
   }, [height]);
 
   useEffect(() => {
-    if (!seriesRef.current) return;
+    if (!seriesRef.current || !chartInstance) return;
 
-    if (data.length === 0) {
+    if (!Array.isArray(data) || data.length === 0) {
       seriesRef.current.setData([]);
       markersRef.current?.setMarkers([]);
       return;
@@ -154,7 +163,7 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({
     } else {
       markersRef.current?.setMarkers([]);
     }
-  }, [data, trades]);
+  }, [data, trades, chartInstance]);
 
   // Live Ticking Subscription: updates the last candle in real-time like broker charts
   useEffect(() => {
@@ -171,13 +180,20 @@ const ChartWidget: React.FC<ChartWidgetProps> = ({
         const parsedTime = typeof c.time === 'number' && c.time < 2000000000
           ? c.time
           : new Date(c.time).getTime() / 1000;
-        seriesRef.current.update({
-          time: parsedTime as Time,
-          open: Number(c.open),
-          high: Number(c.high),
-          low: Number(c.low),
-          close: Number(c.close)
-        });
+        if (!Number.isFinite(parsedTime as number)) return;
+        const o = Number(c.open);
+        const h = Number(c.high);
+        const l = Number(c.low);
+        const cl = Number(c.close);
+        if ([o, h, l, cl].every(Number.isFinite)) {
+          seriesRef.current.update({
+            time: parsedTime as Time,
+            open: o,
+            high: h,
+            low: l,
+            close: cl
+          });
+        }
       } catch {
         // Fail silently on tick timeout
       }

@@ -4,7 +4,22 @@ import ChartWidget from '../components/ChartWidget';
 import TradingViewWidget from '../components/TradingViewWidget';
 import TradingViewTASummary from '../components/TradingViewTASummary';
 import { OptionChartViewer } from '../components/OptionChartViewer';
-import { ArrowUpRight, RefreshCw, Search, BarChart3, TrendingUp, ShieldCheck, Zap, Newspaper, ExternalLink } from 'lucide-react';
+import ErrorBoundary from '../components/ErrorBoundary';
+import { MarketSessionBadge } from '../components/MarketSessionBadge';
+import { formatIndianCurrency } from '../utils/formatters';
+import { getExchangeLotSize } from '../utils/foUtils';
+import {
+  ArrowUpRight,
+  RefreshCw,
+  Search,
+  BarChart3,
+  TrendingUp,
+  ShieldCheck,
+  Zap,
+  Newspaper,
+  ExternalLink,
+  AlertCircle,
+} from 'lucide-react';
 
 interface WatchlistItem {
   ticker: string;
@@ -37,6 +52,13 @@ interface NewsSentimentSummary {
   }>;
 }
 
+const DEFAULT_FALLBACK_WATCHLIST: WatchlistItem[] = [
+  { ticker: 'NIFTY', name: 'Nifty 50', tv_symbol: 'NSE:NIFTY', ltp: 24850.0, change: 0, change_pct: 0, recommendation: 'NEUTRAL', buy_votes: 0, sell_votes: 0, neutral_votes: 0 },
+  { ticker: 'BANKNIFTY', name: 'Bank Nifty', tv_symbol: 'NSE:BANKNIFTY', ltp: 52100.0, change: 0, change_pct: 0, recommendation: 'NEUTRAL', buy_votes: 0, sell_votes: 0, neutral_votes: 0 },
+  { ticker: 'SENSEX', name: 'BSE Sensex', tv_symbol: 'BSE:SENSEX', ltp: 81200.0, change: 0, change_pct: 0, recommendation: 'NEUTRAL', buy_votes: 0, sell_votes: 0, neutral_votes: 0 },
+  { ticker: 'FINNIFTY', name: 'Fin Nifty', tv_symbol: 'NSE:FINNIFTY', ltp: 23400.0, change: 0, change_pct: 0, recommendation: 'NEUTRAL', buy_votes: 0, sell_votes: 0, neutral_votes: 0 },
+];
+
 const Dashboard = () => {
   const [tickerInput, setTickerInput] = useState('NIFTY');
   const [activeTicker, setActiveTicker] = useState('NIFTY');
@@ -46,45 +68,65 @@ const Dashboard = () => {
   const [chartData, setChartData] = useState<any[]>([]);
   const [signals, setSignals] = useState<any[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
-  const [marketStatus, setMarketStatus] = useState<any>(null);
   const [newsSentiment, setNewsSentiment] = useState<NewsSentimentSummary | null>(null);
   const [loadingNews, setLoadingNews] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const abortRef = useRef<AbortController | null>(null);
+  const newsAbortRef = useRef<AbortController | null>(null);
 
   // Fetch Watchlist & Market Status
   const fetchMarketOverview = useCallback(async () => {
     try {
       const res = await axios.get('/api/v1/market/watchlist');
-      if (res.data?.watchlist) {
+      if (Array.isArray(res.data?.watchlist) && res.data.watchlist.length > 0) {
         setWatchlist(res.data.watchlist);
       }
-      if (res.data?.market_status) {
-        setMarketStatus(res.data.market_status);
-      }
     } catch {
-      // Fallback silently if watchlist endpoint fails temporarily
+      // Keep existing watchlist or fallback if endpoint fails temporarily
     }
   }, []);
 
   // Fetch Indian Market Financial News & Sentiment
   const fetchNewsSentiment = useCallback(async (ticker: string) => {
+    if (newsAbortRef.current) {
+      newsAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    newsAbortRef.current = controller;
+
     try {
       setLoadingNews(true);
-      const res = await axios.get(`/api/v1/market/news-sentiment/${encodeURIComponent(ticker)}`);
-      setNewsSentiment(res.data);
-    } catch {
-      setNewsSentiment(null);
+      const res = await axios.get(`/api/v1/market/news-sentiment/${encodeURIComponent(ticker)}`, {
+        signal: controller.signal,
+      });
+      if (!controller.signal.aborted) {
+        setNewsSentiment(res.data);
+      }
+    } catch (err: any) {
+      if (!axios.isCancel(err) && !controller.signal.aborted) {
+        setNewsSentiment(null);
+      }
     } finally {
-      setLoadingNews(false);
+      if (!controller.signal.aborted && newsAbortRef.current === controller) {
+        setLoadingNews(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    fetchMarketOverview();
+    let ignore = false;
+    axios.get('/api/v1/market/watchlist').then(res => {
+      if (!ignore && Array.isArray(res.data?.watchlist) && res.data.watchlist.length > 0) {
+        setWatchlist(res.data.watchlist);
+      }
+    }).catch(() => {});
+
     const interval = setInterval(fetchMarketOverview, 15000);
-    return () => clearInterval(interval);
+    return () => {
+      ignore = true;
+      clearInterval(interval);
+    };
   }, [fetchMarketOverview]);
 
   // Fetch Chart & Signal Data for AI Overlay Mode
@@ -131,7 +173,7 @@ const Dashboard = () => {
           setChartData(fb.data?.candles || []);
         } catch (e: any) {
           if (!axios.isCancel(e)) {
-            setError('Failed to load market candles.');
+            setError('Failed to load market candles. Please check if the market data service is running.');
           }
         }
       }
@@ -143,7 +185,7 @@ const Dashboard = () => {
       }
     } catch (err: any) {
       if (!axios.isCancel(err)) {
-        setError(err?.response?.data?.detail || 'Failed to load data.');
+        setError(err?.response?.data?.detail || err.message || 'Failed to load market data.');
       }
     } finally {
       if (!controller.signal.aborted && abortRef.current === controller) {
@@ -153,19 +195,30 @@ const Dashboard = () => {
   }, []);
 
   useEffect(() => {
-    fetchData(activeTicker, timeframe);
-    fetchNewsSentiment(activeTicker);
-    return () => {
-      if (abortRef.current) {
-        abortRef.current.abort();
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) {
+        fetchData(activeTicker, timeframe);
+        fetchNewsSentiment(activeTicker);
       }
+    });
+
+    return () => {
+      cancelled = true;
+      if (abortRef.current) abortRef.current.abort();
+      if (newsAbortRef.current) newsAbortRef.current.abort();
     };
   }, [activeTicker, timeframe, fetchData, fetchNewsSentiment]);
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const clean = tickerInput.trim().toUpperCase();
-    if (clean && clean !== activeTicker) {
+    const clean = tickerInput.trim().toUpperCase().replace(/[^A-Z0-9.\-^=]/g, '');
+    if (!clean) {
+      setError('Please enter a valid Indian F&O symbol (e.g. NIFTY, BANKNIFTY, SENSEX).');
+      return;
+    }
+    setError('');
+    if (clean !== activeTicker) {
       setActiveTicker(clean);
     } else {
       fetchData(activeTicker, timeframe);
@@ -184,37 +237,46 @@ const Dashboard = () => {
     }
   };
 
-  const isOpen = marketStatus?.is_open;
+  const displayWatchlist = watchlist.length > 0 ? watchlist : DEFAULT_FALLBACK_WATCHLIST;
 
   return (
     <div className="dashboard-page">
       <div className="page-heading">
         <div>
           <span className="eyebrow">Real-Time Market Surface / 01</span>
-          <h1>Market Pulse & TradingView Analytics</h1>
+          <h1>Market Pulse &amp; TradingView Analytics</h1>
           <p>Real-time live streaming charts, AI technical setups, and orderflow recommendations.</p>
         </div>
-        <div className="flex items-center gap-3">
-          <span className={`px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5 ${
-            isOpen ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-gray-800 text-gray-300 border border-gray-700'
-          }`}>
-            <span className={`w-2 h-2 rounded-full ${isOpen ? 'bg-emerald-400 animate-pulse' : 'bg-gray-400'}`} />
-            {isOpen ? 'INDIAN F&O LIVE (09:15 - 15:30 IST)' : 'F&O MARKET CLOSED'}
-          </span>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+          <MarketSessionBadge />
           <div className="heading-note"><span className="live-dot" /> F&O Index Stream Active</div>
         </div>
       </div>
 
       {/* Live Market Watchlist Ticker Bar */}
-      {watchlist.length > 0 && (
+      <ErrorBoundary compact title="Watchlist Bar Error">
         <section className="mb-4 overflow-x-auto pb-2" aria-label="Watchlist bar">
+          <div className="flex items-center gap-2 mb-1.5 text-[11px] text-gray-400 font-semibold px-1">
+            <span>{watchlist.length > 0 ? 'LIVE TICKING F&O WATCHLIST' : 'DEFAULT F&O UNIVERSE'}</span>
+            {watchlist.length === 0 && (
+              <button
+                type="button"
+                onClick={fetchMarketOverview}
+                className="text-blue-400 hover:underline flex items-center gap-1 ml-2"
+              >
+                <RefreshCw className="w-3 h-3" /> Sync Watchlist
+              </button>
+            )}
+          </div>
           <div className="flex gap-3 min-w-max">
-            {watchlist.map((item) => {
+            {displayWatchlist.map((item) => {
               const isPositive = (item.change_pct || 0) >= 0;
               const isSelected = activeTicker === item.ticker;
+              const lotSize = getExchangeLotSize(item.ticker);
               return (
                 <button
                   key={item.ticker}
+                  type="button"
                   onClick={() => handleSelectTicker(item.ticker)}
                   className={`flex flex-col text-left px-3.5 py-2 rounded-lg border transition-all ${
                     isSelected
@@ -223,28 +285,38 @@ const Dashboard = () => {
                   }`}
                 >
                   <div className="flex items-center justify-between gap-4">
-                    <span className="font-bold text-xs text-gray-200">{item.ticker}</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-bold text-xs text-gray-200">{item.ticker}</span>
+                      <span className="text-[9px] px-1 py-0.2 rounded bg-gray-800 text-gray-400 font-mono">
+                        {lotSize}L
+                      </span>
+                    </div>
                     <span className={`text-xs font-semibold ${isPositive ? 'text-emerald-400' : 'text-red-400'}`}>
                       {isPositive ? '+' : ''}{item.change_pct?.toFixed(2)}%
                     </span>
                   </div>
                   <div className="flex items-center justify-between gap-2 mt-1">
                     <span className="font-mono text-sm font-bold text-white">
-                      ₹{item.ltp?.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      {formatIndianCurrency(item.ltp)}
                     </span>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold uppercase ${
-                      item.recommendation.includes('BUY') ? 'bg-emerald-900/80 text-emerald-300' :
-                      item.recommendation.includes('SELL') ? 'bg-red-900/80 text-red-300' : 'bg-gray-800 text-gray-400'
-                    }`}>
-                      {item.recommendation}
-                    </span>
+                    {(() => {
+                      const rec = String(item.recommendation || '').toUpperCase();
+                      return (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                          rec.includes('BUY') ? 'bg-emerald-900/80 text-emerald-300' :
+                          rec.includes('SELL') ? 'bg-red-900/80 text-red-300' : 'bg-gray-800 text-gray-400'
+                        }`}>
+                          {item.recommendation || 'NEUTRAL'}
+                        </span>
+                      );
+                    })()}
                   </div>
                 </button>
               );
             })}
           </div>
         </section>
-      )}
+      </ErrorBoundary>
 
       <div className="dashboard-grid">
         <div className="chart-column">
@@ -257,7 +329,6 @@ const Dashboard = () => {
                 type="text"
                 value={tickerInput}
                 onChange={e => setTickerInput(e.target.value.toUpperCase())}
-                onKeyDown={e => e.key === 'Enter' && handleSubmit()}
                 placeholder="Enter F&O ticker (e.g. NIFTY, BANKNIFTY, SENSEX)..."
                 aria-label="Ticker symbol"
                 className="ticker-input"
@@ -292,7 +363,7 @@ const Dashboard = () => {
                 }`}
               >
                 <BarChart3 className="w-3.5 h-3.5" />
-                AI Signals & Overlays
+                AI Signals &amp; Overlays
               </button>
               <button
                 type="button"
@@ -304,7 +375,7 @@ const Dashboard = () => {
                 }`}
               >
                 <Zap className="w-3.5 h-3.5" />
-                Option Candlestick (F&O)
+                Option Candlestick (F&amp;O)
               </button>
             </div>
 
@@ -323,6 +394,7 @@ const Dashboard = () => {
             </div>
 
             <button
+              type="button"
               className="icon-button"
               onClick={() => handleSubmit()}
               aria-label="Refresh market data"
@@ -351,32 +423,61 @@ const Dashboard = () => {
               </div>
             )}
             {error && chartMode === 'ai_overlay' && (
-              <div className="chart-state error" role="alert">
-                <div>{error}</div>
+              <div className="chart-state error p-4 flex flex-col items-center justify-center gap-2" role="alert">
+                <div className="flex items-center gap-2 text-red-300 text-sm">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                  <span>{error}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => fetchData(activeTicker, timeframe)}
+                  className="px-3 py-1 bg-red-900/80 hover:bg-red-800 text-xs text-white rounded border border-red-700 transition"
+                >
+                  Retry Loading Candles
+                </button>
               </div>
             )}
 
-            {/* Tri-Mode Chart Render: TradingView Pro, Option Candlestick, or AI Overlays */}
+            {/* Tri-Mode Chart Render: TradingView Pro, Option Candlestick, or AI Overlays with localized ErrorBoundaries */}
             {chartMode === 'tv_pro' ? (
-              <TradingViewWidget
-                symbol={activeTicker}
-                interval={timeframe === '1d' ? 'D' : timeframe === '1wk' ? 'W' : timeframe}
-                height={600}
-                theme="dark"
-              />
+              <ErrorBoundary compact title="TradingView Chart Rendering Error">
+                <TradingViewWidget
+                  symbol={activeTicker}
+                  interval={timeframe === '1d' ? 'D' : timeframe === '1wk' ? 'W' : timeframe}
+                  height={600}
+                  theme="dark"
+                />
+              </ErrorBoundary>
             ) : chartMode === 'option_chart' ? (
-              <OptionChartViewer
-                initialUnderlying={
-                  activeTicker.includes('SENSEX') || activeTicker.includes('BSESN') ? 'SENSEX' :
-                  activeTicker.includes('BANK') ? 'BANKNIFTY' :
-                  activeTicker.includes('FIN') ? 'FINNIFTY' :
-                  activeTicker.includes('MID') ? 'MIDCPNIFTY' :
-                  'NIFTY'
-                }
-                height={600}
-              />
+              <ErrorBoundary compact title="Option Candlestick Viewer Error">
+                <OptionChartViewer
+                  initialUnderlying={
+                    activeTicker.includes('SENSEX') || activeTicker.includes('BSESN') ? 'SENSEX' :
+                    activeTicker.includes('BANK') ? 'BANKNIFTY' :
+                    activeTicker.includes('FIN') ? 'FINNIFTY' :
+                    activeTicker.includes('MID') ? 'MIDCPNIFTY' :
+                    'NIFTY'
+                  }
+                  height={600}
+                />
+              </ErrorBoundary>
             ) : (
-              chartData.length > 0 && <ChartWidget data={chartData} height={600} ticker={activeTicker} timeframe={timeframe} />
+              <ErrorBoundary compact title="AI Overlay Chart Error">
+                {chartData.length > 0 ? (
+                  <ChartWidget data={chartData} height={600} ticker={activeTicker} timeframe={timeframe} />
+                ) : !loading && !error ? (
+                  <div className="chart-state p-8 text-center text-gray-400" role="status">
+                    <p className="mb-2">No candle data available for {activeTicker} on {timeframe.toUpperCase()}.</p>
+                    <button
+                      type="button"
+                      onClick={() => fetchData(activeTicker, timeframe)}
+                      className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-xs text-white rounded transition"
+                    >
+                      Fetch Market Data
+                    </button>
+                  </div>
+                ) : null}
+              </ErrorBoundary>
             )}
 
           </div>
@@ -391,10 +492,12 @@ const Dashboard = () => {
                 <ShieldCheck className="w-3.5 h-3.5" /> TradingView Consensus
               </span>
             </div>
-            <TradingViewTASummary symbol={activeTicker} interval={timeframe} height={320} />
+            <ErrorBoundary compact title="Technical Gauge Error">
+              <TradingViewTASummary symbol={activeTicker} interval={timeframe} height={320} />
+            </ErrorBoundary>
           </div>
 
-          {/* Real-Time Indian Market News & Sentiment (Public APIs integration) */}
+          {/* Real-Time Indian Market News & Sentiment */}
           <div className="bg-gray-900/70 border border-gray-800 rounded-lg p-3">
             <div className="flex items-center justify-between mb-2">
               <span className="eyebrow">Market News Pulse</span>
@@ -403,68 +506,77 @@ const Dashboard = () => {
               </span>
             </div>
 
-            {loadingNews ? (
-              <div className="text-xs text-gray-500 py-3 text-center flex items-center justify-center gap-2">
-                <RefreshCw className="w-3 h-3 animate-spin" /> Analyzing live Indian news...
-              </div>
-            ) : newsSentiment ? (
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between bg-gray-950/60 p-2 rounded border border-gray-800/80">
-                  <div className="flex items-center gap-2">
-                    <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
-                      newsSentiment.overall_sentiment === 'BULLISH' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                      newsSentiment.overall_sentiment === 'BEARISH' ? 'bg-red-950 text-red-400 border border-red-800' :
-                      'bg-gray-800 text-gray-300 border border-gray-700'
-                    }`}>
-                      {newsSentiment.overall_sentiment}
-                    </span>
-                    <span className="text-[11px] text-gray-400 font-mono">
-                      Score: {newsSentiment.mean_score > 0 ? '+' : ''}{newsSentiment.mean_score.toFixed(2)}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-[10px]">
-                    <span className="text-emerald-400 font-semibold">+{newsSentiment.bullish_count} Bull</span>
-                    <span className="text-gray-500">•</span>
-                    <span className="text-red-400 font-semibold">-{newsSentiment.bearish_count} Bear</span>
-                  </div>
+            <ErrorBoundary compact title="News Sentiment Engine Error">
+              {loadingNews ? (
+                <div className="text-xs text-gray-500 py-3 text-center flex items-center justify-center gap-2">
+                  <RefreshCw className="w-3 h-3 animate-spin" /> Analyzing live Indian news...
                 </div>
+              ) : newsSentiment ? (
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between bg-gray-950/60 p-2 rounded border border-gray-800/80">
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
+                        newsSentiment.overall_sentiment === 'BULLISH' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                        newsSentiment.overall_sentiment === 'BEARISH' ? 'bg-red-950 text-red-400 border border-red-800' :
+                        'bg-gray-800 text-gray-300 border border-gray-700'
+                      }`}>
+                        {newsSentiment.overall_sentiment}
+                      </span>
+                      <span className="text-[11px] text-gray-400 font-mono">
+                        Score: {Number(newsSentiment.mean_score || 0) > 0 ? '+' : ''}{Number(newsSentiment.mean_score || 0).toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-[10px]">
+                      <span className="text-emerald-400 font-semibold">+{newsSentiment.bullish_count} Bull</span>
+                      <span className="text-gray-500">•</span>
+                      <span className="text-red-400 font-semibold">-{newsSentiment.bearish_count} Bear</span>
+                    </div>
+                  </div>
 
-                <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
-                  {newsSentiment.headlines && newsSentiment.headlines.slice(0, 4).map((h, i) => (
-                    <a
-                      key={i}
-                      href={h.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block p-2 rounded bg-gray-950/40 hover:bg-gray-800/60 border border-gray-800/50 hover:border-gray-700 transition group text-left"
-                    >
-                      <div className="flex items-start justify-between gap-1.5">
-                        <p className="text-xs text-gray-300 group-hover:text-white line-clamp-2 leading-snug">
-                          {h.title}
-                        </p>
-                        <ExternalLink className="w-3 h-3 text-gray-500 group-hover:text-blue-400 shrink-0 mt-0.5" />
-                      </div>
-                      <div className="flex items-center justify-between mt-1 text-[10px] text-gray-500">
-                        <span>{h.source}</span>
-                        <span className={
-                          h.sentiment_label === 'BULLISH' ? 'text-emerald-400 font-semibold' :
-                          h.sentiment_label === 'BEARISH' ? 'text-red-400 font-semibold' : 'text-gray-500'
-                        }>
-                          {h.sentiment_label}
-                        </span>
-                      </div>
-                    </a>
-                  ))}
-                  {(!newsSentiment.headlines || newsSentiment.headlines.length === 0) && (
-                    <p className="text-xs text-gray-500 py-1 text-center">No recent news for {activeTicker}.</p>
-                  )}
+                  <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                    {newsSentiment.headlines && newsSentiment.headlines.slice(0, 4).map((h, i) => (
+                      <a
+                        key={i}
+                        href={h.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block p-2 rounded bg-gray-950/40 hover:bg-gray-800/60 border border-gray-800/50 hover:border-gray-700 transition group text-left"
+                      >
+                        <div className="flex items-start justify-between gap-1.5">
+                          <p className="text-xs text-gray-300 group-hover:text-white line-clamp-2 leading-snug">
+                            {h.title}
+                          </p>
+                          <ExternalLink className="w-3 h-3 text-gray-500 group-hover:text-blue-400 shrink-0 mt-0.5" />
+                        </div>
+                        <div className="flex items-center justify-between mt-1 text-[10px] text-gray-500">
+                          <span>{h.source}</span>
+                          <span className={
+                            h.sentiment_label === 'BULLISH' ? 'text-emerald-400 font-semibold' :
+                            h.sentiment_label === 'BEARISH' ? 'text-red-400 font-semibold' : 'text-gray-500'
+                          }>
+                            {h.sentiment_label}
+                          </span>
+                        </div>
+                      </a>
+                    ))}
+                    {(!newsSentiment.headlines || newsSentiment.headlines.length === 0) && (
+                      <p className="text-xs text-gray-500 py-1 text-center">No recent news for {activeTicker}.</p>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ) : (
-              <div className="text-xs text-gray-500 py-2 text-center">
-                News feed currently unavailable.
-              </div>
-            )}
+              ) : (
+                <div className="text-xs text-gray-500 py-3 text-center space-y-1.5">
+                  <p>News feed currently unavailable for {activeTicker}.</p>
+                  <button
+                    type="button"
+                    onClick={() => fetchNewsSentiment(activeTicker)}
+                    className="text-[11px] text-blue-400 hover:underline inline-flex items-center gap-1"
+                  >
+                    <RefreshCw className="w-3 h-3" /> Retry news feed
+                  </button>
+                </div>
+              )}
+            </ErrorBoundary>
           </div>
 
           {/* AI Setup Signals */}
@@ -476,25 +588,36 @@ const Dashboard = () => {
               </div>
               <span className="signal-count">{signals.length.toString().padStart(2, '0')}</span>
             </div>
-            <div className="signals-list">
-              {signals.map((setup, idx) => (
-                <div key={idx} className="signal-card">
-                  <div className="signal-card-top">
-                    <span className="signal-name">{(setup.name || '').replace(/_/g, ' ').toUpperCase()}</span>
-                    <span className={`signal-pill ${
-                      setup.signal === 'bullish' ? 'bg-emerald-900 text-emerald-400' :
-                      setup.signal === 'bearish' ? 'bg-red-900 text-red-400' : 'bg-gray-700 text-gray-400'
-                    }`}>
-                      {setup.signal === 'bullish' ? 'BULLISH' : setup.signal === 'bearish' ? 'BEARISH' : 'NEUTRAL'}
-                    </span>
+            <ErrorBoundary compact title="Signals Panel Error">
+              <div className="signals-list">
+                {signals.map((setup, idx) => (
+                  <div key={idx} className="signal-card">
+                    <div className="signal-card-top">
+                      <span className="signal-name">{(setup.name || '').replace(/_/g, ' ').toUpperCase()}</span>
+                      <span className={`signal-pill ${
+                        setup.signal === 'bullish' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' :
+                        setup.signal === 'bearish' ? 'bg-rose-950 text-rose-300 border border-rose-800' : 'bg-gray-800 text-gray-200 border border-gray-700'
+                      }`}>
+                        {setup.signal === 'bullish' ? 'BULLISH' : setup.signal === 'bearish' ? 'BEARISH' : 'NEUTRAL'}
+                      </span>
+                    </div>
+                    {setup.reasoning && <p className="signal-reasoning">{setup.reasoning}</p>}
                   </div>
-                  {setup.reasoning && <p className="signal-reasoning">{setup.reasoning}</p>}
-                </div>
-              ))}
-              {signals.length === 0 && !loading && (
-                <div className="empty-signal">No active setups on this timeframe.</div>
-              )}
-            </div>
+                ))}
+                {signals.length === 0 && !loading && (
+                  <div className="empty-signal">
+                    No active setups on this timeframe.
+                    <button
+                      type="button"
+                      onClick={() => fetchData(activeTicker, timeframe)}
+                      className="block text-xs text-blue-400 hover:underline mt-1.5"
+                    >
+                      Re-scan setups
+                    </button>
+                  </div>
+                )}
+              </div>
+            </ErrorBoundary>
           </div>
         </aside>
       </div>

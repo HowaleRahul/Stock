@@ -30,18 +30,52 @@ router = APIRouter(
 _toolkit_mgr = SwingToolkitManager()
 
 
+import re
+from pydantic import BaseModel, Field, field_validator
+
+
+def _validate_swing_ticker(ticker: str) -> str:
+    if not ticker or not isinstance(ticker, str):
+        raise ValueError("Ticker symbol cannot be empty.")
+    if "\x00" in ticker:
+        raise ValueError("Null byte injection detected in ticker.")
+    clean = ticker.strip().upper()
+    if not clean or len(clean) > 32 or ".." in clean or "/" in clean or "\\" in clean:
+        raise ValueError("Invalid ticker symbol: forbidden characters or length.")
+    if not re.match(r"^[A-Z0-9\._\-\^\=]+$", clean):
+        raise ValueError("Invalid characters in ticker symbol.")
+    return clean
+
+
+def _sanitize_swing_ticker(ticker: str) -> str:
+    try:
+        return _validate_swing_ticker(ticker)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+
 class AddWatchlistRequest(BaseModel):
     ticker: str = Field(..., min_length=1, max_length=32)
-    sector: Optional[str] = None
-    source_scanners: List[str] = Field(default_factory=list)
-    composite_score: float = Field(0.0, ge=0.0, le=100.0)
+    sector: Optional[str] = Field(default=None, max_length=64)
+    source_scanners: List[str] = Field(default_factory=list, max_length=20)
+    composite_score: float = Field(0.0, ge=0.0, le=100.0, allow_inf_nan=False)
     vcp_detected: bool = False
     stage_2: bool = False
-    notes: Optional[str] = ""
+    notes: Optional[str] = Field(default="", max_length=1024)
+
+    @field_validator("ticker")
+    @classmethod
+    def validate_ticker(cls, v: str) -> str:
+        return _validate_swing_ticker(v)
 
 
 class ChecklistEvaluateRequest(BaseModel):
     ticker: str = Field(..., min_length=1, max_length=32)
+
+    @field_validator("ticker")
+    @classmethod
+    def validate_ticker(cls, v: str) -> str:
+        return _validate_swing_ticker(v)
 
 
 @router.get("/universe", summary="Get curated liquid Indian swing trading universe")
@@ -61,7 +95,7 @@ async def get_universe(
 @router.get("/scanners/run", summary="Run the 3 Momentum Masters scanners & filter checklist")
 async def run_scanners(
     universe_size: int = Query(25, ge=5, le=50, description="Number of symbols from universe to scan"),
-    custom_tickers: Optional[str] = Query(None, description="Comma-separated custom tickers (e.g. HAL,TRENT,BEL)"),
+    custom_tickers: Optional[str] = Query(None, max_length=512, description="Comma-separated custom tickers (e.g. HAL,TRENT,BEL)"),
     _rate_limit: bool = Depends(rate_limiter(15)),
 ):
     """
@@ -71,7 +105,8 @@ async def run_scanners(
     3. Ranks candidates by score and watchlist qualification.
     """
     if custom_tickers:
-        tickers = [t.strip().upper() for t in custom_tickers.split(",") if t.strip()]
+        raw_list = [t.strip().upper() for t in custom_tickers.split(",") if t.strip()]
+        tickers = [_sanitize_swing_ticker(t) for t in raw_list[:50]]
     else:
         tickers = DEFAULT_SWING_UNIVERSE[:universe_size]
 
@@ -98,7 +133,7 @@ async def add_to_watchlist(
 ):
     """Adds a validated candidate to the active watchlist."""
     import datetime
-    ticker = payload.ticker.strip().upper()
+    ticker = payload.ticker  # Already sanitized via field_validator
     sector = payload.sector or STOCK_SECTORS.get(ticker, "General")
 
     candidate_record = {
@@ -126,7 +161,7 @@ async def remove_from_watchlist(
     _rate_limit: bool = Depends(rate_limiter(60)),
 ):
     """Removes a symbol from the active swing watchlist."""
-    clean_ticker = ticker.strip().upper()
+    clean_ticker = _sanitize_swing_ticker(ticker)
     updated = _toolkit_mgr.remove_from_watchlist(clean_ticker)
     return {
         "success": True,
@@ -138,8 +173,8 @@ async def remove_from_watchlist(
 @router.get("/orb-check/{ticker}", summary="Check 15m ORB breakout trigger and 5m/15m volume gates")
 async def check_orb_breakout(
     ticker: str,
-    capital: float = Query(1000000.0, ge=10000.0, description="Account capital in INR"),
-    risk_pct: float = Query(0.015, ge=0.001, le=0.05, description="Risk per trade percentage (e.g. 0.015 for 1.5%)"),
+    capital: float = Query(1000000.0, ge=10000.0, le=1_000_000_000.0, allow_inf_nan=False, description="Account capital in INR"),
+    risk_pct: float = Query(0.015, ge=0.001, le=0.05, allow_inf_nan=False, description="Risk per trade percentage (e.g. 0.015 for 1.5%)"),
     _rate_limit: bool = Depends(rate_limiter(60)),
 ):
     """
@@ -149,7 +184,7 @@ async def check_orb_breakout(
     - 15m ORB Breakout: Price crossing above high of first 15 mins.
     - Stop loss, target 2R/3R, and position sizing.
     """
-    clean_ticker = ticker.strip().upper()
+    clean_ticker = _sanitize_swing_ticker(ticker)
     orb_plan = await _toolkit_mgr.evaluate_orb_breakout(
         clean_ticker, capital=capital, risk_per_trade_pct=risk_pct
     )

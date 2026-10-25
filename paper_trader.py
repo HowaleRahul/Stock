@@ -32,11 +32,11 @@ from ml.features import (
 )
 from setups.engine import SetupEngine
 from ml.ensemble import EnsembleModel
-from ml.risk_engine import RiskEngine
+from ml.risk_engine import RiskEngine, IndianFOFrictionModel, is_intraday_square_off_time
 from ml.trade_logger import TradeLogger
 from ml.reinforcement_learner import ReinforcementLearner
 from ml.drift_detector import DriftDetector
-from ml.options_engine import DerivativeEngine
+from ml.options_engine import DerivativeEngine, get_days_to_expiry
 from ml.circuit_breaker import DrawdownCircuitBreaker
 from ml.agent_reflection import AgentReflector
 from ml.multi_agent_consensus import MultiAgentConsensusEngine
@@ -270,53 +270,130 @@ async def run_loop():
             time_exit = RiskEngine.check_time_exit(trade, bars_held)
 
             # --- Check Exit Conditions ---
-            exit_reason = None
+            # 1. Intraday MIS Square-Off Rule (15:15 IST)
+            candle_time = None
+            if hasattr(df, "index") and len(df) > 0 and isinstance(df.index, pd.DatetimeIndex):
+                try:
+                    candle_time = df.index[-1].to_pydatetime() if hasattr(df.index[-1], "to_pydatetime") else df.index[-1]
+                except Exception:
+                    candle_time = None
 
-            if time_exit:
+            exit_reason = None
+            if (candle_time is not None and is_intraday_square_off_time(candle_time)) or (is_market_open() and is_intraday_square_off_time()):
+                exit_reason = "INTRADAY_SQUARE_OFF"
+                trade['exit_price'] = current_price
+            elif time_exit:
                 exit_reason = "TIME_EXIT"
                 trade['exit_price'] = current_price
             elif trade['direction'] == 'LONG':
                 if low <= active_sl:
                     exit_reason = "TRAILING_SL" if active_sl != trade['sl'] else "CLOSED_LOSS"
-                    trade['exit_price'] = active_sl
+                    bar_open = float(df['open'].iloc[-1])
+                    trade['exit_price'] = min(active_sl, bar_open)
                 elif high >= trade['tp']:
                     exit_reason = "CLOSED_WIN"
-                    trade['exit_price'] = trade['tp']
+                    bar_open = float(df['open'].iloc[-1])
+                    trade['exit_price'] = max(trade['tp'], bar_open) if bar_open > trade['tp'] else trade['tp']
             elif trade['direction'] == 'SHORT':
                 if high >= active_sl:
                     exit_reason = "TRAILING_SL" if active_sl != trade['sl'] else "CLOSED_LOSS"
-                    trade['exit_price'] = active_sl
+                    bar_open = float(df['open'].iloc[-1])
+                    trade['exit_price'] = max(active_sl, bar_open)
                 elif low <= trade['tp']:
                     exit_reason = "CLOSED_WIN"
-                    trade['exit_price'] = trade['tp']
+                    bar_open = float(df['open'].iloc[-1])
+                    trade['exit_price'] = min(trade['tp'], bar_open) if bar_open < trade['tp'] else trade['tp']
 
             if exit_reason:
                 trade['status'] = exit_reason
 
-                # Calculate PnL
+                # Calculate PnL with Real-World Indian F&O Friction Model
                 if trade.get("is_options", False):
                     # Options PnL: calculate exit premium via BS using exit spot price
                     exit_spot = trade['exit_price']
-                    iv = (df['macro_vix'].iloc[-1] / 100.0) if 'macro_vix' in df.columns else 0.15
-                    # Approximate remaining time (Indian NSE session is 6.25 hours: 9:15 - 15:30)
+                    iv = (df['macro_vix'].iloc[-1] / 100.0) if 'macro_vix' in df.columns else opt_engine.fetch_live_iv(ticker=ticker)
+                    # Approximate remaining time using exact dynamic DTE
                     days_held = bars_held if TIMEFRAME == "1d" else bars_held / 6.25
-                    days_to_expiry = max(0.5, 7.0 - days_held)
+                    initial_dte = float(trade.get("days_to_expiry") or opt_engine.get_days_to_expiry(ticker))
+                    days_to_expiry = max(0.001, initial_dte - days_held)
                     T = days_to_expiry / 365.0
-                    
-                    bs_exit = opt_engine._black_scholes(
-                        S=exit_spot,
-                        K=trade["opt_strike"],
-                        T=T,
-                        r=0.06,
-                        sigma=iv,
-                        option_type=trade["opt_type"]
-                    )
-                    exit_premium = bs_exit["premium"]
-                    trade["opt_exit_premium"] = exit_premium
-                    
-                    gross_pnl_pct = (exit_premium - trade["opt_entry_premium"]) / trade["opt_entry_premium"] if trade.get("opt_entry_premium", 0) > 0 else 0.0
-                    cash_pnl = trade['invested'] * (gross_pnl_pct - STT_SLIPPAGE_PCT)
-                    net_pnl_pct = gross_pnl_pct - STT_SLIPPAGE_PCT
+                    act = str(trade.get("action", "BUY")).upper()
+                    strat = str(trade.get("strategy_type", "DIRECTIONAL")).upper()
+                    qty = trade.get("total_quantity") or trade.get("quantity") or opt_engine.get_lot_size(ticker)
+
+                    if strat == "CREDIT_SPREAD" or trade.get("instrument_type") == "SPREAD":
+                        short_k = trade.get("opt_strike", 0.0)
+                        long_k = trade.get("hedge_strike_price", 0.0)
+                        opt_t = trade.get("opt_type", "PE")
+                        bs_short = opt_engine._black_scholes(exit_spot, short_k, T, opt_engine.RISK_FREE_RATE, iv, opt_t if opt_t in ("CE", "PE") else "PE")
+                        bs_long = opt_engine._black_scholes(exit_spot, long_k, T, opt_engine.RISK_FREE_RATE, iv, opt_t if opt_t in ("CE", "PE") else "PE")
+                        p_short_exit = bs_short["premium"]
+                        p_long_exit = bs_long["premium"]
+                        p_short_entry = trade.get("opt_entry_premium", 0.0)
+                        p_long_entry = trade.get("hedge_entry_price", 0.0)
+
+                        f_calc = IndianFOFrictionModel.calculate_spread_friction(
+                            short_entry_prem=p_short_entry,
+                            short_exit_prem=p_short_exit,
+                            long_entry_prem=p_long_entry,
+                            long_exit_prem=p_long_exit,
+                            quantity=qty
+                        )
+                        cash_pnl = f_calc.net_pnl
+                        trade["opt_exit_premium"] = max(0.05, round(p_short_exit - p_long_exit, 2))
+                    else:
+                        bs_exit = opt_engine._black_scholes(
+                            S=exit_spot,
+                            K=trade["opt_strike"],
+                            T=T,
+                            r=opt_engine.RISK_FREE_RATE,
+                            sigma=iv,
+                            option_type=trade["opt_type"]
+                        )
+                        exit_premium = bs_exit["premium"]
+                        trade["opt_exit_premium"] = exit_premium
+                        entry_prem = trade.get("opt_entry_premium", trade.get("entry_price", exit_premium))
+
+                        if act == "SELL":
+                            f_calc = IndianFOFrictionModel.calculate_options_friction(
+                                buy_premium=exit_premium,
+                                sell_premium=entry_prem,
+                                quantity=qty,
+                                action="SELL"
+                            )
+                        else:
+                            f_calc = IndianFOFrictionModel.calculate_options_friction(
+                                buy_premium=entry_prem,
+                                sell_premium=exit_premium,
+                                quantity=qty,
+                                action="BUY"
+                            )
+                        cash_pnl = f_calc.net_pnl
+
+                    invested = trade.get('invested', 1.0)
+                    net_pnl_pct = (cash_pnl / invested) if invested > 0 else 0.0
+                    gross_pnl_pct = (f_calc.gross_pnl / invested) if invested > 0 else 0.0
+
+                elif trade.get("instrument_type") == "FUTURE":
+                    # Futures PnL: points difference * total_quantity minus regulatory friction
+                    entry_p = trade.get('entry_price', 0)
+                    exit_p = trade.get('exit_price', 0)
+                    qty = trade.get('total_quantity') or trade.get('quantity', 1)
+                    if entry_p > 0:
+                        f_calc = IndianFOFrictionModel.calculate_futures_friction(
+                            entry_price=entry_p,
+                            exit_price=exit_p,
+                            quantity=qty,
+                            direction=trade['direction']
+                        )
+                        cash_pnl = f_calc.net_pnl
+                        invested = trade.get('invested', 1.0)
+                        net_pnl_pct = (cash_pnl / invested) if invested > 0 else 0.0
+                        gross_pnl_pct = (f_calc.gross_pnl / invested) if invested > 0 else 0.0
+                    else:
+                        cash_pnl = 0.0
+                        net_pnl_pct = 0.0
+                        gross_pnl_pct = 0.0
                 else:
                     # Standard Equity PnL
                     entry_p = trade.get('entry_price', 0)
@@ -335,7 +412,11 @@ async def run_loop():
                 trade['cash_pnl'] = cash_pnl
                 trade['closed_at'] = str(df.index[-1])
 
-                account['capital'] += cash_pnl
+                if trade.get("invested_deducted"):
+                    account['capital'] += (trade.get('invested', 0.0) + cash_pnl)
+                else:
+                    account['capital'] += cash_pnl
+
                 if account['capital'] > account['peak_capital']:
                     account['peak_capital'] = account['capital']
 
@@ -397,22 +478,26 @@ async def run_loop():
             else:
                 # Calculate mark-to-market unrealized PnL for active trade
                 if trade.get("is_options", False):
-                    iv = (df['macro_vix'].iloc[-1] / 100.0) if 'macro_vix' in df.columns else 0.15
+                    iv = (df['macro_vix'].iloc[-1] / 100.0) if 'macro_vix' in df.columns else opt_engine.fetch_live_iv(ticker=ticker)
                     days_held = bars_held if TIMEFRAME == "1d" else bars_held / 6.25
-                    days_to_expiry = max(0.5, 7.0 - days_held)
-                    T = days_to_expiry / 365.0
-                    bs_curr = opt_engine._black_scholes(
-                        S=current_price,
-                        K=trade.get("opt_strike", current_price),
-                        T=T,
-                        r=0.06,
-                        sigma=iv,
-                        option_type=trade.get("opt_type", "CE")
+                    curr_prem, curr_delta = opt_engine.calculate_option_mtm(
+                        trade=trade,
+                        current_spot=current_price,
+                        days_elapsed=days_held,
+                        iv=iv
                     )
-                    curr_prem = bs_curr["premium"]
                     entry_prem = trade.get("opt_entry_premium", 0.0)
-                    gross = (curr_prem - entry_prem) / entry_prem if entry_prem > 0 else 0.0
-                    trade["unrealized_pnl"] = trade['invested'] * (gross - STT_SLIPPAGE_PCT)
+                    act = str(trade.get("action", "BUY")).upper()
+                    strat = str(trade.get("strategy_type", "DIRECTIONAL")).upper()
+                    qty = trade.get("total_quantity") or trade.get("quantity") or opt_engine.get_lot_size(ticker)
+
+                    if strat == "CREDIT_SPREAD" or trade.get("instrument_type") == "SPREAD":
+                        gross_cash = (entry_prem - curr_prem) * qty
+                    elif act == "SELL":
+                        gross_cash = (entry_prem - curr_prem) * qty
+                    else:
+                        gross_cash = (curr_prem - entry_prem) * qty
+                    trade["unrealized_pnl"] = gross_cash - (trade['invested'] * STT_SLIPPAGE_PCT)
                 else:
                     entry_p = trade.get('entry_price', 0)
                     if entry_p > 0:
@@ -507,16 +592,25 @@ async def run_loop():
                 continue
 
             # Multi-Agent Adversarial Debate & Consensus confirmation (TradingAgents)
+            # Wire live NSE PCR, Max-Pain, GEX regime, and FII/DII net flows
+            current_close = float(df['close'].iloc[-1])
+            live_opts, live_sent = MultiAgentConsensusEngine.fetch_live_context(ticker, spot=current_close)
             consensus = MultiAgentConsensusEngine.evaluate(
                 ticker=ticker,
                 regime_data=regime,
                 setup_signals=setups,
-                options_data={"pcr_oi": 1.0, "gex_regime": "NEUTRAL"}
+                options_data=live_opts,
+                sentiment_data=live_sent,
             )
-            if consensus.recommended_action == "REJECT_TRADE":
+            is_rejected = (
+                consensus.recommended_action.startswith("STAND ASIDE")
+                or consensus.consensus_signal == "neutral"
+                or "REJECT" in consensus.chief_risk_ruling.upper()
+            )
+            if is_rejected:
                 logger.info(
                     f"🚫 [MULTI-AGENT REJECT] {ticker}: Chief Risk ruling: {consensus.chief_risk_ruling}. "
-                    f"Consensus: {consensus.consensus_signal} ({consensus.consensus_confidence:.2f})"
+                    f"Action: {consensus.recommended_action}. Consensus: {consensus.consensus_signal} ({consensus.consensus_confidence:.2f})"
                 )
                 continue
 
@@ -617,16 +711,26 @@ async def run_loop():
                 "setup_weights": setup_weights,
                 # F&O specific fields
                 "is_fo": True,
-                "is_options": fo_plan.instrument_type == "OPTION",
+                "is_options": fo_plan.instrument_type in ("OPTION", "SPREAD"),
+                "instrument_type": fo_plan.instrument_type,
+                "action": fo_plan.action,
+                "strategy_type": fo_plan.strategy_type,
                 "opt_type": fo_plan.option_type,
                 "opt_strike": fo_plan.strike_price,
-                "opt_entry_premium": fo_plan.entry_price if fo_plan.instrument_type == "OPTION" else 0.0,
+                "hedge_strike_price": fo_plan.hedge_strike_price,
+                "hedge_entry_price": fo_plan.hedge_entry_price,
+                "net_credit": fo_plan.net_credit,
+                "opt_entry_premium": fo_plan.entry_price if fo_plan.instrument_type in ("OPTION", "SPREAD") else 0.0,
                 "opt_delta": fo_plan.delta,
                 "opt_theta": fo_plan.theta,
                 "strike_type": fo_plan.strike_type,
                 "lot_size": fo_plan.lot_size,
                 "lots_to_trade": fo_plan.lots_to_trade,
+                "invested_deducted": True,
             }
+            
+            # Realistically deduct margin / premium from free portfolio cash
+            account['capital'] = max(0.0, account['capital'] - new_trade["invested"])
             
             entry_record = TradeLogger.log_entry(
                 trade_id=new_trade["id"],

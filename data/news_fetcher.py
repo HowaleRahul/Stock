@@ -1,14 +1,71 @@
 import asyncio
 import datetime
 import email.utils
+import ipaddress
 import logging
+import socket
+import urllib.parse
 from typing import List, Dict, Any, Optional
 import xml.etree.ElementTree as ET
 import httpx
 import yfinance as yf
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+try:
+    import defusedxml.ElementTree as defused_ET
+except ImportError:
+    defused_ET = None
+
 logger = logging.getLogger("trading.data.news_fetcher")
+
+def _is_safe_redirect(target_url: str) -> bool:
+    """Validate redirect destination against SSRF: only HTTPS and public IP addresses allowed."""
+    try:
+        parsed = urllib.parse.urlparse(target_url)
+        if parsed.scheme != "https":
+            return False
+        # Block non-standard ports to prevent internal port scanning
+        if parsed.port and parsed.port != 443:
+            return False
+        host = parsed.hostname
+        if not host:
+            return False
+        # Direct IP check
+        try:
+            ip = ipaddress.ip_address(host)
+            if hasattr(ip, "ipv4_mapped") and ip.ipv4_mapped:
+                ip = ip.ipv4_mapped
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+                return False
+        except ValueError:
+            # Resolve hostname and verify resolved IPs
+            addr_info = socket.getaddrinfo(host, 443)
+            for item in addr_info:
+                ip_str = item[4][0]
+                ip = ipaddress.ip_address(ip_str)
+                if hasattr(ip, "ipv4_mapped") and ip.ipv4_mapped:
+                    ip = ip.ipv4_mapped
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+                    return False
+        return True
+    except Exception as e:
+        logger.warning(f"SSRF safety check failed for {target_url}: {e}")
+        return False
+
+
+def _safe_parse_xml(xml_text: str) -> ET.Element:
+    """Parse XML with defusedxml (if available) or strict entity/DTD protection."""
+    if len(xml_text) > 5_000_000:
+        raise ValueError("XML payload exceeds maximum allowable size (5MB).")
+
+    if defused_ET is not None:
+        return defused_ET.fromstring(xml_text)
+    
+    # Defense against XML entity expansion (billion laughs, quadratic blowup, XXE)
+    upper = xml_text.upper()
+    if "<!DOCTYPE" in upper or "<!ENTITY" in upper:
+        raise ValueError("Rejected suspicious XML payload containing DOCTYPE or ENTITY declaration.")
+    return ET.fromstring(xml_text)
 
 # Initialize and tune VADER for financial and options market context
 _SIA = SentimentIntensityAnalyzer()
@@ -72,31 +129,50 @@ class NewsFetcher:
         Fetches live Indian financial news headlines from the public Google News India RSS feed.
         Zero authentication required, highly reliable, and covers all NSE/BSE indices.
         """
-        clean = ticker.upper().strip()
+        if not ticker or not isinstance(ticker, str):
+            return []
+        clean = ticker.upper().strip().replace("\x00", "")[:64]
         if clean in ("NIFTY", "^NSEI", "NIFTY50", "NIFTY 50"):
-            query = "NIFTY+50+Indian+stock+market"
+            query = "NIFTY 50 Indian stock market"
         elif clean in ("BANKNIFTY", "^NSEBANK", "BANK NIFTY"):
-            query = "BANK+NIFTY+Indian+banking+stocks"
+            query = "BANK NIFTY Indian banking stocks"
         elif clean in ("SENSEX", "^BSESN", "BSE"):
-            query = "BSE+SENSEX+Indian+stock+market"
+            query = "BSE SENSEX Indian stock market"
         elif clean in ("FINNIFTY",):
-            query = "NIFTY+financial+services+stocks"
+            query = "NIFTY financial services stocks"
         elif clean in ("MIDCPNIFTY",):
-            query = "NIFTY+midcap+stocks+market"
+            query = "NIFTY midcap stocks market"
         else:
-            query = f"{clean}+share+price+India+stock+market"
+            query = f"{clean} share price India stock market"
 
-        rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
+        encoded_query = urllib.parse.quote_plus(query)
+        rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-IN&gl=IN&ceid=IN:en"
         headlines = []
 
         try:
-            with httpx.Client(timeout=8.0, follow_redirects=True) as client:
-                resp = client.get(rss_url)
-                if resp.status_code != 200:
-                    logger.warning(f"Indian RSS news returned status {resp.status_code}")
+            current_url = rss_url
+            resp = None
+            with httpx.Client(timeout=8.0, follow_redirects=False) as client:
+                # Follow redirects with SSRF validation up to 3 hops
+                for _ in range(4):
+                    resp = client.get(current_url)
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        loc = resp.headers.get("Location")
+                        if not loc:
+                            break
+                        next_url = urllib.parse.urljoin(current_url, loc)
+                        if not _is_safe_redirect(next_url):
+                            logger.warning(f"Blocked unsafe SSRF redirect to: {next_url}")
+                            return []
+                        current_url = next_url
+                    else:
+                        break
+
+                if resp is None or resp.status_code != 200:
+                    logger.warning(f"Indian RSS news returned status {resp.status_code if resp else 'None'}")
                     return []
 
-                root = ET.fromstring(resp.text)
+                root = _safe_parse_xml(resp.text)
                 items = root.findall(".//item")[:limit]
 
                 for item in items:

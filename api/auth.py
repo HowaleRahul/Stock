@@ -14,20 +14,45 @@ from cachetools import TTLCache
 _RATE_LOCK = threading.Lock()
 _RATE_LIMITS = TTLCache(maxsize=100000, ttl=60)
 
+def _is_trusted_proxy(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    if normalized in ("localhost", "127.0.0.1", "::1", "testclient"):
+        return True
+    if normalized.startswith("::ffff:"):
+        normalized = normalized[7:]
+    try:
+        ip = ipaddress.ip_address(normalized)
+        if hasattr(ip, "ipv4_mapped") and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        return ip.is_loopback or ip.is_private
+    except ValueError:
+        return False
+
+
 def rate_limiter(requests_per_minute: int = 60):
     async def dependency(request: Request):
         client_host = request.client.host if request.client else "127.0.0.1"
-        # Only trust X-Forwarded-For if client_host is loopback or private network proxy
-        if client_host in ("127.0.0.1", "::1", "localhost") or client_host.startswith(("10.", "172.", "192.168.")):
+        # Only trust X-Forwarded-For if client_host is verified loopback or RFC1918 private proxy
+        if _is_trusted_proxy(client_host):
             forwarded = request.headers.get("X-Forwarded-For")
             if forwarded:
-                client_ip = forwarded.split(",")[0].strip()[:45]
+                raw_ip = forwarded.split(",")[0].strip().replace("\x00", "")[:45]
+                try:
+                    ipaddress.ip_address(raw_ip)
+                    client_ip = raw_ip
+                except ValueError:
+                    client_ip = client_host
             else:
                 client_ip = client_host
         else:
             client_ip = client_host
 
-        endpoint_key = f"{client_ip}:{request.scope.get('path', '')}:{requests_per_minute}"
+        # Group by route template if available to prevent path parameter permutations from bypassing rate limits
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", None) or request.scope.get("path", "")
+        endpoint_key = f"{client_ip}:{route_path}:{requests_per_minute}"
         now = time.time()
         
         with _RATE_LOCK:
@@ -53,10 +78,15 @@ def _is_loopback_host(host: str) -> bool:
     normalized = host.strip().lower()
     if normalized.startswith("[") and normalized.endswith("]"):
         normalized = normalized[1:-1]
-    if normalized == "localhost":
+    if normalized in ("localhost", "testclient"):
         return True
+    if normalized.startswith("::ffff:"):
+        normalized = normalized[7:]
     try:
-        return ipaddress.ip_address(normalized).is_loopback
+        ip = ipaddress.ip_address(normalized)
+        if hasattr(ip, "ipv4_mapped") and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        return ip.is_loopback
     except ValueError:
         return False
 
@@ -66,11 +96,15 @@ def _configured_api_key() -> Optional[str]:
     return configured_key or os.getenv("API_KEY")
 
 
-def _allows_keyless_development() -> bool:
-    return (
-        settings.environment.lower() == "development"
-        and _is_loopback_host(settings.api_host)
-    )
+def _allows_keyless_development(request: Optional[Request] = None) -> bool:
+    if settings.environment.lower() != "development":
+        return False
+    if not _is_loopback_host(settings.api_host):
+        return False
+    if request is not None:
+        client_host = request.client.host if request.client else ""
+        return _is_loopback_host(client_host)
+    return True
 
 
 def validate_auth_configuration() -> None:
@@ -84,12 +118,12 @@ def validate_auth_configuration() -> None:
 async def get_api_key(request: Request, api_key: Optional[str] = Depends(api_key_header)):
     """
     Validates the configured API key. Keyless access is limited to explicit
-    development mode on a loopback bind.
+    development mode on a loopback bind and loopback client.
     Supports both X-API-Key header and Authorization: Bearer <key>.
     """
     expected_api_key = _configured_api_key()
     if not expected_api_key:
-        if not _allows_keyless_development():
+        if not _allows_keyless_development(request):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="API authentication is not configured."
@@ -99,7 +133,7 @@ async def get_api_key(request: Request, api_key: Optional[str] = Depends(api_key
     candidate = api_key
     if not candidate:
         auth_hdr = request.headers.get("Authorization", "")
-        if auth_hdr.startswith("Bearer "):
+        if auth_hdr.lower().startswith("bearer "):
             candidate = auth_hdr[7:].strip()
 
     if not candidate or not secrets.compare_digest(candidate, expected_api_key):

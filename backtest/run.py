@@ -125,7 +125,14 @@ async def main():
 """
     
     for t, m in all_metrics.items():
-        report_content += f"| `{t}` | `{m['Total_Return']:.2f}%` | `{m['Benchmark_Return']:.2f}%` | `{m['Win_Rate']:.2f}%` | `{m['Profit_Factor']:.2f}` | `{m['Max_Drawdown']:.2f}%` | `{m['Total_Trades']}` | `{m['Sharpe_Ratio']:.2f}` |\n"
+        tot_ret = float(m.get('Total_Return', 0.0) or 0.0)
+        bm_ret = float(m.get('Benchmark_Return', 0.0) or 0.0)
+        win_rate = float(m.get('Win_Rate', 0.0) or 0.0)
+        pf = float(m.get('Profit_Factor', 0.0) or 0.0)
+        mdd = float(m.get('Max_Drawdown', 0.0) or 0.0)
+        trades = int(m.get('Total_Trades', 0) or 0)
+        sharpe = float(m.get('Sharpe_Ratio', 0.0) or 0.0)
+        report_content += f"| `{t}` | `{tot_ret:.2f}%` | `{bm_ret:.2f}%` | `{win_rate:.2f}%` | `{pf:.2f}` | `{mdd:.2f}%` | `{trades}` | `{sharpe:.2f}` |\n"
         
     report_content += """
 ## 2. Institutional Analysis

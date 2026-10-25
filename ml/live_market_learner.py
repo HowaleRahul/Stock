@@ -25,8 +25,8 @@ import pandas as pd
 from data.market_hours import get_market_status, is_market_open
 from data.realtime_feed import RealTimeDataFeed
 from ml.ensemble import EnsembleModel
-from ml.risk_engine import RiskEngine
-from ml.options_engine import DerivativeEngine
+from ml.risk_engine import RiskEngine, IndianFOFrictionModel, is_intraday_square_off_time
+from ml.options_engine import DerivativeEngine, get_days_to_expiry
 from ml.trade_logger import TradeLogger
 from ml.reinforcement_learner import ReinforcementLearner
 from ml.circuit_breaker import DrawdownCircuitBreaker
@@ -223,11 +223,10 @@ class LiveMarketLearner:
         self.current_unrealized_mtm = total_mtm
         self.total_margin_deployed = total_margin
 
-    def manage_open_trades(self):
+    def manage_open_trades(self, current_dt: Optional[datetime.datetime] = None):
         """
-        Checks TP, SL, Trailing Stop, and Time Exit against real-time quotes.
-        Triggers instant reinforcement learning on exit for both setup weights
-        and F&O strike/derivative weights.
+        Checks TP, SL, Trailing Stop, Time Exit, and Intraday 15:15 IST Square-Off
+        against real-time quotes. Triggers instant reinforcement learning on exit.
         """
         remaining_open = []
 
@@ -246,28 +245,50 @@ class LiveMarketLearner:
             exit_reason = None
             exit_price = trade.get("current_ltp", trade["entry_price"])
 
-            if inst_type == "OPTION":
-                # Option Exit Management
+            # 1. Intraday MIS Square-Off Rule (15:15 IST)
+            if is_intraday_square_off_time(current_dt):
+                exit_reason = "INTRADAY_SQUARE_OFF"
+                if inst_type == "OPTION":
+                    exit_price = trade.get("current_ltp", trade["entry_price"])
+                else:
+                    exit_price = spot_ltp
+
+            elif inst_type in ("OPTION", "SPREAD"):
+                # Option & Spread Exit Management
                 current_prem = trade.get("current_ltp", trade["entry_price"])
                 entry_prem = trade["entry_price"]
                 sl_prem = trade["sl"]
                 tp_prem = trade["tp"]
                 trailing_sl = trade.get("trailing_stop", sl_prem)
+                act = str(trade.get("action", "BUY")).upper()
+                strat = str(trade.get("strategy_type", "DIRECTIONAL")).upper()
 
-                # Option Trailing Stop: If option premium gained > 1× initial risk,
-                # move stop-loss to breakeven!
-                risk_pts = max(1.0, entry_prem - sl_prem)
-                if current_prem - entry_prem >= 0.8 * risk_pts:
-                    trailing_sl = max(trailing_sl, entry_prem * 1.002)
-                    trade["trailing_stop"] = trailing_sl
+                if act == "SELL" or strat == "CREDIT_SPREAD":
+                    # Option Selling & Credit Spreads:
+                    # Profit when premium decays (current_prem <= tp_prem)
+                    # Loss when premium expands (current_prem >= sl_prem)
+                    if current_prem <= tp_prem:
+                        exit_reason = "TAKE_PROFIT"
+                        exit_price = current_prem
+                    elif current_prem >= sl_prem:
+                        exit_reason = "STOP_LOSS"
+                        exit_price = current_prem
+                else:
+                    # Option Buying:
+                    # Option Trailing Stop: If option premium gained > 0.8× initial risk,
+                    # move stop-loss to breakeven!
+                    risk_pts = max(1.0, entry_prem - sl_prem)
+                    if current_prem - entry_prem >= 0.8 * risk_pts:
+                        trailing_sl = max(trailing_sl, entry_prem * 1.002)
+                        trade["trailing_stop"] = trailing_sl
 
-                # Check TP / SL hit
-                if current_prem >= tp_prem:
-                    exit_reason = "TAKE_PROFIT"
-                    exit_price = current_prem
-                elif current_prem <= trailing_sl:
-                    exit_reason = "TRAILING_SL" if trailing_sl > sl_prem else "STOP_LOSS"
-                    exit_price = trailing_sl
+                    # Check TP / SL hit
+                    if current_prem >= tp_prem:
+                        exit_reason = "TAKE_PROFIT"
+                        exit_price = current_prem
+                    elif current_prem <= trailing_sl:
+                        exit_reason = "TRAILING_SL" if trailing_sl > sl_prem else "STOP_LOSS"
+                        exit_price = trailing_sl
 
             else:
                 # Futures or Equity Exit Management
@@ -277,33 +298,75 @@ class LiveMarketLearner:
                 trade = RiskEngine.update_trailing_stop(trade, high, low)
                 active_sl = trade.get("trailing_stop", trade["sl"])
 
+                bar_open = float(quote.get("open", spot_ltp))
                 if trade["direction"] in ("LONG", "bullish"):
                     if low <= active_sl:
                         exit_reason = "TRAILING_SL" if active_sl != trade["sl"] else "STOP_LOSS"
-                        exit_price = active_sl
+                        exit_price = min(active_sl, bar_open)
                     elif high >= trade["tp"]:
                         exit_reason = "TAKE_PROFIT"
-                        exit_price = trade["tp"]
+                        exit_price = max(trade["tp"], bar_open) if bar_open > trade["tp"] else trade["tp"]
                 elif trade["direction"] in ("SHORT", "bearish"):
                     if high >= active_sl:
                         exit_reason = "TRAILING_SL" if active_sl != trade["sl"] else "STOP_LOSS"
-                        exit_price = active_sl
+                        exit_price = max(active_sl, bar_open)
                     elif low <= trade["tp"]:
                         exit_reason = "TAKE_PROFIT"
-                        exit_price = trade["tp"]
+                        exit_price = min(trade["tp"], bar_open) if bar_open < trade["tp"] else trade["tp"]
 
             if exit_reason:
                 # Trade is exiting!
                 entry_p = trade["entry_price"]
-                if inst_type == "OPTION":
-                    gross_pnl_pct = (exit_price - entry_p) / entry_p if entry_p > 0 else 0.0
+                invested = trade.get("invested", 1.0)
+                if inst_type in ("OPTION", "SPREAD"):
+                    qty = trade.get("total_quantity") or trade.get("quantity") or self.derivative_engine.get_lot_size(underlying)
+                    act = str(trade.get("action", "BUY")).upper()
+                    strat = str(trade.get("strategy_type", "DIRECTIONAL")).upper()
+
+                    if strat == "CREDIT_SPREAD" or inst_type == "SPREAD":
+                        f_calc = IndianFOFrictionModel.calculate_spread_friction(
+                            short_entry_prem=trade.get("opt_entry_premium", entry_p),
+                            short_exit_prem=exit_price * 0.8,
+                            long_entry_prem=trade.get("hedge_entry_price", 0.0),
+                            long_exit_prem=0.05,
+                            quantity=qty
+                        )
+                    elif act == "SELL":
+                        f_calc = IndianFOFrictionModel.calculate_options_friction(
+                            buy_premium=exit_price,
+                            sell_premium=entry_p,
+                            quantity=qty,
+                            action="SELL"
+                        )
+                    else:
+                        f_calc = IndianFOFrictionModel.calculate_options_friction(
+                            buy_premium=entry_p,
+                            sell_premium=exit_price,
+                            quantity=qty,
+                            action="BUY"
+                        )
+                    cash_pnl = f_calc.net_pnl
+                    net_pnl_pct = (cash_pnl / invested) if invested > 0 else 0.0
+                    gross_pnl_pct = (f_calc.gross_pnl / invested) if invested > 0 else 0.0
+                elif inst_type == "FUTURE":
+                    qty = trade.get("total_quantity") or trade.get("quantity", 1)
+                    f_calc = IndianFOFrictionModel.calculate_futures_friction(
+                        entry_price=entry_p,
+                        exit_price=exit_price,
+                        quantity=qty,
+                        direction=trade["direction"]
+                    )
+                    cash_pnl = f_calc.net_pnl
+                    net_pnl_pct = (cash_pnl / invested) if invested > 0 else 0.0
+                    gross_pnl_pct = (f_calc.gross_pnl / invested) if invested > 0 else 0.0
                 elif trade["direction"] in ("LONG", "bullish"):
                     gross_pnl_pct = (exit_price - entry_p) / entry_p if entry_p > 0 else 0.0
+                    net_pnl_pct = gross_pnl_pct - self.stt_slippage_pct
+                    cash_pnl = trade["invested"] * net_pnl_pct
                 else:
                     gross_pnl_pct = (entry_p - exit_price) / entry_p if entry_p > 0 else 0.0
-
-                net_pnl_pct = gross_pnl_pct - self.stt_slippage_pct
-                cash_pnl = trade["invested"] * net_pnl_pct
+                    net_pnl_pct = gross_pnl_pct - self.stt_slippage_pct
+                    cash_pnl = trade["invested"] * net_pnl_pct
 
                 trade["status"] = exit_reason
                 trade["exit_price"] = exit_price
@@ -312,7 +375,11 @@ class LiveMarketLearner:
                 trade["closed_at"] = datetime.datetime.now().isoformat()
 
                 # Update wallet capital
-                self.capital += cash_pnl
+                if trade.get("invested_deducted"):
+                    self.capital += (trade.get("invested", 0.0) + cash_pnl)
+                else:
+                    self.capital += cash_pnl
+
                 if self.capital > self.peak_capital:
                     self.peak_capital = self.capital
 
@@ -323,6 +390,8 @@ class LiveMarketLearner:
                     self.losing_trades_count += 1
 
                 self.closed_trades.append(trade)
+                if len(self.closed_trades) > 500:
+                    self.closed_trades = self.closed_trades[-500:]
 
                 # =================================================================
                 # 1. AUTOMATED F&O REINFORCEMENT LEARNING:
@@ -478,16 +547,24 @@ class LiveMarketLearner:
                 continue
 
             # Multi-Agent Adversarial Debate & Consensus confirmation (TradingAgents)
+            # Wire live NSE PCR, Max-Pain, GEX regime, and FII/DII net flows
+            live_opts, live_sent = MultiAgentConsensusEngine.fetch_live_context(ticker, spot=spot_ltp)
             consensus = MultiAgentConsensusEngine.evaluate(
                 ticker=ticker,
                 regime_data=regime_data,
                 setup_signals=setups,
-                options_data={"pcr_oi": 1.0, "gex_regime": "NEUTRAL"}
+                options_data=live_opts,
+                sentiment_data=live_sent,
             )
-            if consensus.recommended_action == "REJECT_TRADE":
+            is_rejected = (
+                consensus.recommended_action.startswith("STAND ASIDE")
+                or consensus.consensus_signal == "neutral"
+                or "REJECT" in consensus.chief_risk_ruling.upper()
+            )
+            if is_rejected:
                 self.log(
                     f"🚫 [MULTI-AGENT REJECT] {ticker}: Chief Risk ruling: {consensus.chief_risk_ruling}. "
-                    f"Consensus: {consensus.consensus_signal} ({consensus.consensus_confidence:.2f})"
+                    f"Action: {consensus.recommended_action}. Consensus: {consensus.consensus_signal} ({consensus.consensus_confidence:.2f})"
                 )
                 continue
 
@@ -553,9 +630,15 @@ class LiveMarketLearner:
                     "underlying_ticker": d_plan.underlying_ticker,
                     "contract_symbol": d_plan.contract_symbol,
                     "instrument_type": d_plan.instrument_type,
+                    "action": d_plan.action,
+                    "strategy_type": d_plan.strategy_type,
                     "option_type": d_plan.option_type,
                     "strike": d_plan.strike_price,
                     "strike_type": d_plan.strike_type,
+                    "hedge_strike_price": d_plan.hedge_strike_price,
+                    "hedge_entry_price": d_plan.hedge_entry_price,
+                    "net_credit": d_plan.net_credit,
+                    "opt_entry_premium": d_plan.entry_price,
                     "direction": d_plan.direction,
                     "lot_size": d_plan.lot_size,
                     "lots": d_plan.lots_to_trade,
@@ -585,8 +668,10 @@ class LiveMarketLearner:
                     "current_ltp": d_plan.entry_price,
                     "unrealized_pnl": 0.0,
                     "unrealized_pnl_pct": 0.0,
+                    "invested_deducted": True,
                 }
 
+                self.capital = max(0.0, self.capital - new_trade["invested"])
                 self.open_trades.append(new_trade)
                 self.update_live_mtm()
 

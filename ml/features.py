@@ -1,3 +1,4 @@
+import math
 import pandas as pd
 import numpy as np
 import scipy.stats as si
@@ -17,21 +18,34 @@ def calculate_black_scholes_greeks(S, K, T, r, sigma):
     
     Returns ATM Call Delta and Gamma
     """
-    # Prevent division by zero
+    if not all(isinstance(v, (int, float)) for v in (S, K, T, r, sigma)):
+        return 0.5, 0.0
+    if any(math.isnan(v) or math.isinf(v) for v in (S, K, T, r, sigma)):
+        return 0.5, 0.0
     if sigma <= 0 or T <= 0 or S <= 0 or K <= 0:
         return 0.5, 0.0
         
     denom = sigma * np.sqrt(T)
-    if denom <= 1e-9:
+    if denom <= 1e-9 or (S * denom) <= 1e-12:
         return 0.5, 0.0
 
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / denom
-    # d2 = d1 - sigma * np.sqrt(T)
-    
-    delta = si.norm.cdf(d1, 0.0, 1.0)
-    gamma = si.norm.pdf(d1, 0.0, 1.0) / (S * denom)
-    
-    return float(delta), float(gamma)
+    try:
+        d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / denom
+        if d1 > 37.0:
+            return 1.0, 0.0
+        elif d1 < -37.0:
+            return 0.0, 0.0
+
+        delta = si.norm.cdf(d1, 0.0, 1.0)
+        gamma = si.norm.pdf(d1, 0.0, 1.0) / (S * denom)
+
+        safe_delta = float(np.clip(delta, 0.0, 1.0))
+        safe_gamma = float(max(0.0, gamma))
+        if math.isnan(safe_gamma) or math.isinf(safe_gamma):
+            safe_gamma = 0.0
+        return safe_delta, safe_gamma
+    except Exception:
+        return 0.5, 0.0
 
 def _close_or_volume(data: pd.DataFrame, symbol: str, field: str) -> pd.Series | None:
     """Extract a Yahoo series from single- or multi-ticker response shapes."""
@@ -126,25 +140,27 @@ def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "
         
     if "SPX" in macro_dfs:
         df['macro_spx_close'] = macro_combined["SPX"]
-        df['macro_spx_ret'] = df['macro_spx_close'].pct_change()
+        df['macro_spx_ret'] = df['macro_spx_close'].pct_change().replace([np.inf, -np.inf], 0.0).fillna(0.0)
     else:
         df['macro_spx_ret'] = 0.0
         
     if "USDINR" in macro_dfs:
         df['macro_usdinr'] = macro_combined["USDINR"]
-        df['macro_usdinr_ret'] = df['macro_usdinr'].pct_change()
+        df['macro_usdinr_ret'] = df['macro_usdinr'].pct_change().replace([np.inf, -np.inf], 0.0).fillna(0.0)
     else:
         df['macro_usdinr_ret'] = 0.0
 
     if "BTC_VOLUME" in macro_dfs:
         df["macro_btc_volume"] = macro_combined["BTC_VOLUME"]
-        df["macro_btc_volume_ret"] = df["macro_btc_volume"].pct_change()
+        df["macro_btc_volume_ret"] = df["macro_btc_volume"].pct_change().replace([np.inf, -np.inf], 0.0).fillna(0.0)
     else:
         df["macro_btc_volume"] = 0.0
         df["macro_btc_volume_ret"] = 0.0
         
-    # Forward fill NaNs created at the start of the series
+    # Clean inf and NaN values to prevent sklearn pipeline failures
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.ffill(inplace=True)
+    df.bfill(inplace=True)
     df.fillna(0.0, inplace=True)
     
     logger.info(f"Generating Synthetic Black-Scholes Greeks for {ticker}...")
@@ -154,11 +170,22 @@ def enrich_with_macro_and_options(df: pd.DataFrame, ticker: str, period: str = "
     gammas = []
     
     for i in range(len(df)):
-        S = float(df['close'].iloc[i])
+        try:
+            S = float(df['close'].iloc[i])
+            if math.isnan(S) or S <= 0.0:
+                S = 100.0
+        except Exception:
+            S = 100.0
         K = S # Assume ATM Strike
         T = 7 / 365.0 # Assume 7 days to expiry for weekly options
         r = 0.05 # 5% Repo rate
-        sigma = float(df['macro_vix'].iloc[i]) / 100.0 # VIX is in percentage points (e.g. 15.0 = 15%)
+        try:
+            vix_val = float(df['macro_vix'].iloc[i])
+            if math.isnan(vix_val) or vix_val <= 0.0:
+                vix_val = 15.0
+        except Exception:
+            vix_val = 15.0
+        sigma = vix_val / 100.0 # VIX is in percentage points (e.g. 15.0 = 15%)
         
         delta, gamma = calculate_black_scholes_greeks(S, K, T, r, sigma)
         deltas.append(delta)
@@ -194,21 +221,27 @@ def enrich_with_psychology_features(df: pd.DataFrame) -> pd.DataFrame:
     df['psych_fomo_streak'] = streak
     
     # 2. Panic Capitulation Index (Large lower wicks with high relative volume)
-    # Smart Money buys when retail panics.
-    vol_sma_20 = df['volume'].rolling(20, min_periods=1).mean().replace(0, 1).fillna(1)
-    rel_vol = df['volume'] / vol_sma_20
+    # Guard against volume division by zero or doji candle body singularity
+    vol_series = pd.to_numeric(df['volume'], errors='coerce').fillna(0.0)
+    vol_sma_20 = vol_series.rolling(20, min_periods=1).mean().replace(0, np.nan).ffill().bfill().fillna(1.0)
+    vol_sma_20 = np.maximum(vol_sma_20, 1.0)
+    rel_vol = np.clip((vol_series / vol_sma_20).replace([np.inf, -np.inf], 1.0).fillna(1.0), 0.0, 50.0)
     
-    lower_wick = np.minimum(df['open'], df['close']) - df['low']
-    candle_body = np.abs(df['open'] - df['close']) + 1e-5 # prevent div zero
-    
-    # High lower wick + high volume = Retail Panic / Smart Money Accumulation
-    df['psych_panic_index'] = (lower_wick / candle_body) * rel_vol
+    lower_wick = np.maximum(0.0, np.minimum(df['open'], df['close']) - df['low'])
+    candle_body = np.abs(df['open'] - df['close'])
+    candle_range = np.maximum(df['high'] - df['low'], 1e-4)
+    # Use normalizer that avoids doji singularity (candle_body near 0)
+    normalizer = np.maximum(candle_body, candle_range * 0.1)
+    panic_idx = (lower_wick / normalizer) * rel_vol
+    df['psych_panic_index'] = np.clip(panic_idx.replace([np.inf, -np.inf], 0.0).fillna(0.0), 0.0, 50.0)
     
     # 3. Distance to Round Number Proximity (Retail places stops at '00' levels)
     # e.g., 25000, 1000, 500. We'll find distance to nearest 100 level.
+    safe_close = df['close'].abs().replace(0, np.nan).fillna(1.0)
+    safe_close = np.maximum(safe_close, 1.0)
     nearest_100 = (df['close'] / 100).round() * 100
-    safe_close = df['close'].replace(0, np.nan)
-    df['psych_dist_to_round'] = (np.abs(df['close'] - nearest_100) / safe_close).fillna(0.0)
+    dist_round = np.abs(df['close'] - nearest_100) / safe_close
+    df['psych_dist_to_round'] = np.clip(dist_round.replace([np.inf, -np.inf], 0.0).fillna(0.0), 0.0, 1.0)
     
     # 4. Session Phase (Morning=1, Mid-day=2, Closing=3, Daily/Unknown=0)
     # Morning is emotional/retail. Mid-day is choppy. Close is institutional rebalancing.
@@ -228,6 +261,10 @@ def enrich_with_psychology_features(df: pd.DataFrame) -> pd.DataFrame:
         ]
         choices = [1, 2, 3]
         df['psych_session_phase'] = np.select(conditions, choices, default=0)
+
+    # Sanitize dataframe
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df.fillna(0.0, inplace=True)
         
     return df
 
@@ -246,12 +283,12 @@ def generate_triple_barrier_labels(df: pd.DataFrame, tp_atr_mult: float = 2.0, s
     labels = []
     
     # Compute ATR (14-period)
-    high_low = df['high'] - df['low']
+    high_low = np.maximum(0.0, df['high'] - df['low'])
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = np.max(ranges, axis=1)
-    atr = true_range.rolling(14, min_periods=1).mean()
+    true_range = np.max(ranges, axis=1).fillna(0.0)
+    atr = true_range.rolling(14, min_periods=1).mean().bfill().fillna(1.0)
     df['atr'] = atr # Save ATR as a potential feature
     
     for i in range(len(df)):
@@ -259,12 +296,21 @@ def generate_triple_barrier_labels(df: pd.DataFrame, tp_atr_mult: float = 2.0, s
             labels.append(0)
             continue
             
-        entry_price = float(df['close'].iloc[i])
-        current_atr = float(atr.iloc[i])
+        try:
+            entry_price = float(df['close'].iloc[i])
+            if math.isnan(entry_price) or entry_price <= 0.0:
+                entry_price = 100.0
+        except Exception:
+            entry_price = 100.0
+
+        try:
+            current_atr = float(atr.iloc[i])
+        except Exception:
+            current_atr = 1.0
         
-        # Prevent zero ATR from causing identical TP/SL
-        if current_atr == 0:
-            current_atr = entry_price * 0.01 
+        # Prevent zero or negative ATR from causing identical TP/SL
+        if current_atr <= 0 or math.isnan(current_atr) or math.isinf(current_atr):
+            current_atr = max(1.0, abs(entry_price) * 0.01)
             
         # LONG Barriers
         long_tp = entry_price + (tp_atr_mult * current_atr)
@@ -282,8 +328,11 @@ def generate_triple_barrier_labels(df: pd.DataFrame, tp_atr_mult: float = 2.0, s
         max_scan = min(i + max_hold_bars + 1, len(df))
         
         for j in range(i + 1, max_scan):
-            high = float(df['high'].iloc[j])
-            low = float(df['low'].iloc[j])
+            try:
+                high = float(df['high'].iloc[j])
+                low = float(df['low'].iloc[j])
+            except Exception:
+                continue
             
             # Check Stop Losses First (always prioritize risk)
             if low <= long_sl:

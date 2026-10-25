@@ -22,17 +22,157 @@ import json
 import os
 import math
 import logging
+import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Tuple
 
 import scipy.stats as si
 import numpy as np
 
-from ml.risk_engine import TradePlan
+from ml.risk_engine import TradePlan, IndianFOFrictionModel
 
 logger = logging.getLogger("trading.options_engine")
 
 FO_WEIGHTS_FILE = "ml/models/fo_weights.json"
+
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+INDEX_EXPIRY_WEEKDAYS = {
+    "MIDCPNIFTY": 0,   # Monday
+    "FINNIFTY": 1,     # Tuesday
+    "BANKNIFTY": 2,    # Wednesday (weekly)
+    "NIFTY": 3,        # Thursday
+    "^NSEI": 3,        # Thursday
+    "SENSEX": 4,       # Friday
+    "^BSESN": 4,       # Friday
+}
+
+
+def normalize_index_ticker(ticker: str) -> str:
+    """Normalizes any index ticker representation to canonical NSE/BSE symbol."""
+    if not ticker or not isinstance(ticker, str):
+        return ""
+    t = ticker.upper().replace("^", "").strip()
+    if "BSESN" in t or "SENSEX" in t:
+        return "SENSEX"
+    if "NSEBANK" in t or "BANK" in t:
+        return "BANKNIFTY"
+    if "FIN" in t:
+        return "FINNIFTY"
+    if "MID" in t:
+        return "MIDCPNIFTY"
+    if "NSEI" in t or "NIFTY" in t:
+        return "NIFTY"
+    return t
+
+
+def get_days_to_expiry(
+    ticker: str,
+    dt: Optional[datetime.datetime] = None,
+    is_monthly: bool = False
+) -> float:
+    """
+    Calculates fractional trading days remaining until 15:30 IST on the index's expiry day.
+
+    Weekly Indian Index Expiry Schedule:
+    - MIDCPNIFTY: Monday (weekday = 0)
+    - FINNIFTY: Tuesday (weekday = 1)
+    - BANKNIFTY: Wednesday (weekday = 2, or monthly Thursday = 3)
+    - NIFTY / ^NSEI: Thursday (weekday = 3)
+    - SENSEX / ^BSESN: Friday (weekday = 4)
+    - Other NSE F&O equities: Thursday (weekday = 3)
+
+    Market trading session: 09:15 to 15:30 IST (375 minutes = 6.25 hours).
+    Fractional trading day is computed proportionally during session hours.
+    Weekends (Saturday & Sunday) are non-trading days and contribute 0.0.
+    """
+    norm = normalize_index_ticker(ticker)
+
+    # Determine expiry weekday
+    if is_monthly and norm == "BANKNIFTY":
+        expiry_weekday = 3  # Monthly BANKNIFTY expiry is Thursday
+    else:
+        expiry_weekday = INDEX_EXPIRY_WEEKDAYS.get(norm, 3)
+
+    # Timezone handling: ensure dt is in IST
+    if dt is None:
+        curr_dt = datetime.datetime.now(IST)
+    elif dt.tzinfo is None:
+        curr_dt = dt.replace(tzinfo=IST)
+    else:
+        curr_dt = dt.astimezone(IST)
+
+    curr_date = curr_dt.date()
+    curr_weekday = curr_date.weekday()
+
+    # Find the upcoming target expiry date
+    if curr_weekday == expiry_weekday:
+        # Today is expiry day
+        if curr_dt.time() <= datetime.time(15, 30):
+            target_date = curr_date
+        else:
+            # Past 15:30 on expiry day -> roll to next week's expiry
+            target_date = curr_date + datetime.timedelta(days=7)
+    else:
+        days_ahead = (expiry_weekday - curr_weekday) % 7
+        target_date = curr_date + datetime.timedelta(days=days_ahead)
+
+    # If monthly requested: find last occurrence of expiry weekday in the month
+    if is_monthly:
+        import calendar
+        cal = calendar.monthcalendar(target_date.year, target_date.month)
+        last_day = max(week[expiry_weekday] for week in cal if week[expiry_weekday] != 0)
+        candidate_monthly_date = datetime.date(target_date.year, target_date.month, last_day)
+        if candidate_monthly_date < curr_date or (candidate_monthly_date == curr_date and curr_dt.time() >= datetime.time(15, 30)):
+            # Roll to next month's last expiry
+            next_month = target_date.month + 1 if target_date.month < 12 else 1
+            next_year = target_date.year if target_date.month < 12 else target_date.year + 1
+            next_cal = calendar.monthcalendar(next_year, next_month)
+            next_last_day = max(week[expiry_weekday] for week in next_cal if week[expiry_weekday] != 0)
+            target_date = datetime.date(next_year, next_month, next_last_day)
+        else:
+            target_date = candidate_monthly_date
+
+    # Sum fractional trading days from curr_date to target_date
+    total_trading_days = 0.0
+    day = curr_date
+
+    while day <= target_date:
+        # Skip weekends (Saturday=5, Sunday=6)
+        if day.weekday() < 5:
+            if day == curr_date and day == target_date:
+                # Expiry is today!
+                if curr_dt.time() <= datetime.time(9, 15):
+                    fraction = 1.0
+                elif curr_dt.time() >= datetime.time(15, 30):
+                    fraction = 0.0
+                else:
+                    rem_mins = (15 * 60 + 30) - (curr_dt.hour * 60 + curr_dt.minute + curr_dt.second / 60.0)
+                    fraction = max(0.0, min(1.0, rem_mins / 375.0))
+                total_trading_days += fraction
+
+            elif day == curr_date:
+                # Current day (before expiry date)
+                if curr_dt.time() <= datetime.time(9, 15):
+                    fraction = 1.0
+                elif curr_dt.time() >= datetime.time(15, 30):
+                    fraction = 0.0
+                else:
+                    rem_mins = (15 * 60 + 30) - (curr_dt.hour * 60 + curr_dt.minute + curr_dt.second / 60.0)
+                    fraction = max(0.0, min(1.0, rem_mins / 375.0))
+                total_trading_days += fraction
+
+            elif day == target_date:
+                # Expiry day in the future (expires at 15:30, so full trading session available)
+                total_trading_days += 1.0
+
+            else:
+                # Full intermediate trading day
+                total_trading_days += 1.0
+
+        day += datetime.timedelta(days=1)
+
+    return round(float(total_trading_days), 4)
 
 
 # ===========================================================================
@@ -44,28 +184,36 @@ class DerivativeTradePlan:
     """A complete derivative (Options or Futures) trade recommendation."""
     original_spot_plan: TradePlan
 
-    instrument_type: str        # "OPTION" or "FUTURE"
+    instrument_type: str        # "OPTION" or "FUTURE" or "SPREAD"
     underlying_ticker: str      # "NIFTY", "BANKNIFTY", etc.
     contract_symbol: str        # e.g. "NIFTY 22800 CE", "BANKNIFTY FUT"
     direction: str              # "LONG" or "SHORT"
-    option_type: str            # "CE", "PE", or "FUT"
+    option_type: str            # "CE", "PE", "FUT", or "SPREAD"
     strike_price: float         # Strike price (0 for Futures)
-    strike_type: str            # "ITM", "ATM", "OTM", or "FUT"
+    strike_type: str            # "ITM", "ATM", "OTM", "FUT", or "SPREAD"
+    action: str = "BUY"         # "BUY" or "SELL"
+    strategy_type: str = "DIRECTIONAL" # "DIRECTIONAL", "CREDIT_SPREAD", "FUTURES"
 
-    lot_size: int               # NSE lot size (NIFTY: 25, BANKNIFTY: 15)
-    lots_to_trade: int          # Number of lots
-    total_quantity: int         # lots * lot_size
+    lot_size: int = 25          # NSE lot size (NIFTY: 25, BANKNIFTY: 15)
+    lots_to_trade: int = 1      # Number of lots
+    total_quantity: int = 25    # lots * lot_size
 
     # Pricing & Premium
-    entry_price: float          # Entry option premium OR Future entry price
-    target_price: float         # Option target premium OR Future target price
-    stop_loss_price: float      # Option SL premium OR Future SL price
+    entry_price: float = 0.0          # Entry option premium OR Future entry price
+    target_price: float = 0.0         # Option target premium OR Future target price
+    stop_loss_price: float = 0.0      # Option SL premium OR Future SL price
+
+    # Spread Specific Attributes
+    hedge_contract_symbol: str = ""   # Long protective wing for spreads
+    hedge_strike_price: float = 0.0   # Long hedge strike
+    hedge_entry_price: float = 0.0    # Long hedge entry premium
+    net_credit: float = 0.0           # Net credit collected per share
 
     # Margins and Capital
-    margin_or_premium_required: float  # Capital deployed
-    max_loss_amount: float
-    max_profit_amount: float
-    risk_reward_ratio: float
+    margin_or_premium_required: float = 0.0  # Capital deployed
+    max_loss_amount: float = 0.0
+    max_profit_amount: float = 0.0
+    risk_reward_ratio: float = 0.0
 
     # Greeks (Options only, 0 for Futures)
     delta: float = 0.0
@@ -117,12 +265,18 @@ class DerivativeTradePlan:
             "option_type": self.option_type,
             "strike_price": round(self.strike_price, 2),
             "strike_type": self.strike_type,
+            "action": self.action,
+            "strategy_type": self.strategy_type,
             "lot_size": self.lot_size,
             "lots_to_trade": self.lots_to_trade,
             "total_quantity": self.total_quantity,
             "entry_price": round(self.entry_price, 2),
             "target_price": round(self.target_price, 2),
             "stop_loss_price": round(self.stop_loss_price, 2),
+            "hedge_contract_symbol": self.hedge_contract_symbol,
+            "hedge_strike_price": round(self.hedge_strike_price, 2),
+            "hedge_entry_price": round(self.hedge_entry_price, 2),
+            "net_credit": round(self.net_credit, 2),
             "margin_or_premium_required": round(self.margin_or_premium_required, 2),
             "max_loss_amount": round(self.max_loss_amount, 2),
             "max_profit_amount": round(self.max_profit_amount, 2),
@@ -377,6 +531,51 @@ class DerivativeEngine:
         norm = self._normalize_ticker(ticker)
         return self.STRIKE_INTERVALS.get(norm, 50)
 
+    def get_days_to_expiry(
+        self,
+        ticker: str,
+        dt: Optional[datetime.datetime] = None,
+        is_monthly: bool = False
+    ) -> float:
+        """Calculates dynamic fractional trading days to expiry for index/equity."""
+        return get_days_to_expiry(ticker, dt=dt, is_monthly=is_monthly)
+
+    @classmethod
+    def fetch_live_iv(
+        cls,
+        spot_plan: Optional[TradePlan] = None,
+        ticker: Optional[str] = None
+    ) -> float:
+        """
+        Dynamically fetches real India VIX IV from:
+        1. Candle context 'macro_vix' on spot_plan if available
+        2. RealTimeDataFeed live quote for INDIAVIX
+        3. NSEFeed live India VIX
+        4. Baseline fallback DEFAULT_IV (0.14)
+        """
+        if spot_plan is not None:
+            macro_vix = getattr(spot_plan, "macro_vix", None)
+            if macro_vix is not None and isinstance(macro_vix, (int, float)) and macro_vix > 0:
+                return float(macro_vix / 100.0 if macro_vix > 1.0 else macro_vix)
+
+        try:
+            from data.realtime_feed import RealTimeDataFeed
+            vix_val = RealTimeDataFeed.get_india_vix_sync()
+            if vix_val > 0:
+                return float(vix_val / 100.0 if vix_val > 1.0 else vix_val)
+        except Exception as e:
+            logger.debug(f"Could not fetch India VIX from RealTimeDataFeed: {e}")
+
+        try:
+            from data.nse_feed import NSEFeed
+            v = NSEFeed.get_india_vix()
+            if v and v > 0:
+                return float(v / 100.0 if v > 1.0 else v)
+        except Exception as e:
+            logger.debug(f"Could not fetch India VIX from NSEFeed: {e}")
+
+        return cls.DEFAULT_IV
+
     # -----------------------------------------------------------------------
     # Black-Scholes Pricing & Greeks
     # -----------------------------------------------------------------------
@@ -392,19 +591,90 @@ class DerivativeEngine:
     ) -> Dict[str, float]:
         """
         Calculate Theoretical Option Premium and Greeks using Black-Scholes-Merton.
+        Accurately settles intrinsic value upon expiry (T <= 0) or extreme volatility bounds.
         """
-        if T <= 0 or S <= 0 or K <= 0 or sigma <= 0:
-            return {"premium": 0.01, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+        opt_type = option_type.upper().strip()
+
+        # Input validation: non-numeric, NaN, inf, or non-positive spot/strike
+        if not all(isinstance(v, (int, float)) for v in (S, K, T, r, sigma)):
+            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+        if any(math.isnan(v) or math.isinf(v) for v in (S, K, T, r, sigma)):
+            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+
+        if S <= 0.0 or K <= 0.0:
+            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+
+        # Expiry moment (T <= 0) or zero volatility boundary: Option value converges to intrinsic value
+        if T <= 0.0 or sigma <= 1e-9:
+            if opt_type == "CE":
+                intrinsic = max(0.05, S - K)
+                delta = 1.0 if S > K else 0.0
+            else:
+                intrinsic = max(0.05, K - S)
+                delta = -1.0 if K > S else 0.0
+            return {
+                "premium": round(float(intrinsic), 2),
+                "delta": float(delta),
+                "gamma": 0.0,
+                "theta": 0.0,
+                "vega": 0.0
+            }
 
         denom = sigma * np.sqrt(T)
-        if denom <= 1e-9:
-            return {"premium": 0.01, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+        if denom <= 1e-9 or (S * denom) <= 1e-12:
+            if opt_type == "CE":
+                intrinsic = max(0.05, S - K)
+                delta = 1.0 if S > K else 0.0
+            else:
+                intrinsic = max(0.05, K - S)
+                delta = -1.0 if K > S else 0.0
+            return {
+                "premium": round(float(intrinsic), 2),
+                "delta": float(delta),
+                "gamma": 0.0,
+                "theta": 0.0,
+                "vega": 0.0
+            }
 
         d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / denom
         d2 = d1 - denom
 
+        # Deep ITM / Deep OTM asymptotic regime checks (|d1| >= 37 standard deviations)
+        if d1 >= 37.0:
+            if opt_type == "CE":
+                prem = max(0.05, S - K * np.exp(-r * T))
+                delta = 1.0
+                theta = (-r * K * np.exp(-r * T)) / 365.0
+            else:  # Put is deep OTM
+                prem = 0.05
+                delta = 0.0
+                theta = 0.0
+            return {
+                "premium": round(float(prem), 2),
+                "delta": float(delta),
+                "gamma": 0.0,
+                "theta": round(float(theta), 4),
+                "vega": 0.0
+            }
+        elif d1 <= -37.0:
+            if opt_type == "CE":  # Call is deep OTM
+                prem = 0.05
+                delta = 0.0
+                theta = 0.0
+            else:  # Put is deep ITM
+                prem = max(0.05, K * np.exp(-r * T) - S)
+                delta = -1.0
+                theta = (r * K * np.exp(-r * T)) / 365.0
+            return {
+                "premium": round(float(prem), 2),
+                "delta": float(delta),
+                "gamma": 0.0,
+                "theta": round(float(theta), 4),
+                "vega": 0.0
+            }
+
         try:
-            if option_type == "CE":
+            if opt_type == "CE":
                 premium = (S * si.norm.cdf(d1, 0.0, 1.0) - K * np.exp(-r * T) * si.norm.cdf(d2, 0.0, 1.0))
                 delta = si.norm.cdf(d1, 0.0, 1.0)
                 theta = (- (S * si.norm.pdf(d1, 0.0, 1.0) * sigma) / (2 * np.sqrt(T))
@@ -419,18 +689,34 @@ class DerivativeEngine:
             vega = S * si.norm.pdf(d1, 0.0, 1.0) * np.sqrt(T)
             theta_per_day = theta / 365.0
 
-            if math.isnan(premium) or math.isnan(delta):
-                return {"premium": 0.01, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+            # Guard against NaN or Inf values
+            safe_prem = float(premium) if not (math.isnan(premium) or math.isinf(premium)) else max(0.05, (S - K) if opt_type == "CE" else (K - S))
+            
+            # Enforce Black-Scholes Greeks bounds
+            if opt_type == "CE":
+                safe_delta = float(np.clip(delta, 0.0, 1.0)) if not (math.isnan(delta) or math.isinf(delta)) else (1.0 if S > K else 0.0)
+            else:
+                safe_delta = float(np.clip(delta, -1.0, 0.0)) if not (math.isnan(delta) or math.isinf(delta)) else (-1.0 if K > S else 0.0)
+
+            safe_gamma = float(max(0.0, gamma)) if not (math.isnan(gamma) or math.isinf(gamma)) else 0.0
+            safe_theta = float(theta_per_day) if not (math.isnan(theta_per_day) or math.isinf(theta_per_day)) else 0.0
+            safe_vega = float(max(0.0, vega / 100.0)) if not (math.isnan(vega) or math.isinf(vega)) else 0.0
 
             return {
-                "premium": max(0.05, float(premium)),
-                "delta": float(delta),
-                "gamma": float(gamma) if not math.isnan(gamma) else 0.0,
-                "theta": float(theta_per_day) if not math.isnan(theta_per_day) else 0.0,
-                "vega": float(vega / 100.0) if not math.isnan(vega) else 0.0
+                "premium": max(0.05, round(safe_prem, 2)),
+                "delta": round(safe_delta, 4),
+                "gamma": round(safe_gamma, 6),
+                "theta": round(safe_theta, 4),
+                "vega": round(safe_vega, 4)
             }
         except Exception:
-            return {"premium": 0.01, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+            if opt_type == "CE":
+                intrinsic = max(0.05, S - K)
+                delta = 1.0 if S > K else 0.0
+            else:
+                intrinsic = max(0.05, K - S)
+                delta = -1.0 if K > S else 0.0
+            return {"premium": round(intrinsic, 2), "delta": float(delta), "gamma": 0.0, "theta": 0.0, "vega": 0.0}
 
     # Alias for private method call compatibility
     _black_scholes = black_scholes
@@ -481,19 +767,27 @@ class DerivativeEngine:
         margin_rate = self.FUTURES_MARGIN_RATES.get(underlying, 0.15)
         futures_margin = contract_value * margin_rate
 
-        # 1. Decide Instrument Type: FUTURES vs OPTIONS
-        chosen_instrument = derivative_type.upper()
+        # 1. Decide Instrument Type: FUTURES vs OPTIONS vs SPREAD vs SELL_OPTIONS
+        chosen_instrument = derivative_type.upper().strip()
         if chosen_instrument == "AUTO":
-            # If capital is insufficient for Futures margin (or margin uses > 50% of account),
-            # strictly auto-route to Options!
-            if capital < futures_margin or futures_margin > (capital * 0.50):
-                chosen_instrument = "OPTIONS"
+            # Real Indian F&O Allocation Logic:
+            # Rangebound / Low-ADX / Chop regime -> Option Selling (Credit Spreads / Directional Writing)
+            # Trending / Breakout regime -> Futures (if large cap) or Option Buying
+            if "range" in regime.lower() or "chop" in regime.lower():
+                if capital >= futures_margin:
+                    chosen_instrument = "SELL_OPTIONS"
+                elif capital >= 25000.0:
+                    chosen_instrument = "CREDIT_SPREAD"
+                else:
+                    chosen_instrument = "OPTIONS"
             else:
-                # With large capital (e.g. ₹2.5L+ or ₹10L), check RL weights or trend strength
-                if "trend" in regime.lower() and spot_plan.ai_probability >= 0.75:
+                # Trending regime
+                if capital >= (futures_margin * 1.5) and spot_plan.ai_probability >= 0.75:
                     chosen_instrument = "FUTURES"
                 else:
                     chosen_instrument = "OPTIONS"
+
+        real_iv = iv if (iv is not None and iv > 0) else self.fetch_live_iv(spot_plan=spot_plan, ticker=underlying)
 
         # 2. Dispatch to specific plan builder
         if chosen_instrument == "FUTURES":
@@ -505,6 +799,28 @@ class DerivativeEngine:
                 lot_size=lot_size,
                 regime=regime
             )
+        elif chosen_instrument in ("SELL_OPTIONS", "SELL_OPTION", "SHORT_OPTION"):
+            return self._build_option_selling_plan(
+                spot_plan=spot_plan,
+                underlying=underlying,
+                capital=capital,
+                span_margin=futures_margin,
+                lot_size=lot_size,
+                interval=interval,
+                regime=regime,
+                iv=real_iv,
+                strike_pref=strike_pref
+            )
+        elif chosen_instrument in ("CREDIT_SPREAD", "SPREAD"):
+            return self._build_credit_spread_plan(
+                spot_plan=spot_plan,
+                underlying=underlying,
+                capital=capital,
+                lot_size=lot_size,
+                interval=interval,
+                regime=regime,
+                iv=real_iv
+            )
         else:
             return self._build_options_plan(
                 spot_plan=spot_plan,
@@ -514,8 +830,299 @@ class DerivativeEngine:
                 interval=interval,
                 strike_pref=strike_pref,
                 regime=regime,
-                iv=iv or self.DEFAULT_IV
+                iv=real_iv
             )
+
+    # -----------------------------------------------------------------------
+    # Option Selling (Writing) Plan Builder
+    # -----------------------------------------------------------------------
+
+    def _build_option_selling_plan(
+        self,
+        spot_plan: TradePlan,
+        underlying: str,
+        capital: float,
+        span_margin: float,
+        lot_size: int,
+        interval: int,
+        regime: str,
+        iv: float,
+        strike_pref: str = "AUTO"
+    ) -> DerivativeTradePlan:
+        """
+        Directional Option Selling (Writing) Strategy:
+        - When Spot is Bearish: Sell OTM Call (strike = ATM + interval). Target = 70% decay, SL = 30% rise.
+        - When Spot is Bullish: Sell OTM Put (strike = ATM - interval). Target = 70% decay, SL = 30% rise.
+        - Enforces SPAN + Exposure margin.
+        - Positive Theta (seller profits from time decay).
+        """
+        direction = "SHORT" if spot_plan.direction in ("SHORT", "bearish") else "LONG"
+        # In Indian F&O: If market is Bearish, sell CALL (CE). If market is Bullish, sell PUT (PE).
+        option_type = "CE" if direction == "SHORT" else "PE"
+        spot = spot_plan.entry_price
+        atm_strike = self._round_to_nearest(spot, interval)
+
+        # Dynamic Days to Expiry (DTE) per Index
+        dte = self.get_days_to_expiry(underlying)
+        safe_dte = max(0.05, dte)
+        T = safe_dte / 365.0
+        r = self.RISK_FREE_RATE
+        sigma = iv
+
+        # Pick OTM strike for high probability theta collection
+        if option_type == "CE":
+            chosen_strike = atm_strike + interval  # OTM Call
+        else:
+            chosen_strike = atm_strike - interval  # OTM Put
+
+        bs = self.black_scholes(spot, chosen_strike, T, r, sigma, option_type)
+        entry_premium = bs["premium"]
+        
+        # In option selling, target is premium decaying to ~30% (70% profit capture)
+        target_premium = max(0.05, round(entry_premium * 0.30, 2))
+        # Stop loss is standard 30% above entry premium
+        stop_loss_premium = round(entry_premium * 1.30, 2)
+
+        risk_per_qty = max(1.0, stop_loss_premium - entry_premium)
+        reward_per_qty = max(1.0, entry_premium - target_premium)
+        max_loss = risk_per_qty * lot_size
+        max_profit = reward_per_qty * lot_size
+        rr = max_profit / max_loss if max_loss > 0 else 0.0
+
+        contract_symbol = f"{underlying} {chosen_strike} {option_type} SELL"
+
+        # Indian Options Friction for Option Selling
+        f_breakdown = IndianFOFrictionModel.calculate_options_friction(
+            buy_premium=target_premium,
+            sell_premium=entry_premium,
+            quantity=lot_size,
+            action="SELL"
+        )
+        total_friction = f_breakdown.total_friction
+        be_exit = f_breakdown.breakeven_exit_price
+        net_profit = max_profit - total_friction
+
+        rejections = []
+        is_approved = True
+
+        if capital < span_margin:
+            is_approved = False
+            rejections.append(
+                f"Option Selling SPAN Margin Deficit: Selling 1 lot of {contract_symbol} requires ₹{span_margin:,.2f} margin. "
+                f"Your capital is ₹{capital:,.2f}. Switch to Credit Spread (requires only ~₹25k-₹35k) or Option Buying."
+            )
+
+        if entry_premium < 20.0:
+            is_approved = False
+            rejections.append(
+                f"Low Premium Warning: Option premium ₹{entry_premium:.2f} is too low for naked writing; "
+                f"tail risk exceeds reward. Sell closer to ATM strike."
+            )
+
+        if max_profit <= total_friction:
+            is_approved = False
+            rejections.append(
+                f"Selling Breakeven Deficit: Expected profit ₹{max_profit:.2f} fails to clear transaction friction ₹{total_friction:.2f}."
+            )
+
+        # Delta & Theta: For Short Call, delta is negative; for Short Put, delta is positive. Theta is POSITIVE.
+        seller_delta = -bs["delta"] if option_type == "CE" else abs(bs["delta"])
+        seller_theta = abs(bs["theta"])  # Positive daily theta income!
+
+        reasoning = (
+            f"{'✅ APPROVED' if is_approved else '⛔ REJECTED'}: {contract_symbol} (Option Writing)\n"
+            f"  ⚡ Delta: {seller_delta:+.3f} | ⏳ Theta (Income): +₹{seller_theta:.2f}/day | IV: {sigma*100:.1f}%\n"
+            f"  💰 Entry Credit: ₹{entry_premium:,.2f} | Target Buyback: ₹{target_premium:,.2f} | SL Buyback: ₹{stop_loss_premium:,.2f}\n"
+            f"  🏷️  Est. Friction: ₹{total_friction:,.2f} | Net Profit: ₹{net_profit:,.2f} | Breakeven: ₹{be_exit:,.2f}\n"
+            f"  📊 SPAN Margin: ₹{span_margin:,.2f} (1 lot = {lot_size} qty) | Max Risk: ₹{max_loss:,.2f} | R:R: {rr:.2f}:1\n"
+            f"  🎯 Spot Underlying: {spot_plan.ticker} @ ₹{spot:,.2f} ({spot_plan.direction}) | DTE: {dte:.2f} days"
+        )
+        if rejections:
+            reasoning += "\n  " + "\n  ".join(f"• {r}" for r in rejections)
+
+        return DerivativeTradePlan(
+            original_spot_plan=spot_plan,
+            instrument_type="OPTION",
+            underlying_ticker=underlying,
+            contract_symbol=contract_symbol,
+            direction=direction,
+            option_type=option_type,
+            strike_price=chosen_strike,
+            strike_type="OTM",
+            action="SELL",
+            strategy_type="DIRECTIONAL_SELLING",
+            lot_size=lot_size,
+            lots_to_trade=1,
+            total_quantity=lot_size,
+            entry_price=entry_premium,
+            target_price=target_premium,
+            stop_loss_price=stop_loss_premium,
+            margin_or_premium_required=span_margin,
+            max_loss_amount=max_loss,
+            max_profit_amount=max_profit,
+            risk_reward_ratio=rr,
+            delta=round(seller_delta, 4),
+            theta=round(seller_theta, 4),
+            gamma=round(-abs(bs["gamma"]), 6),
+            vega=round(-abs(bs["vega"]), 4),
+            days_to_expiry=round(dte, 4),
+            iv=sigma,
+            is_approved=is_approved,
+            rejection_reasons=rejections,
+            reasoning=reasoning
+        )
+
+    # -----------------------------------------------------------------------
+    # Defined-Risk Credit Spread Plan Builder
+    # -----------------------------------------------------------------------
+
+    def _build_credit_spread_plan(
+        self,
+        spot_plan: TradePlan,
+        underlying: str,
+        capital: float,
+        lot_size: int,
+        interval: int,
+        regime: str,
+        iv: float
+    ) -> DerivativeTradePlan:
+        """
+        Defined-Risk Credit Spread Strategy:
+        - Bullish: Bull Put Spread (Sell OTM PE, Buy further OTM PE as hedge wing)
+        - Bearish: Bear Call Spread (Sell OTM CE, Buy further OTM CE as hedge wing)
+        - Margin required: Capped at (Spread Width * Lot Size) + friction buffer (~₹25k-₹35k).
+        - Theta: Positive (+ve) net decay income.
+        """
+        is_bullish = spot_plan.direction in ("LONG", "bullish")
+        spot = spot_plan.entry_price
+        atm_strike = self._round_to_nearest(spot, interval)
+
+        dte = self.get_days_to_expiry(underlying)
+        safe_dte = max(0.05, dte)
+        T = safe_dte / 365.0
+        r = self.RISK_FREE_RATE
+        sigma = iv
+
+        if is_bullish:
+            # Bull Put Spread: Sell strike1 PE, Buy strike2 PE (strike2 < strike1)
+            spread_name = "BULL PUT SPREAD"
+            short_strike = atm_strike - interval
+            long_strike = atm_strike - (2 * interval)
+            opt_type = "PE"
+            direction = "LONG"
+            bs_short = self.black_scholes(spot, short_strike, T, r, sigma, "PE")
+            bs_long = self.black_scholes(spot, long_strike, T, r, sigma, "PE")
+        else:
+            # Bear Call Spread: Sell strike1 CE, Buy strike2 CE (strike2 > strike1)
+            spread_name = "BEAR CALL SPREAD"
+            short_strike = atm_strike + interval
+            long_strike = atm_strike + (2 * interval)
+            opt_type = "CE"
+            direction = "SHORT"
+            bs_short = self.black_scholes(spot, short_strike, T, r, sigma, "CE")
+            bs_long = self.black_scholes(spot, long_strike, T, r, sigma, "CE")
+
+        p_short = bs_short["premium"]
+        p_long = bs_long["premium"]
+        net_credit = max(1.0, round(p_short - p_long, 2))
+        spread_width = float(abs(short_strike - long_strike))
+        max_loss_per_share = max(1.0, spread_width - net_credit)
+
+        # Hedged SPAN margin benefit under NSE rules
+        hedged_margin = round(max_loss_per_share * lot_size + 2500.0, 2)
+
+        target_net_credit = max(0.05, round(net_credit * 0.30, 2))  # Capture 70% of credit
+        sl_net_debit = round(net_credit * 1.50, 2)
+
+        max_profit = round((net_credit - target_net_credit) * lot_size, 2)
+        max_loss = round(max_loss_per_share * lot_size, 2)
+        rr = max_profit / max_loss if max_loss > 0 else 0.0
+
+        contract_symbol = f"{underlying} {short_strike}/{long_strike} {spread_name}"
+        hedge_symbol = f"{underlying} {long_strike} {opt_type} HEDGE"
+
+        f_breakdown = IndianFOFrictionModel.calculate_spread_friction(
+            short_entry_prem=p_short,
+            short_exit_prem=target_net_credit * 0.8,
+            long_entry_prem=p_long,
+            long_exit_prem=0.05,
+            quantity=lot_size
+        )
+        total_friction = f_breakdown.total_friction
+        net_profit = max_profit - total_friction
+
+        rejections = []
+        is_approved = True
+
+        if capital < hedged_margin:
+            is_approved = False
+            rejections.append(
+                f"Credit Spread Margin Deficit: 1 lot of {spread_name} requires ₹{hedged_margin:,.2f} margin "
+                f"(Max loss ₹{max_loss:,.2f}). Available capital: ₹{capital:,.2f}."
+            )
+
+        if net_credit < 10.0:
+            is_approved = False
+            rejections.append(
+                f"Low Net Credit: Net credit of ₹{net_credit:.2f} is insufficient to justify round-trip 2-leg friction (₹{total_friction:.2f})."
+            )
+
+        if max_profit <= total_friction:
+            is_approved = False
+            rejections.append(
+                f"Spread Breakeven Deficit: Expected net profit ₹{max_profit:.2f} fails to clear transaction friction ₹{total_friction:.2f}."
+            )
+
+        net_delta = (-bs_short["delta"] + bs_long["delta"]) if opt_type == "CE" else (abs(bs_short["delta"]) - abs(bs_long["delta"]))
+        net_theta = max(0.1, abs(bs_short["theta"]) - abs(bs_long["theta"]))
+
+        reasoning = (
+            f"{'✅ APPROVED' if is_approved else '⛔ REJECTED'}: {contract_symbol}\n"
+            f"  ⚡ Net Delta: {net_delta:+.3f} | ⏳ Net Theta: +₹{net_theta:.2f}/day | IV: {sigma*100:.1f}%\n"
+            f"  💰 Short Strike: {short_strike} (₹{p_short:.2f}) | Long Hedge: {long_strike} (₹{p_long:.2f})\n"
+            f"  🏷️  Net Credit Collected: ₹{net_credit:,.2f} | Max Risk: ₹{max_loss:,.2f} | Max Profit: ₹{max_profit:,.2f}\n"
+            f"  🏷️  Est. 2-Leg Friction: ₹{total_friction:,.2f} | Net Profit: ₹{net_profit:,.2f}\n"
+            f"  📊 Hedged SPAN Margin: ₹{hedged_margin:,.2f} (1 lot = {lot_size} qty) | R:R: {rr:.2f}:1\n"
+            f"  🎯 Spot Underlying: {spot_plan.ticker} @ ₹{spot:,.2f} ({spot_plan.direction}) | DTE: {dte:.2f} days"
+        )
+        if rejections:
+            reasoning += "\n  " + "\n  ".join(f"• {r}" for r in rejections)
+
+        return DerivativeTradePlan(
+            original_spot_plan=spot_plan,
+            instrument_type="SPREAD",
+            underlying_ticker=underlying,
+            contract_symbol=contract_symbol,
+            direction=direction,
+            option_type="SPREAD",
+            strike_price=short_strike,
+            strike_type="SPREAD",
+            action="SELL",
+            strategy_type="CREDIT_SPREAD",
+            lot_size=lot_size,
+            lots_to_trade=1,
+            total_quantity=lot_size,
+            entry_price=net_credit,
+            target_price=target_net_credit,
+            stop_loss_price=sl_net_debit,
+            hedge_contract_symbol=hedge_symbol,
+            hedge_strike_price=long_strike,
+            hedge_entry_price=p_long,
+            net_credit=net_credit,
+            margin_or_premium_required=hedged_margin,
+            max_loss_amount=max_loss,
+            max_profit_amount=max_profit,
+            risk_reward_ratio=rr,
+            delta=round(net_delta, 4),
+            theta=round(net_theta, 4),
+            gamma=round(-abs(bs_short["gamma"]) + abs(bs_long["gamma"]), 6),
+            vega=round(-abs(bs_short["vega"]) + abs(bs_long["vega"]), 4),
+            days_to_expiry=round(dte, 4),
+            iv=sigma,
+            is_approved=is_approved,
+            rejection_reasons=rejections,
+            reasoning=reasoning
+        )
 
     # -----------------------------------------------------------------------
     # Futures Plan Builder
@@ -552,6 +1159,24 @@ class DerivativeEngine:
         max_profit = pts_reward * lot_size
         rr = max_profit / max_loss if max_loss > 0 else 0.0
 
+        # Real-World Indian Futures Friction & Breakeven Check
+        f_breakdown = IndianFOFrictionModel.calculate_futures_friction(
+            entry_price=spot_plan.entry_price,
+            exit_price=spot_plan.take_profit,
+            quantity=lot_size,
+            direction=direction
+        )
+        total_friction = f_breakdown.total_friction
+        be_price = f_breakdown.breakeven_exit_price
+        net_profit = max_profit - total_friction
+
+        if max_profit <= total_friction:
+            is_approved = False
+            rejections.append(
+                f"Futures Friction Deficit: Expected profit (₹{max_profit:,.2f}) fails to cover "
+                f"round-trip transaction friction (₹{total_friction:,.2f}). Breakeven price: ₹{be_price:,.2f}."
+            )
+
         # Safety check: Futures risk per trade should not exceed 2% of capital
         if max_loss > (capital * 0.025):
             is_approved = False
@@ -564,6 +1189,7 @@ class DerivativeEngine:
             f"{'✅ APPROVED' if is_approved else '⛔ REJECTED'}: {contract_symbol} ({direction})\n"
             f"  📈 Contract Value: ₹{spot_plan.entry_price * lot_size:,.2f} | Margin: ₹{futures_margin:,.2f}\n"
             f"  🎯 Target: ₹{spot_plan.take_profit:,.2f} (+₹{max_profit:,.2f}) | 🛑 SL: ₹{spot_plan.stop_loss:,.2f} (-₹{max_loss:,.2f})\n"
+            f"  🏷️  Est. Friction: ₹{total_friction:,.2f} | Net Profit: ₹{net_profit:,.2f} | Breakeven: ₹{be_price:,.2f}\n"
             f"  ⚖️  Futures R:R: {rr:.2f}:1 | Lots: 1 ({lot_size} qty) | Delta: 1.0 (Full directional leverage)"
         )
         if rejections:
@@ -617,7 +1243,10 @@ class DerivativeEngine:
         spot = spot_plan.entry_price
         atm_strike = self._round_to_nearest(spot, interval)
 
-        T = self.DAYS_TO_EXPIRY / 365.0
+        # Dynamic Days to Expiry (DTE) per Index
+        dte = self.get_days_to_expiry(underlying)
+        safe_dte = max(0.05, dte)
+        T = safe_dte / 365.0
         r = self.RISK_FREE_RATE
         sigma = iv
 
@@ -680,14 +1309,16 @@ class DerivativeEngine:
         entry_premium = chosen_bs["premium"]
         total_cost = entry_premium * lot_size
 
-        # Premium at underlying Target and Stop Loss
-        T_target = max(0.001, (self.DAYS_TO_EXPIRY - 1.5) / 365.0)
+        # Premium at underlying Target and Stop Loss (holding time scaled to remaining DTE)
+        hold_target_days = min(1.5, max(0.05, safe_dte * 0.25))
+        T_target = max(0.001, (safe_dte - hold_target_days) / 365.0)
         bs_target = self.black_scholes(spot_plan.take_profit, chosen_strike, T_target, r, sigma, option_type)
-        target_premium = max(entry_premium * 1.10, bs_target["premium"])
+        target_premium = max(entry_premium * 1.05, bs_target["premium"])
 
-        T_sl = max(0.001, (self.DAYS_TO_EXPIRY - 1.0) / 365.0)
+        hold_sl_days = min(1.0, max(0.02, safe_dte * 0.15))
+        T_sl = max(0.001, (safe_dte - hold_sl_days) / 365.0)
         bs_sl = self.black_scholes(spot_plan.stop_loss, chosen_strike, T_sl, r, sigma, option_type)
-        stop_loss_premium = min(entry_premium * 0.90, bs_sl["premium"])
+        stop_loss_premium = min(entry_premium * 0.95, bs_sl["premium"])
 
         # Risk and Reward amounts
         risk_per_qty = max(1.0, entry_premium - stop_loss_premium)
@@ -696,9 +1327,27 @@ class DerivativeEngine:
         max_profit = reward_per_qty * lot_size
         rr = max_profit / max_loss if max_loss > 0 else 0.0
 
+        # Real-World Indian Options Friction & Breakeven Check
+        f_breakdown = IndianFOFrictionModel.calculate_options_friction(
+            buy_premium=entry_premium,
+            sell_premium=target_premium,
+            quantity=lot_size
+        )
+        total_friction = f_breakdown.total_friction
+        be_premium = f_breakdown.breakeven_exit_price
+        net_profit = max_profit - total_friction
+
         # Quality Gating
         rejections = []
         is_approved = True
+
+        # Gate 0: Breakeven Check
+        if target_premium <= be_premium:
+            is_approved = False
+            rejections.append(
+                f"Options Breakeven Deficit: Target premium ₹{target_premium:.2f} fails to clear "
+                f"transaction friction breakeven ₹{be_premium:.2f} (Total friction ₹{total_friction:.2f})."
+            )
 
         # Gate 1: Affordability check
         if total_cost > capital:
@@ -732,8 +1381,9 @@ class DerivativeEngine:
             f"{'✅ APPROVED' if is_approved else '⛔ REJECTED'}: {contract_symbol} ({chosen_strike_type})\n"
             f"  ⚡ Delta: {chosen_bs['delta']:.3f} | ⏳ Theta: ₹{chosen_bs['theta']:.2f}/day | IV: {sigma*100:.1f}%\n"
             f"  💰 Entry Prem: ₹{entry_premium:,.2f} | Target: ₹{target_premium:,.2f} | SL: ₹{stop_loss_premium:,.2f}\n"
+            f"  🏷️  Est. Friction: ₹{total_friction:,.2f} | Net Profit: ₹{net_profit:,.2f} | Breakeven: ₹{be_premium:,.2f}\n"
             f"  📊 Invested: ₹{total_cost:,.2f} (1 lot = {lot_size} qty) | Max Risk: ₹{max_loss:,.2f} | R:R: {rr:.2f}:1\n"
-            f"  🎯 Spot Underlying: {spot_plan.ticker} @ ₹{spot:,.2f} ({spot_plan.direction})"
+            f"  🎯 Spot Underlying: {spot_plan.ticker} @ ₹{spot:,.2f} ({spot_plan.direction}) | DTE: {dte:.2f} days"
         )
         if rejections:
             reasoning += "\n  " + "\n  ".join(f"• {r}" for r in rejections)
@@ -747,6 +1397,8 @@ class DerivativeEngine:
             option_type=option_type,
             strike_price=chosen_strike,
             strike_type=chosen_strike_type,
+            action="BUY",
+            strategy_type="DIRECTIONAL_BUY",
             lot_size=lot_size,
             lots_to_trade=1,
             total_quantity=lot_size,
@@ -761,7 +1413,7 @@ class DerivativeEngine:
             theta=chosen_bs["theta"],
             gamma=chosen_bs["gamma"],
             vega=chosen_bs["vega"],
-            days_to_expiry=self.DAYS_TO_EXPIRY,
+            days_to_expiry=round(dte, 4),
             iv=sigma,
             is_approved=is_approved,
             rejection_reasons=rejections,
@@ -776,22 +1428,48 @@ class DerivativeEngine:
         self,
         trade: Dict[str, Any],
         current_spot: float,
-        days_elapsed: float = 0.1
+        days_elapsed: float = 0.1,
+        iv: Optional[float] = None,
     ) -> Tuple[float, float]:
         """
         Re-prices an active option trade using Black-Scholes given current spot
-        and elapsed holding time. Returns (live_premium, live_delta).
+        and elapsed holding time. Supports Option Buying, Option Selling, and Spreads.
+        Returns (live_premium_or_net_value, live_delta).
         """
-        strike = trade.get("strike", 0.0)
-        option_type = trade.get("option_type", "CE")
-        iv = trade.get("iv", self.DEFAULT_IV)
-        days_left = max(0.01, self.DAYS_TO_EXPIRY - days_elapsed)
-        T = days_left / 365.0
+        strike = trade.get("strike", 0.0) or trade.get("opt_strike", 0.0)
+        option_type = trade.get("option_type", "CE") or trade.get("opt_type", "CE")
+        underlying = trade.get("underlying_ticker") or trade.get("ticker", "NIFTY")
+        act = str(trade.get("action", "BUY")).upper()
+        strat = str(trade.get("strategy_type", "DIRECTIONAL")).upper()
 
-        if strike <= 0 or current_spot <= 0:
+        if iv is None or iv <= 0:
+            iv = trade.get("iv") or self.fetch_live_iv(ticker=underlying)
+
+        if not isinstance(current_spot, (int, float)) or math.isnan(current_spot) or current_spot <= 0.0:
             return trade.get("entry_price", 0.0), trade.get("delta", 0.5)
 
+        if not isinstance(strike, (int, float)) or math.isnan(strike) or strike <= 0.0:
+            return trade.get("entry_price", 0.0), trade.get("delta", 0.5)
+
+        if days_elapsed is None or not isinstance(days_elapsed, (int, float)) or math.isnan(days_elapsed) or math.isinf(days_elapsed) or days_elapsed < 0:
+            days_elapsed = 0.0
+
+        initial_dte = float(trade.get("days_to_expiry") or self.get_days_to_expiry(underlying))
+        days_left = max(0.001, initial_dte - days_elapsed)
+        T = days_left / 365.0
+
+        if strat == "CREDIT_SPREAD" or trade.get("instrument_type") == "SPREAD":
+            hedge_strike = trade.get("hedge_strike_price", strike)
+            bs_short = self.black_scholes(current_spot, strike, T, self.RISK_FREE_RATE, iv, option_type if option_type in ("CE", "PE") else "PE")
+            bs_long = self.black_scholes(current_spot, hedge_strike, T, self.RISK_FREE_RATE, iv, option_type if option_type in ("CE", "PE") else "PE")
+            net_val = max(0.05, round(bs_short["premium"] - bs_long["premium"], 2))
+            net_delta = (-bs_short["delta"] + bs_long["delta"]) if option_type == "CE" else (abs(bs_short["delta"]) - abs(bs_long["delta"]))
+            return net_val, round(net_delta, 4)
+
         bs = self.black_scholes(current_spot, strike, T, self.RISK_FREE_RATE, iv, option_type)
+        if act == "SELL":
+            seller_delta = -bs["delta"] if option_type == "CE" else abs(bs["delta"])
+            return bs["premium"], round(seller_delta, 4)
         return bs["premium"], bs["delta"]
 
     def _build_unsupported_plan(self, spot_plan: TradePlan, ticker: str) -> DerivativeTradePlan:

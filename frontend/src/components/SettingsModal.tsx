@@ -33,9 +33,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [keyStorage, setKeyStorage] = useState(readStoredApiKey);
   const apiKey = keyStorage.apiKey;
   const [savedSuccess, setSavedSuccess] = useState(false);
-  const [authError, setAuthError] = useState(initialAuthError);
+  const [authErrorDismissed, setAuthErrorDismissed] = useState(false);
   const storageError = keyStorage.error;
   const dialogRef = useRef<HTMLDivElement>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const authError = (initialAuthError && !authErrorDismissed);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -108,13 +117,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         error: 'Could not save the API key. It remains active for this tab only.',
       });
       setSavedSuccess(false);
-      setAuthError(false);
+      setAuthErrorDismissed(false);
       return;
     }
 
     setSavedSuccess(true);
-    setAuthError(false);
-    setTimeout(() => {
+    setAuthErrorDismissed(true);
+    timerRef.current = setTimeout(() => {
       onClose();
     }, 800);
   };

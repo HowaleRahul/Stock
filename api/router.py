@@ -74,12 +74,16 @@ def _clean_ticker_param(ticker: str) -> str:
     """Validate and clean ticker path parameter, preventing null byte injection and length overflow."""
     if not ticker or not isinstance(ticker, str):
         raise HTTPException(status_code=400, detail="Ticker symbol cannot be empty.")
-    cleaned = ticker.upper().strip().replace("\x00", "")
+    if "\x00" in ticker:
+        raise HTTPException(status_code=400, detail="Null byte injection detected in ticker symbol.")
+    cleaned = ticker.upper().strip()
     if not cleaned or len(cleaned) > 64:
         raise HTTPException(status_code=400, detail="Invalid ticker symbol length.")
+    if ".." in cleaned or "/" in cleaned or "\\" in cleaned:
+        raise HTTPException(status_code=400, detail="Invalid ticker symbol: forbidden characters detected.")
     
     import re
-    if not re.match(r"^[A-Z0-9\.\-\^\=]+$", cleaned):
+    if not re.match(r"^[A-Z0-9\._\-\^\=]+$", cleaned):
         raise HTTPException(status_code=400, detail="Invalid characters in ticker symbol.")
     return cleaned
 
@@ -277,8 +281,11 @@ async def add_symbol(
     }
     # Remove keys where value is None so yfinance / fallback defaults can trigger cleanly
     custom_info = {k: v for k, v in custom_info.items() if v is not None}
-    sym = await DataIngestionService.get_or_create_symbol(ticker_clean, custom_info=custom_info, db=db)
-    return sym
+    try:
+        sym = await DataIngestionService.get_or_create_symbol(ticker_clean, custom_info=custom_info, db=db)
+        return sym
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
 
 
 @router.post("/sync", response_model=SyncResponse, summary="Trigger data ingestion synchronization")

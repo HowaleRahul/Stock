@@ -1,3 +1,4 @@
+import asyncio
 import threading
 import collections
 import json
@@ -11,6 +12,7 @@ from typing import List, Dict, Any, Literal, Optional
 from ml.continuous_trainer import run_training_loop, get_training_telemetry
 from data.market_hours import get_market_status
 from api.auth import get_api_key, rate_limiter
+from api.config_store import _config_file_lock, update_config_atomic
 
 router = APIRouter(
     prefix="/api/v1/training",
@@ -41,13 +43,13 @@ class StartTrainingRequest(BaseModel):
         allow_inf_nan=False,
         description="Custom trading capital in INR (e.g. 10000 for 10k, 50000, 100000, etc.)"
     )
-    target_index: Optional[Literal["NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "ALL"]] = Field(
+    target_index: Optional[Literal["NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY", "ALL"]] = Field(
         default="ALL",
-        description="Target index: 'NIFTY', 'BANKNIFTY', 'SENSEX', 'FINNIFTY', or 'ALL'"
+        description="Target index: 'NIFTY', 'BANKNIFTY', 'SENSEX', 'FINNIFTY', 'MIDCPNIFTY', or 'ALL'"
     )
-    derivative_type: Optional[Literal["AUTO", "OPTIONS", "FUTURES"]] = Field(
+    derivative_type: Optional[Literal["AUTO", "OPTIONS", "FUTURES", "SELL_OPTIONS", "CREDIT_SPREAD"]] = Field(
         default="AUTO",
-        description="Derivative instrument: 'AUTO' (budget-optimized), 'OPTIONS' (CE/PE), 'FUTURES'"
+        description="Derivative instrument: 'AUTO' (budget-optimized), 'OPTIONS' (CE/PE), 'FUTURES', 'SELL_OPTIONS', 'CREDIT_SPREAD'"
     )
     strike_preference: Optional[Literal["AUTO", "ITM", "ATM", "OTM"]] = Field(
         default="AUTO",
@@ -104,35 +106,18 @@ def _persist_training_config(
     derivative_type: str,
     strike_preference: str,
 ) -> None:
-    config: Dict[str, Any] = {}
-    temp_path: Optional[str] = None
+    updates: Dict[str, Any] = {
+        "target_index": target_index,
+        "derivative_type": derivative_type,
+        "strike_preference": strike_preference,
+    }
+    if capital is not None:
+        updates["capital"] = capital
+
     try:
-        if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
-                config = json.load(config_file)
-            if not isinstance(config, dict):
-                raise ValueError("Training configuration must be a JSON object.")
-
-        if capital is not None:
-            config["capital"] = capital
-        config["target_index"] = target_index
-        config["derivative_type"] = derivative_type
-        config["strike_preference"] = strike_preference
-
-        config_dir = os.path.dirname(os.path.abspath(CONFIG_PATH))
-        with tempfile.NamedTemporaryFile(
-            "w", encoding="utf-8", dir=config_dir, prefix=".config-", suffix=".tmp", delete=False
-        ) as config_file:
-            temp_path = config_file.name
-            json.dump(config, config_file, indent=4)
-        os.replace(temp_path, CONFIG_PATH)
-    except (OSError, TypeError, ValueError) as exc:
+        update_config_atomic(updates, CONFIG_PATH)
+    except Exception as exc:
         logger.exception("Unable to persist training configuration.")
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                logger.warning("Unable to remove temporary training configuration file: %s", temp_path)
         raise HTTPException(
             status_code=500,
             detail="Unable to persist training configuration; training was not started.",
@@ -143,7 +128,7 @@ def _persist_training_config(
 async def start_training(
     payload: Optional[StartTrainingRequest] = None,
     _api_key: str = Depends(get_api_key),
-    _rate_limit: bool = Depends(rate_limiter(5))
+    _rate_limit: bool = Depends(rate_limiter(60))
 ):
     global training_thread, is_training, current_training_mode
 
@@ -154,7 +139,11 @@ async def start_training(
     chosen_strike_pref = payload.strike_preference if payload and payload.strike_preference else "AUTO"
 
     with _lock:
-        if is_training or (training_thread is not None and training_thread.is_alive()):
+        if training_thread is not None and training_thread.is_alive():
+            if stop_event.is_set():
+                return {"status": "stopping_in_progress", "detail": "Previous training loop is terminating. Please retry in a few seconds."}
+            return {"status": "already_running", "mode": current_training_mode}
+        if is_training:
             return {"status": "already_running", "mode": current_training_mode}
 
         _persist_training_config(

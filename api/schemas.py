@@ -1,6 +1,10 @@
 import datetime
+import re
 from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+# Strict whitelist regex for ticker symbols (supports global equities, crypto pairs, Indian indices, and commodities)
+TICKER_REGEX = re.compile(r"^[A-Z0-9\._\-\^\=\&]{1,64}$")
 
 class SymbolCreate(BaseModel):
     ticker: str = Field(..., description="Stock ticker symbol (e.g. RELIANCE.NS or AAPL)")
@@ -11,14 +15,21 @@ class SymbolCreate(BaseModel):
     @field_validator("ticker", mode="before")
     @classmethod
     def clean_ticker(cls, v: Any) -> str:
-        if isinstance(v, str):
-            cleaned = v.upper().strip()
-            if not cleaned:
-                raise ValueError("Ticker symbol cannot be empty or purely whitespace.")
-            return cleaned[:64]
-        if v is None or not str(v).strip():
+        if v is None:
             raise ValueError("Ticker symbol cannot be empty.")
-        return str(v).upper().strip()[:64]
+        s = str(v)
+        if "\x00" in s:
+            raise ValueError("Ticker symbol cannot contain null bytes.")
+        cleaned = s.upper().strip()[:64]
+        if not cleaned:
+            raise ValueError("Ticker symbol cannot be empty or purely whitespace.")
+        if ".." in cleaned or "/" in cleaned or "\\" in cleaned:
+            raise ValueError("Ticker symbol cannot contain path traversal characters.")
+        if not TICKER_REGEX.match(cleaned):
+            raise ValueError(
+                f"Invalid characters in ticker symbol '{s}'. Allowed characters: A-Z, 0-9, '.', '-', '^', '=', '&'."
+            )
+        return cleaned
 
     @field_validator("name", "exchange", "currency", mode="before")
     @classmethod
@@ -74,10 +85,17 @@ class SyncRequest(BaseModel):
     def clean_ticker(cls, v: Any) -> Optional[str]:
         if v is None:
             return None
-        if isinstance(v, str):
-            cleaned = v.upper().strip().replace("\x00", "")[:64]
-            return cleaned if cleaned else None
-        return str(v).upper().strip()[:64]
+        s = str(v)
+        if "\x00" in s:
+            raise ValueError("Ticker symbol cannot contain null bytes.")
+        cleaned = s.upper().strip()[:64]
+        if not cleaned:
+            return None
+        if not TICKER_REGEX.match(cleaned):
+            raise ValueError(
+                f"Invalid characters in ticker symbol '{s}'. Allowed characters: A-Z, 0-9, '.', '-', '^', '=', '&'."
+            )
+        return cleaned
 
     @field_validator("interval", mode="before")
     @classmethod

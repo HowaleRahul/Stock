@@ -125,13 +125,15 @@ class VirtualBroker:
 
     @property
     def drawdown_pct(self) -> float:
+        if self.capital <= 0:
+            return 1.0  # 100% drawdown when capital wiped out
         if self.peak_capital <= 0:
-            return 0.0
-        return (self.peak_capital - self.capital) / self.peak_capital
+            return 1.0 if self.capital <= 0 else 0.0
+        return float(np.clip((self.peak_capital - self.capital) / self.peak_capital, 0.0, 1.0))
 
     @property
     def is_suspended(self) -> bool:
-        return self.drawdown_pct >= 0.10  # 10% drawdown kill switch
+        return self.capital <= 0 or self.drawdown_pct >= 0.10  # 10% drawdown kill switch or bankrupt
 
 
 class ReplayEngine:
@@ -586,13 +588,25 @@ class ReplayEngine:
         wins = sum(1 for t in self.broker.closed_trades if t.get("pnl_pct", 0) > 0)
         win_rate = wins / total_closed if total_closed > 0 else 0.0
 
-        pnls = [t.get("pnl_pct", 0) for t in self.broker.closed_trades]
-        avg_pnl = np.mean(pnls) if pnls else 0.0
-        total_return = (
-            (self.broker.capital - self.broker.starting_capital)
-            / self.broker.starting_capital
-            * 100
-        )
+        pnls = [
+            float(t.get("pnl_pct", 0.0))
+            for t in self.broker.closed_trades
+            if t.get("pnl_pct") is not None and not np.isnan(float(t.get("pnl_pct", 0.0)))
+        ]
+        avg_pnl = float(np.mean(pnls)) if pnls else 0.0
+        std_pnl = float(np.std(pnls)) if len(pnls) > 1 else 0.0
+        sharpe = (avg_pnl / std_pnl * np.sqrt(252)) if (std_pnl > 1e-9 and not np.isnan(std_pnl)) else 0.0
+        if np.isnan(sharpe) or np.isinf(sharpe):
+            sharpe = 0.0
+
+        if self.broker.starting_capital > 0:
+            total_return = (
+                (self.broker.capital - self.broker.starting_capital)
+                / self.broker.starting_capital
+                * 100
+            )
+        else:
+            total_return = 0.0
 
         results = {
             "status": "complete",
@@ -604,6 +618,7 @@ class ReplayEngine:
             "losses": total_closed - wins,
             "win_rate": round(win_rate * 100, 2),
             "avg_pnl_pct": round(float(avg_pnl * 100), 4),
+            "sharpe_ratio": round(float(sharpe), 4),
             "total_return_pct": round(total_return, 2),
             "starting_capital": self.broker.starting_capital,
             "ending_capital": round(self.broker.capital, 2),

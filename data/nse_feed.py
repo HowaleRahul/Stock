@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("trading.data.nse_feed")
@@ -71,6 +72,8 @@ class NSEFeed:
 
     @classmethod
     def clean_symbol(cls, symbol: str) -> str:
+        if not symbol or not isinstance(symbol, str):
+            return ""
         s = symbol.upper().replace("^", "").strip()
         if s in ("NSEI", "NIFTY50", "NIFTY 50"):
             return "NIFTY"
@@ -82,25 +85,44 @@ class NSEFeed:
 
     @classmethod
     def get_option_chain_raw(cls, symbol: str) -> Optional[Dict[str, Any]]:
-        """Fetches raw JSON option chain payload from NSE."""
+        """Fetches raw JSON option chain payload from NSE with automatic retry and cookie refreshment."""
         sym = cls.clean_symbol(symbol)
-        is_index = sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+        if not sym:
+            return None
+        nse_query_sym = sym[:-3] if (sym.endswith(".NS") or sym.endswith(".BO")) else sym
+        encoded_sym = urllib.parse.quote(nse_query_sym)
+        is_index = nse_query_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
 
         if is_index:
-            url = f"{NSE_BASE_URL}/api/option-chain-indices?symbol={sym}"
+            url = f"{NSE_BASE_URL}/api/option-chain-indices?symbol={encoded_sym}"
         else:
-            url = f"{NSE_BASE_URL}/api/option-chain-equities?symbol={sym}"
+            url = f"{NSE_BASE_URL}/api/option-chain-equities?symbol={encoded_sym}"
 
-        try:
-            session = cls.get_session()
-            resp = session.get(url, headers=cls._get_headers(), timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                if "records" in data:
-                    return data
-            logger.warning(f"NSE option chain returned status {resp.status_code} for {sym}")
-        except Exception as e:
-            logger.debug(f"Failed to fetch live option chain for {sym}: {e}")
+        for attempt in range(2):
+            try:
+                session = cls.get_session()
+                resp = session.get(url, headers=cls._get_headers(), timeout=10)
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                        if isinstance(data, dict) and "records" in data:
+                            return data
+                    except Exception as json_err:
+                        logger.warning(f"NSE option chain JSON decode error for {sym}: {json_err}")
+                elif resp.status_code in (401, 403):
+                    logger.warning(f"NSE session expired/blocked (status {resp.status_code}) for {sym}. Re-warming...")
+                    cls._session = None
+                    cls._last_warmed_at = 0.0
+                    continue
+                else:
+                    logger.warning(f"NSE option chain returned status {resp.status_code} for {sym}")
+                    break
+            except Exception as e:
+                logger.debug(f"Attempt {attempt + 1} failed to fetch live option chain for {sym}: {e}")
+                cls._session = None
+                cls._last_warmed_at = 0.0
+                if attempt == 0:
+                    time.sleep(0.5)
 
         return None
 
@@ -129,8 +151,8 @@ class NSEFeed:
                 total_put_oi += pe.get("openInterest", 0)
                 total_put_vol += pe.get("totalTradedVolume", 0)
 
-        pcr_oi = total_put_oi / total_call_oi if total_call_oi > 0 else 1.0
-        pcr_vol = total_put_vol / total_call_vol if total_call_vol > 0 else 1.0
+        pcr_oi = total_put_oi / total_call_oi if total_call_oi > 0 else (100.0 if total_put_oi > 0 else 1.0)
+        pcr_vol = total_put_vol / total_call_vol if total_call_vol > 0 else (100.0 if total_put_vol > 0 else 1.0)
 
         return round(pcr_oi, 3), round(pcr_vol, 3), total_put_oi, total_call_oi
 
@@ -155,11 +177,17 @@ class NSEFeed:
             k = row.get("strikePrice")
             if k is None:
                 continue
-            strikes.append(k)
-            ce = row.get("CE", {})
-            pe = row.get("PE", {})
-            call_oi_map[k] = ce.get("openInterest", 0) if ce else 0
-            put_oi_map[k] = pe.get("openInterest", 0) if pe else 0
+            try:
+                k_val = float(k)
+                if math.isnan(k_val) or math.isinf(k_val):
+                    continue
+            except (ValueError, TypeError):
+                continue
+            strikes.append(k_val)
+            ce = row.get("CE", {}) or {}
+            pe = row.get("PE", {}) or {}
+            call_oi_map[k_val] = float(ce.get("openInterest", 0) or 0)
+            put_oi_map[k_val] = float(pe.get("openInterest", 0) or 0)
 
         strikes = sorted(list(set(strikes)))
         if not strikes:
@@ -174,10 +202,10 @@ class NSEFeed:
             for k in strikes:
                 # Call seller loss if settlement > k
                 if settlement > k:
-                    loss += (settlement - k) * call_oi_map.get(k, 0)
+                    loss += (settlement - k) * call_oi_map.get(k, 0.0)
                 # Put seller loss if settlement < k
                 elif settlement < k:
-                    loss += (k - settlement) * put_oi_map.get(k, 0)
+                    loss += (k - settlement) * put_oi_map.get(k, 0.0)
 
             if loss < min_loss:
                 min_loss = loss
@@ -191,29 +219,41 @@ class NSEFeed:
         Fetches daily Institutional FII / DII activity in Indian cash market.
         """
         url = f"{NSE_BASE_URL}/api/fiidiiTradeReact"
-        try:
-            session = cls.get_session()
-            resp = session.get(url, headers=cls._get_headers(), timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                fii_net = 0.0
-                dii_net = 0.0
-                for item in data:
-                    cat = item.get("category", "").upper()
-                    val = float(item.get("netValue", 0.0))
-                    if "FII" in cat or "FPI" in cat:
-                        fii_net += val
-                    elif "DII" in cat:
-                        dii_net += val
+        for attempt in range(2):
+            try:
+                session = cls.get_session()
+                resp = session.get(url, headers=cls._get_headers(), timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    fii_net = 0.0
+                    dii_net = 0.0
+                    for item in data:
+                        cat = item.get("category", "").upper()
+                        try:
+                            val = float(item.get("netValue", 0.0) or 0.0)
+                        except (ValueError, TypeError):
+                            val = 0.0
+                        if "FII" in cat or "FPI" in cat:
+                            fii_net += val
+                        elif "DII" in cat:
+                            dii_net += val
 
-                return {
-                    "fii_net_crores": round(fii_net, 2),
-                    "dii_net_crores": round(dii_net, 2),
-                    "sentiment": "BULLISH" if (fii_net + dii_net) > 0 else "BEARISH",
-                    "timestamp": time.time(),
-                }
-        except Exception as e:
-            logger.debug(f"Failed to fetch FII/DII activity: {e}")
+                    return {
+                        "fii_net_crores": round(fii_net, 2),
+                        "dii_net_crores": round(dii_net, 2),
+                        "sentiment": "BULLISH" if (fii_net + dii_net) > 0 else "BEARISH",
+                        "timestamp": time.time(),
+                    }
+                elif resp.status_code in (401, 403):
+                    cls._session = None
+                    cls._last_warmed_at = 0.0
+                    continue
+                else:
+                    break
+            except Exception as e:
+                logger.debug(f"Failed to fetch FII/DII activity (attempt {attempt + 1}): {e}")
+                cls._session = None
+                cls._last_warmed_at = 0.0
 
         return {
             "fii_net_crores": 0.0,
@@ -221,3 +261,38 @@ class NSEFeed:
             "sentiment": "NEUTRAL",
             "timestamp": time.time(),
         }
+
+    @classmethod
+    def get_india_vix(cls) -> Optional[float]:
+        """
+        Fetches live India VIX from NSE India allIndices API.
+        Returns percentage (e.g. 14.5) or None on failure.
+        """
+        url = f"{NSE_BASE_URL}/api/allIndices"
+        for attempt in range(2):
+            try:
+                session = cls.get_session()
+                resp = session.get(url, headers=cls._get_headers(), timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for item in data.get("data", []):
+                        idx_name = item.get("index", "").upper().replace(" ", "")
+                        if "INDIAVIX" in idx_name or "VIX" in idx_name:
+                            try:
+                                val = float(item.get("last", 0.0) or 0.0)
+                                if val > 0:
+                                    return round(val, 2)
+                            except (ValueError, TypeError):
+                                pass
+                elif resp.status_code in (401, 403):
+                    cls._session = None
+                    cls._last_warmed_at = 0.0
+                    continue
+                else:
+                    break
+            except Exception as e:
+                logger.debug(f"Failed to fetch India VIX from NSE (attempt {attempt + 1}): {e}")
+                cls._session = None
+                cls._last_warmed_at = 0.0
+
+        return None

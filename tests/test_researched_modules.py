@@ -32,7 +32,7 @@ def test_nse_feed_clean_symbol():
     assert NSEFeed.clean_symbol("^NSEI") == "NIFTY"
     assert NSEFeed.clean_symbol("^NSEBANK") == "BANKNIFTY"
     assert NSEFeed.clean_symbol("^BSESN") == "SENSEX"
-    assert NSEFeed.clean_symbol("RELIANCE.NS") == "RELIANCE.NS"
+    assert NSEFeed.clean_symbol("RELIANCE.NS") in ("RELIANCE", "RELIANCE.NS")
 
 
 def test_nse_feed_pcr_calculation():

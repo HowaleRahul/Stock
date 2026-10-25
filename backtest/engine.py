@@ -179,25 +179,35 @@ class Backtester:
         
         # Calculate Metrics
         strat_returns = results_df["Strategy_Equity"].pct_change().dropna()
+        strat_returns = strat_returns.replace([np.inf, -np.inf], np.nan).dropna()
         
         # Win Rate is now properly calculated from the discrete trades, not daily bars
-        real_win_rate = (trades_won / total_trades) if total_trades > 0 else 0
+        real_win_rate = (trades_won / total_trades) if total_trades > 0 else 0.0
         
-        gross_profits = strat_returns[strat_returns > 0].sum()
-        gross_losses = abs(strat_returns[strat_returns < 0].sum())
-        profit_factor = float(gross_profits / gross_losses) if gross_losses != 0 else (999.0 if gross_profits > 0 else 0.0)
+        gross_profits = float(strat_returns[strat_returns > 0].sum()) if not strat_returns.empty else 0.0
+        gross_losses = float(abs(strat_returns[strat_returns < 0].sum())) if not strat_returns.empty else 0.0
+        profit_factor = float(gross_profits / gross_losses) if gross_losses > 1e-9 else (999.0 if gross_profits > 0 else 0.0)
         
         daily_rf = 0.05 / 252 
         excess_returns = strat_returns - daily_rf
-        sharpe = (excess_returns.mean() / excess_returns.std()) * np.sqrt(252) if (len(excess_returns) > 1 and excess_returns.std() > 0) else 0.0
+        ret_std = float(excess_returns.std()) if len(excess_returns) > 1 else 0.0
+        ret_mean = float(excess_returns.mean()) if len(excess_returns) > 0 else 0.0
+        if ret_std > 1e-9 and not np.isnan(ret_std) and not np.isinf(ret_std):
+            sharpe = (ret_mean / ret_std) * np.sqrt(252)
+        else:
+            sharpe = 0.0
         if np.isnan(sharpe) or np.isinf(sharpe):
             sharpe = 0.0
         
         rolling_max = results_df["Strategy_Equity"].cummax()
-        drawdown = (results_df["Strategy_Equity"] - rolling_max) / rolling_max
+        safe_peak = rolling_max.copy()
+        safe_peak[safe_peak <= 0] = np.nan
+        drawdown = (results_df["Strategy_Equity"] - safe_peak) / safe_peak
+        drawdown = drawdown.fillna(-1.0)
         max_drawdown = float(drawdown.min()) if not drawdown.empty else 0.0
         if np.isnan(max_drawdown) or np.isinf(max_drawdown):
-            max_drawdown = 0.0
+            max_drawdown = -1.0 if current_equity <= 0 else 0.0
+        max_drawdown = float(np.clip(max_drawdown, -1.0, 0.0))
         
         metrics = {
             "Total_Return": (current_equity - 1.0) * 100,

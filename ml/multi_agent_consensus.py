@@ -20,6 +20,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import math
+import numpy as np
+
 logger = logging.getLogger("trading.ml.multi_agent")
 
 
@@ -47,48 +50,78 @@ class MultiAgentConsensusEngine:
     """Orchestrates collaborative financial multi-agent decision analysis."""
 
     @staticmethod
+    def _safe_float(val: Any, default: float = 0.0, min_val: Optional[float] = None, max_val: Optional[float] = None) -> float:
+        """Safely extracts a finite float, avoiding None, NaN, inf, or bad types."""
+        if val is None:
+            res = default
+        else:
+            try:
+                res = float(val)
+                if math.isnan(res) or math.isinf(res):
+                    res = default
+            except (ValueError, TypeError):
+                res = default
+        if min_val is not None:
+            res = max(min_val, res)
+        if max_val is not None:
+            res = min(max_val, res)
+        return res
+
+    @classmethod
     def evaluate(
+        cls,
         ticker: str,
-        regime_data: Dict[str, Any],
-        setup_signals: List[Any],
+        regime_data: Optional[Dict[str, Any]],
+        setup_signals: Optional[List[Any]],
         options_data: Optional[Dict[str, Any]] = None,
         fundamental_data: Optional[Dict[str, Any]] = None,
         sentiment_data: Optional[Dict[str, Any]] = None,
     ) -> MultiAgentVerdict:
         """Runs the multi-agent consensus workflow."""
         reports: List[AgentReport] = []
+        reg_info = regime_data if isinstance(regime_data, dict) else {}
+        setups_list = setup_signals if isinstance(setup_signals, list) else []
 
         # -------------------------------------------------------------------
         # 1. Technical Analyst Agent
         # -------------------------------------------------------------------
-        bull_count = sum(1 for s in setup_signals if getattr(s, "signal", "").lower() == "bullish")
-        bear_count = sum(1 for s in setup_signals if getattr(s, "signal", "").lower() == "bearish")
-        total_setups = max(1, len(setup_signals))
+        bull_count = 0
+        bear_count = 0
+        for s in setups_list:
+            sig = getattr(s, "signal", None) or (s.get("signal") if isinstance(s, dict) else "")
+            sig_str = str(sig).lower()
+            if sig_str == "bullish":
+                bull_count += 1
+            elif sig_str == "bearish":
+                bear_count += 1
+
+        total_setups = max(1, len(setups_list))
 
         tech_stance = "NEUTRAL"
         tech_conviction = 0.5
         if bull_count > bear_count:
             tech_stance = "BULLISH"
-            tech_conviction = min(0.95, 0.5 + (bull_count - bear_count) / total_setups * 0.5)
+            tech_conviction = min(0.95, max(0.5, 0.5 + (bull_count - bear_count) / total_setups * 0.5))
         elif bear_count > bull_count:
             tech_stance = "BEARISH"
-            tech_conviction = min(0.95, 0.5 + (bear_count - bull_count) / total_setups * 0.5)
+            tech_conviction = min(0.95, max(0.5, 0.5 + (bear_count - bull_count) / total_setups * 0.5))
 
         tech_report = AgentReport(
             agent_name="Technical Analyst",
             stance=tech_stance,
             conviction=tech_conviction,
-            thesis=f"Confluence of {bull_count} bullish vs {bear_count} bearish setups in {regime_data.get('regime', 'unknown')} regime.",
-            key_metrics={"bull_setups": bull_count, "bear_setups": bear_count, "regime": regime_data.get("regime")},
+            thesis=f"Confluence of {bull_count} bullish vs {bear_count} bearish setups in {reg_info.get('regime', 'unknown')} regime.",
+            key_metrics={"bull_setups": bull_count, "bear_setups": bear_count, "regime": reg_info.get("regime")},
         )
         reports.append(tech_report)
 
         # -------------------------------------------------------------------
         # 2. Derivatives Analyst Agent (PCR, GEX, Max Pain)
         # -------------------------------------------------------------------
-        opt_info = options_data or {}
-        pcr = opt_info.get("pcr_oi", 1.0)
-        gex_regime = opt_info.get("gex_regime", "NEUTRAL")
+        opt_info = options_data if isinstance(options_data, dict) else {}
+        pcr = cls._safe_float(opt_info.get("pcr_oi"), default=1.0, min_val=0.0, max_val=100.0)
+        gex_regime = str(opt_info.get("gex_regime") or "NEUTRAL").upper().strip()
+        max_pain = opt_info.get("max_pain")
 
         deriv_stance = "NEUTRAL"
         deriv_conviction = 0.5
@@ -103,19 +136,28 @@ class MultiAgentConsensusEngine:
         else:
             deriv_thesis = f"Derivative positioning balanced (PCR: {pcr:.2f}, GEX: {gex_regime})."
 
+        if max_pain is not None:
+            try:
+                deriv_thesis += f" Max-Pain Strike: ₹{float(max_pain):,.0f}."
+            except (ValueError, TypeError):
+                pass
+
         deriv_report = AgentReport(
             agent_name="Derivatives Analyst",
             stance=deriv_stance,
             conviction=deriv_conviction,
             thesis=deriv_thesis,
-            key_metrics={"pcr": pcr, "gex_regime": gex_regime},
+            key_metrics={"pcr": pcr, "gex_regime": gex_regime, "max_pain": max_pain},
         )
         reports.append(deriv_report)
 
         # -------------------------------------------------------------------
         # 3. Fundamental Analyst Agent (Piotroski F-Score)
         # -------------------------------------------------------------------
-        f_score = (fundamental_data or {}).get("piotroski_score", 6)
+        fund_info = fundamental_data if isinstance(fundamental_data, dict) else {}
+        f_score_raw = cls._safe_float(fund_info.get("piotroski_score"), default=6.0, min_val=0.0, max_val=9.0)
+        f_score = int(round(f_score_raw))
+
         if f_score >= 7:
             fund_stance = "BULLISH"
             fund_conv = 0.75
@@ -141,9 +183,9 @@ class MultiAgentConsensusEngine:
         # -------------------------------------------------------------------
         # 4. Sentiment & News Analyst Agent
         # -------------------------------------------------------------------
-        sent_info = sentiment_data or {}
-        sent_score = sent_info.get("mean_score", 0.0)
-        fii_flow = sent_info.get("fii_net_crores", 0.0)
+        sent_info = sentiment_data if isinstance(sentiment_data, dict) else {}
+        sent_score = cls._safe_float(sent_info.get("mean_score"), default=0.0, min_val=-1.0, max_val=1.0)
+        fii_flow = cls._safe_float(sent_info.get("fii_net_crores"), default=0.0, min_val=-1e6, max_val=1e6)
 
         if sent_score >= 0.15 or fii_flow > 500:
             sent_stance = "BULLISH"
@@ -181,7 +223,7 @@ class MultiAgentConsensusEngine:
         # -------------------------------------------------------------------
         # 6. Chief Risk Officer Ruling
         # -------------------------------------------------------------------
-        regime_str = regime_data.get("regime", "range-bound")
+        regime_str = str(reg_info.get("regime", "range-bound") or "range-bound").lower()
         if regime_str == "crash":
             risk_ruling = "REJECT LONG TRADES: Crash regime active. Strict capital defense protocol."
         elif len(bear_args) > len(bull_args) and tech_stance == "BULLISH":
@@ -192,10 +234,19 @@ class MultiAgentConsensusEngine:
         # -------------------------------------------------------------------
         # 7. Consensus Synthesis
         # -------------------------------------------------------------------
-        total_bull_weight = sum(r.conviction for r in reports if r.stance == "BULLISH")
-        total_bear_weight = sum(r.conviction for r in reports if r.stance == "BEARISH")
+        total_bull_weight = 0.0
+        total_bear_weight = 0.0
+        for r in reports:
+            c = cls._safe_float(r.conviction, default=0.5, min_val=0.0, max_val=1.0)
+            r.conviction = c
+            if r.stance == "BULLISH":
+                total_bull_weight += c
+            elif r.stance == "BEARISH":
+                total_bear_weight += c
+
         denom = max(0.01, total_bull_weight + total_bear_weight)
 
+        # Check for clear majority conviction
         if total_bull_weight > total_bear_weight and total_bull_weight >= 1.2:
             consensus_sig = "bullish"
             confidence = min(0.92, total_bull_weight / (denom + 0.5))
@@ -204,10 +255,27 @@ class MultiAgentConsensusEngine:
             consensus_sig = "bearish"
             confidence = min(0.92, total_bear_weight / (denom + 0.5))
             action = f"BUY {ticker} Put / Short Future with target trailing stop."
+        elif total_bull_weight >= 1.2 and total_bear_weight >= 1.2:
+            # Tie-breaker when both bull and bear weights are high and equal:
+            # Break tie using Technical Analyst stance and CRO risk ruling
+            if tech_stance == "BULLISH" and "REJECT" not in risk_ruling:
+                consensus_sig = "bullish"
+                confidence = 0.55
+                action = f"BUY {ticker} Call / Long Future (Technical Tie-Breaker)."
+            elif tech_stance == "BEARISH":
+                consensus_sig = "bearish"
+                confidence = 0.55
+                action = f"BUY {ticker} Put / Short Future (Technical Tie-Breaker)."
+            else:
+                consensus_sig = "neutral"
+                confidence = 0.50
+                action = "STAND ASIDE: Bull and bear agents locked in deadlock."
         else:
             consensus_sig = "neutral"
             confidence = 0.50
             action = "STAND ASIDE: Insufficient multi-agent conviction for new risk entry."
+
+        confidence = float(np.clip(confidence, 0.0, 1.0))
 
         return MultiAgentVerdict(
             consensus_signal=consensus_sig,
@@ -218,3 +286,96 @@ class MultiAgentConsensusEngine:
             agent_reports=reports,
             recommended_action=action,
         )
+
+    @classmethod
+    def fetch_live_context(
+        cls,
+        ticker: str,
+        spot: Optional[float] = None
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Fetches live Indian derivatives data (PCR, Max-Pain, GEX regime) and
+        FII/DII institutional cash market net flows via NSEFeed and GEXEngine.
+
+        Returns:
+            (options_data, sentiment_data)
+        """
+        from data.nse_feed import NSEFeed
+        from ml.gex_engine import GEXEngine
+
+        clean_sym = NSEFeed.clean_symbol(ticker)
+        options_data: Dict[str, Any] = {
+            "pcr_oi": 1.0,
+            "pcr_volume": 1.0,
+            "gex_regime": "NEUTRAL",
+            "max_pain": spot,
+            "net_gex_crores": 0.0,
+        }
+        sentiment_data: Dict[str, Any] = {
+            "fii_net_crores": 0.0,
+            "dii_net_crores": 0.0,
+            "mean_score": 0.0,
+        }
+
+        # 1. Fetch Option Chain and derive PCR, Max-Pain, and GEX Regime
+        try:
+            raw_chain = NSEFeed.get_option_chain_raw(clean_sym)
+            if raw_chain and "records" in raw_chain:
+                pcr_oi, pcr_vol, put_oi, call_oi = NSEFeed.calculate_pcr(raw_chain)
+                max_pain = NSEFeed.calculate_max_pain(raw_chain) or spot
+
+                # Extract strike rows for GEX calculation
+                strikes_data = []
+                data_rows = raw_chain.get("records", {}).get("data", [])
+                for row in data_rows:
+                    k = row.get("strikePrice")
+                    if k is not None:
+                        try:
+                            k_val = float(k)
+                        except (ValueError, TypeError):
+                            continue
+                        ce = row.get("CE") or {}
+                        pe = row.get("PE") or {}
+                        strikes_data.append({
+                            "strike": k_val,
+                            "call_oi": float(ce.get("openInterest", 0) or 0),
+                            "put_oi": float(pe.get("openInterest", 0) or 0),
+                            "call_vol": float(ce.get("totalTradedVolume", 0) or 0),
+                            "put_vol": float(pe.get("totalTradedVolume", 0) or 0),
+                        })
+
+                # Analyze Gamma Exposure
+                if strikes_data:
+                    lot_size = 25 if "NIFTY" in clean_sym and "BANK" not in clean_sym else (15 if "BANK" in clean_sym else 25)
+                    gex_res = GEXEngine.analyze_chain_gex(
+                        spot=spot or float(strikes_data[len(strikes_data) // 2]["strike"]),
+                        strikes_data=strikes_data,
+                        lot_size=lot_size,
+                    )
+                    gex_regime = gex_res.get("regime", "NEUTRAL")
+                    net_gex = gex_res.get("net_gex_crores", 0.0)
+                else:
+                    gex_regime = "NEUTRAL"
+                    net_gex = 0.0
+
+                options_data = {
+                    "pcr_oi": pcr_oi,
+                    "pcr_volume": pcr_vol,
+                    "max_pain": max_pain,
+                    "gex_regime": gex_regime,
+                    "net_gex_crores": net_gex,
+                }
+        except Exception as e:
+            logger.debug(f"Failed to fetch live option chain for {ticker}: {e}")
+
+        # 2. Fetch Institutional FII / DII net cash flows
+        try:
+            fii_dii = NSEFeed.get_fii_dii_activity()
+            if fii_dii and isinstance(fii_dii, dict):
+                sentiment_data["fii_net_crores"] = float(fii_dii.get("fii_net_crores", 0.0) or 0.0)
+                sentiment_data["dii_net_crores"] = float(fii_dii.get("dii_net_crores", 0.0) or 0.0)
+                sentiment_data["sentiment"] = fii_dii.get("sentiment", "NEUTRAL")
+        except Exception as e:
+            logger.debug(f"Failed to fetch FII/DII activity for {ticker}: {e}")
+
+        return options_data, sentiment_data

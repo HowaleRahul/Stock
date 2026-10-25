@@ -12,7 +12,7 @@ Primary focus:
 1. **Indian Stock Market F&O Specialization**: The system specializes WHOLE AND SOLE in Futures & Options (F&O) trading on the Indian stock market (NSE & BSE). Cash equity delivery, US markets, and cryptocurrencies have been completely removed.
 2. **Supported Underlyings**: NIFTY 50 (`^NSEI`), BANK NIFTY (`^NSEBANK`), BSE SENSEX (`^BSESN`), FINNIFTY, and MIDCPNIFTY with exact exchange lot sizes, strike intervals, and weekly expiry schedules.
 3. **Dual Scalp & Swing Framework**: Fast intraday scalp trading (`5m`, `15m`) with tight ATR barriers, and multiday positional swing trading (`1h`, `1d`) with wide trailing stops.
-4. **Derivatives Execution Engine**: All trade allocations execute strictly as Index Options (CE/PE calls & puts with Black-Scholes Delta, Theta, Gamma, IV) or linear Index Futures depending on user capital tier and market regime. Naked options selling is prohibited.
+4. **Derivatives Execution Engine**: All trade allocations execute strictly as Index Options (CE/PE calls & puts with Black-Scholes Delta, Theta, Gamma, Vega, IV), directional option selling, credit spreads (Bull Put & Bear Call spreads), or linear Index Futures depending on user capital tier, volatility regime, and SPAN margin availability. Naked unlimited-risk option selling without margin gating is prohibited; retail accounts deploy defined-risk credit spreads, while institutional allocations harvest positive theta decay (+\Theta > 0) with exchange SPAN + exposure margins.
 5. **Continuous AI Retraining**: Fresh stacking classifiers trained from scratch on historical Indian index data, coupled with contextual bandit strike selection and TimescaleDB hypertable persistence.
 
 ---
@@ -156,7 +156,7 @@ Stock/
 │   └── package.json          # Node dependencies & Vite config
 │
 ├── scripts/                  # Migration & maintenance scripts
-└── tests/                    # 16 test suites covering 176 test cases (100% passing)
+└── tests/                    # 17 test suites covering 307 test cases (288 passed, 19 skipped, 0 failed)
 ```
 
 ---
@@ -240,6 +240,7 @@ All endpoints reside under the `/api/v1` namespace:
 | | | `/option-chart` | GET | Synthetic option contract historical bars |
 | | | `/live-tick/{ticker}` | GET | High-frequency quote tick |
 | | | `/option-tick` | GET | Option contract live quote tick |
+| | | `/option-strategy-payoff` | GET | Multi-leg option payoff analysis & breakeven calculation |
 | **Dashboard** | `/api/v1/dashboard`| `/metrics` | GET | Real-time P&L, win-rate, capital |
 | | | `/portfolio` | GET | Active positions & account balance |
 | | | `/analytics` | GET | Comprehensive performance statistics |
@@ -309,18 +310,24 @@ Starts container `trading_timescaledb` on `127.0.0.1:5432` with volume `pgdata`.
 | **TimescaleDB Storage** | Production-ready | Verified | Stores bars and news; requires Docker container online. |
 | **Dual Persistence** | Production-ready | Verified | Automatically falls back to JSON files if DB is offline. |
 | **Core Setup Engine** | Production-ready | Verified | 5 deterministic setups + ADX regime detection. |
-| **Swing Toolkit** | Production-ready | Verified | 3 scanners, 8-factor checklist, 15m ORB volume gate. |
+| **Swing Toolkit** | Production-ready | Verified | 3 scanners, 8-factor checklist, 15m ORB volume gate, candidate filtering toolbar, and 45s cancellation. |
 | **Real-Time Data Feeds**| Production-ready | Verified | TradingView-ta with bounded TTL caching & yfinance fallback. |
 | **Paper Trading Daemon**| Production-ready | Verified | Autonomous 1-hour scan loop, Kelly sizing, MTM drawdown lock. |
 | **Risk Engine** | Production-ready | Verified | 2% risk cap, 1.5:1 min R:R, ATR stops, ruin probability. |
-| **Options Engine** | Feature-complete | Verified | Black-Scholes Greeks, long CE/PE only; live execution blocked. |
-| **RL Contextual Bandit**| Feature-complete | Verified | Thompson Sampling updates setup weights on trade outcomes. |
-| **Replay Engine** | Feature-complete | Verified | Next-bar open execution, STT friction, isolated weights. |
-| **Continuous Trainer** | Feature-complete | Verified | SGDClassifier online partial_fit + 24/7 offline historical replay telemetry & live portfolio scanning. |
-| **Walk-Forward Backtest**| Feature-complete | Verified | Real-world friction (0.1%), label-safe test window isolation. |
-| **API Authentication** | Production-ready | Verified | Fail-closed production default, timing-safe key comparison. |
-| **Public APIs (Frankfurter & RSS)** | Production-ready | Verified | Keyless ECB USD/INR rates + Indian Market RSS financial sentiment feed. |
+| **Options Engine** | Production-ready | Verified | Black-Scholes Greeks (Delta, Gamma, Theta, Vega), dynamic DTE per index, dynamic India VIX IV, intrinsic value expiry settlement, long CE/PE, directional short CE/PE, Bull Put / Bear Call credit spreads, SPAN margin gating, and positive theta decay notation. |
+| **Option Selling & Spreads** | Production-ready | Verified | Automated directional short option selection, credit spreads, SPAN/exposure margin checks, analytical breakeven exit pricing, and interactive payoff curve generation via `/option-strategy-payoff`. |
+| **Drawdown Circuit Breakers** | Production-ready | Verified | Normalized 2% daily capital loss gate, 24h cooldown after 3 losses, disk-persisted state, 100% drawdown bankrupt halt. |
+| **Multi-Agent Consensus** | Production-ready | Verified | Synthesizes Tech, Deriv, Fund, Sent agents with live PCR/Max Pain/GEX context, Bull vs Bear debate, tie-breakers, and CRO gating. |
+| **RL Contextual Bandit**| Production-ready | Verified | Thompson Sampling with R-multiple reward scaling, prior discounting & MAB execution tuning. |
+| **Replay Engine** | Feature-complete | Verified | Next-bar open execution, STT friction, isolated weights, flat Sharpe denominator guard. |
+| **Continuous Trainer** | Production-ready | Verified | SGDClassifier online partial_fit, 24/7 offline historical replay telemetry, heap-capped closed trades, and clean shutdown. |
+| **Walk-Forward Backtest**| Production-ready | Verified | Real-world friction (0.1%), label-safe test window isolation, math finite bounds, zero return variance guard. |
+| **F&O Friction Model** | Production-ready | Verified | Statutory SEBI STT (0.1% opt sell, 0.02% fut sell), ₹20 brokerage, GST 18%, Stamp Duty, 4-leg spread friction, and analytical breakeven gating. |
+| **Intraday MIS Square-Off** | Production-ready | Verified | Enforced 15:15 IST automated square-off on open intraday trades, eliminating RMS broker penalty fees. |
+| **API Authentication & Rate Limiting** | Production-ready | Verified | Fail-closed production default, route-template grouped rate limits preventing path parameter bypasses, validated XFF client IPs, and timing-safe key comparison. |
+| **Public APIs (Frankfurter & RSS)** | Production-ready | Verified | Keyless ECB USD/INR rates + Indian Market RSS financial sentiment feed with strict port-443 SSRF defense, 0.0.0.0 rejection, 5MB pre-parse XML caps, and XML entity defenses. |
+| **Unified Config & File Concurrency** | Production-ready | Verified | Re-entrant RLock with retry-safe atomic replacement across training, dashboard, strategy store, and swing watchlist to prevent Windows file-lock contention. |
 | **SmartAPI Broker** | Feature-complete | Verified | Angel One SmartAPI RFC 6238 TOTP auth + SEBI Algo-ID tagged execution. |
-| **Trade Dossier & History** | Production-ready | Verified | Full 360° trade specs modal (Greeks, SL/TP, trailing ratchet, AI conf, setups) + closed trade history table. |
-| **Active Frontend SPA** | Production-ready | Verified | 8 functional pages, TypeScript clean, Vite builds in <2s with sentiment pulse widget & trade dossier. |
-| **Live Broker Execution**| Scaffolding only | Intentionally Blocked | SEBI compliance checks in place; order placement fails closed without live flag. |
+| **Trade Dossier & History** | Production-ready | Verified | Full 360° trade specs modal (Greeks with Vega and positive Theta, SL/TP, trailing ratchet, AI conf, setups) + closed trade history table with ARIA dialog & focus trap. |
+| **Active Frontend SPA** | Production-ready | Verified | 8 functional pages, 0 Oxlint warnings, 0 TypeScript errors, Vite build in 2.28s, interactive option strategy payoff curves, credit spread builder, positive theta badges, localized `<ErrorBoundary compact>` wrappers, and mobile-responsive tables. |
+| **Live Broker Execution**| Feature-complete | Fails Closed | Live execution engine with FO ticker matching, position deduplication, BFO/NFO routing, Drawdown Circuit Breaker, parity for short options exit direction, and consensus gating; fails closed in dev mode. |
