@@ -98,6 +98,7 @@ class LiveMarketLearner:
             self.tickers = tickers or DEFAULT_TARGET_TICKERS
 
         self.min_ai_confidence = min_ai_confidence
+        self.min_consensus_weight = float(cfg.get("min_consensus_weight", 1.2))
         self.stt_slippage_pct = stt_slippage_pct
         self.log_callback = log_callback
 
@@ -171,10 +172,15 @@ class LiveMarketLearner:
 
         for trade in self.open_trades:
             underlying = trade.get("underlying_ticker", trade["ticker"])
-            quote = RealTimeDataFeed.get_realtime_quote_sync(underlying)
-            spot_ltp = quote.get("ltp", 0.0)
+            try:
+                quote = RealTimeDataFeed.get_realtime_quote_sync(underlying)
+                raw_ltp = quote.get("ltp") if isinstance(quote, dict) else None
+                spot_ltp = float(raw_ltp) if (raw_ltp is not None and float(raw_ltp) > 0) else 0.0
+            except Exception:
+                spot_ltp = 0.0
+
             if spot_ltp <= 0:
-                spot_ltp = trade.get("entry_spot", trade["entry_price"])
+                spot_ltp = float(trade.get("entry_spot", trade.get("entry_price", 0.0)))
 
             inst_type = trade.get("instrument_type", "EQUITY")
             entry_p = trade["entry_price"]
@@ -232,8 +238,15 @@ class LiveMarketLearner:
 
         for trade in self.open_trades:
             underlying = trade.get("underlying_ticker", trade["ticker"])
-            quote = RealTimeDataFeed.get_realtime_quote_sync(underlying)
-            spot_ltp = quote.get("ltp", 0.0)
+            try:
+                quote = RealTimeDataFeed.get_realtime_quote_sync(underlying)
+                raw_ltp = quote.get("ltp") if isinstance(quote, dict) else None
+                spot_ltp = float(raw_ltp) if (raw_ltp is not None and float(raw_ltp) > 0) else 0.0
+            except Exception:
+                spot_ltp = 0.0
+
+            if spot_ltp <= 0:
+                spot_ltp = float(trade.get("current_spot", trade.get("entry_spot", trade.get("entry_price", 0.0))))
             if spot_ltp <= 0:
                 remaining_open.append(trade)
                 continue
@@ -292,13 +305,13 @@ class LiveMarketLearner:
 
             else:
                 # Futures or Equity Exit Management
-                high = quote.get("high", spot_ltp)
-                low = quote.get("low", spot_ltp)
+                high = float(quote.get("high") or spot_ltp) if isinstance(quote, dict) else spot_ltp
+                low = float(quote.get("low") or spot_ltp) if isinstance(quote, dict) else spot_ltp
 
                 trade = RiskEngine.update_trailing_stop(trade, high, low)
                 active_sl = trade.get("trailing_stop", trade["sl"])
 
-                bar_open = float(quote.get("open", spot_ltp))
+                bar_open = float(quote.get("open") or spot_ltp) if isinstance(quote, dict) else spot_ltp
                 if trade["direction"] in ("LONG", "bullish"):
                     if low <= active_sl:
                         exit_reason = "TRAILING_SL" if active_sl != trade["sl"] else "STOP_LOSS"
@@ -548,6 +561,14 @@ class LiveMarketLearner:
 
             # Multi-Agent Adversarial Debate & Consensus confirmation (TradingAgents)
             # Wire live NSE PCR, Max-Pain, GEX regime, and FII/DII net flows
+            current_close = float(df["close"].iloc[-1]) if ("close" in df.columns and len(df) > 0) else 0.0
+            try:
+                quote = RealTimeDataFeed.get_realtime_quote_sync(ticker)
+                raw_ltp = quote.get("ltp") if isinstance(quote, dict) else None
+                spot_ltp = float(raw_ltp) if (raw_ltp is not None and float(raw_ltp) > 0) else current_close
+            except Exception:
+                spot_ltp = current_close
+
             live_opts, live_sent = MultiAgentConsensusEngine.fetch_live_context(ticker, spot=spot_ltp)
             consensus = MultiAgentConsensusEngine.evaluate(
                 ticker=ticker,
@@ -555,6 +576,7 @@ class LiveMarketLearner:
                 setup_signals=setups,
                 options_data=live_opts,
                 sentiment_data=live_sent,
+                min_conviction_threshold=getattr(self, "min_consensus_weight", 1.2),
             )
             is_rejected = (
                 consensus.recommended_action.startswith("STAND ASIDE")

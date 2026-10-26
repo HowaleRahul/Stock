@@ -93,6 +93,7 @@ const SwingToolkit: React.FC = () => {
   const [candidateFilterScanner, setCandidateFilterScanner] = useState<string>('ALL');
   const [candidateSearch, setCandidateSearch] = useState<string>('');
   const scanAbortRef = useRef<AbortController | null>(null);
+  const checklistModalRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     return () => {
@@ -137,11 +138,36 @@ const SwingToolkit: React.FC = () => {
 
   useEffect(() => {
     if (!selectedCandidate) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setSelectedCandidate(null);
+      if (e.key === 'Escape') {
+        setSelectedCandidate(null);
+        return;
+      }
+      if (e.key === 'Tab' && checklistModalRef.current) {
+        const focusables = Array.from(
+          checklistModalRef.current.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          )
+        );
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      previouslyFocused?.focus();
+    };
   }, [selectedCandidate]);
 
   const cancelScan = () => {
@@ -806,7 +832,10 @@ const SwingToolkit: React.FC = () => {
           aria-modal="true"
           aria-labelledby="checklist-modal-title"
         >
-          <div className="bg-gray-900 border border-gray-800 rounded-xl max-w-2xl w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto shadow-2xl">
+          <div
+            ref={checklistModalRef}
+            className="bg-gray-900 border border-gray-800 rounded-xl max-w-2xl w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto shadow-2xl"
+          >
             <div className="flex items-center justify-between border-b border-gray-800 pb-3">
               <div>
                 <h3 id="checklist-modal-title" className="text-xl font-bold text-white flex items-center gap-2">

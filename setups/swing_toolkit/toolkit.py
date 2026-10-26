@@ -166,8 +166,20 @@ class SwingToolkitManager:
         async def _process_symbol(sym: str):
             async with semaphore:
                 try:
-                    # Append .NS for Yahoo Finance if Indian equity ticker
-                    yf_sym = f"{sym}.NS" if not (sym.startswith("^") or "." in sym) else sym
+                    # Resolve symbol to Yahoo Finance ticker
+                    yf_sym = sym
+                    if sym in ("NIFTY", "NIFTY 50"):
+                        yf_sym = "^NSEI"
+                    elif sym in ("BANKNIFTY", "NIFTY BANK"):
+                        yf_sym = "^NSEBANK"
+                    elif sym in ("SENSEX", "BSE SENSEX"):
+                        yf_sym = "^BSESN"
+                    elif not (sym.startswith("^") or "." in sym):
+                        yf_sym = f"{sym}.NS"
+
+                    # Gentle inter-request pacing to protect rate limits
+                    await asyncio.sleep(0.04)
+
                     df = await YFinanceFetcher.fetch_history(yf_sym, period=period, interval="1d")
                     if df is None or len(df) < 50:
                         return None
@@ -233,7 +245,15 @@ class SwingToolkitManager:
         Fetches live intraday 5m and daily bars for a watchlist candidate
         and runs the 15m ORB + early Volume Gate evaluation.
         """
-        yf_sym = f"{ticker}.NS" if not (ticker.startswith("^") or "." in ticker) else ticker
+        yf_sym = ticker
+        if ticker in ("NIFTY", "NIFTY 50"):
+            yf_sym = "^NSEI"
+        elif ticker in ("BANKNIFTY", "NIFTY BANK"):
+            yf_sym = "^NSEBANK"
+        elif ticker in ("SENSEX", "BSE SENSEX"):
+            yf_sym = "^BSESN"
+        elif not (ticker.startswith("^") or "." in ticker):
+            yf_sym = f"{ticker}.NS"
 
         try:
             intraday_5m_df = await YFinanceFetcher.fetch_history(yf_sym, period="5d", interval="5m")

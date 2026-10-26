@@ -127,45 +127,84 @@ class NSEFeed:
         return None
 
     @classmethod
-    def calculate_pcr(cls, option_chain: Dict[str, Any]) -> Tuple[float, float, int, int]:
+    def _safe_num(cls, val: Any, default: float = 0.0) -> float:
+        """Safely parses NSE numerical values handling None, booleans, dashes ('-'), comma formatting, NaN, and Inf."""
+        if val is None or val == "-" or isinstance(val, bool):
+            return default
+        try:
+            if isinstance(val, str):
+                clean_str = val.replace(",", "").strip()
+                if not clean_str or clean_str == "-":
+                    return default
+                n = float(clean_str)
+            else:
+                n = float(val)
+            return default if (math.isnan(n) or math.isinf(n)) else n
+        except (ValueError, TypeError):
+            return default
+
+    @classmethod
+    def calculate_pcr(cls, option_chain: Optional[Dict[str, Any]]) -> Tuple[float, float, int, int]:
         """
         Calculates Put-Call Ratio (PCR) from option chain data.
         Returns: (pcr_oi, pcr_volume, total_put_oi, total_call_oi)
+        Guaranteed immune to ZeroDivisionError, corrupt dicts, non-iterable records, and negative/NaN values.
         """
-        if not option_chain or "records" not in option_chain:
+        if not option_chain or not isinstance(option_chain, dict):
             return 1.0, 1.0, 0, 0
 
-        data_rows = option_chain.get("records", {}).get("data", [])
+        records = option_chain.get("records")
+        if not records or not isinstance(records, dict):
+            return 1.0, 1.0, 0, 0
+
+        data_rows = records.get("data")
+        if not data_rows or not isinstance(data_rows, list):
+            return 1.0, 1.0, 0, 0
+
         total_call_oi = 0
         total_put_oi = 0
         total_call_vol = 0
         total_put_vol = 0
 
         for row in data_rows:
+            if not isinstance(row, dict):
+                continue
             ce = row.get("CE")
             pe = row.get("PE")
-            if ce:
-                total_call_oi += ce.get("openInterest", 0)
-                total_call_vol += ce.get("totalTradedVolume", 0)
-            if pe:
-                total_put_oi += pe.get("openInterest", 0)
-                total_put_vol += pe.get("totalTradedVolume", 0)
+            if isinstance(ce, dict):
+                total_call_oi += max(0, int(cls._safe_num(ce.get("openInterest"), 0)))
+                total_call_vol += max(0, int(cls._safe_num(ce.get("totalTradedVolume"), 0)))
+            if isinstance(pe, dict):
+                total_put_oi += max(0, int(cls._safe_num(pe.get("openInterest"), 0)))
+                total_put_vol += max(0, int(cls._safe_num(pe.get("totalTradedVolume"), 0)))
 
-        pcr_oi = total_put_oi / total_call_oi if total_call_oi > 0 else (100.0 if total_put_oi > 0 else 1.0)
-        pcr_vol = total_put_vol / total_call_vol if total_call_vol > 0 else (100.0 if total_put_vol > 0 else 1.0)
+        # Guard against division by zero: if call OI is 0, PCR is capped at 100.0 or 1.0
+        pcr_oi = (total_put_oi / total_call_oi) if total_call_oi > 0 else (100.0 if total_put_oi > 0 else 1.0)
+        pcr_vol = (total_put_vol / total_call_vol) if total_call_vol > 0 else (100.0 if total_put_vol > 0 else 1.0)
+
+        # Enforce finite non-negative numbers
+        if math.isnan(pcr_oi) or math.isinf(pcr_oi) or pcr_oi < 0:
+            pcr_oi = 1.0
+        if math.isnan(pcr_vol) or math.isinf(pcr_vol) or pcr_vol < 0:
+            pcr_vol = 1.0
 
         return round(pcr_oi, 3), round(pcr_vol, 3), total_put_oi, total_call_oi
 
     @classmethod
-    def calculate_max_pain(cls, option_chain: Dict[str, Any]) -> Optional[float]:
+    def calculate_max_pain(cls, option_chain: Optional[Dict[str, Any]]) -> Optional[float]:
         """
         Calculates Max Pain strike where option sellers incur the least payout upon expiry.
+        Immune to empty structures, missing records, or malformed data rows.
         """
-        if not option_chain or "records" not in option_chain:
+        if not option_chain or not isinstance(option_chain, dict):
             return None
 
-        data_rows = option_chain.get("records", {}).get("data", [])
-        if not data_rows:
+        records = option_chain.get("records")
+        if not records or not isinstance(records, dict):
+            return None
+
+        data_rows = records.get("data")
+        if not data_rows or not isinstance(data_rows, list):
             return None
 
         # Gather strikes and their call/put OI
@@ -174,20 +213,19 @@ class NSEFeed:
         put_oi_map = {}
 
         for row in data_rows:
+            if not isinstance(row, dict):
+                continue
             k = row.get("strikePrice")
             if k is None:
                 continue
-            try:
-                k_val = float(k)
-                if math.isnan(k_val) or math.isinf(k_val):
-                    continue
-            except (ValueError, TypeError):
+            k_val = cls._safe_num(k, default=-1.0)
+            if k_val <= 0:
                 continue
             strikes.append(k_val)
-            ce = row.get("CE", {}) or {}
-            pe = row.get("PE", {}) or {}
-            call_oi_map[k_val] = float(ce.get("openInterest", 0) or 0)
-            put_oi_map[k_val] = float(pe.get("openInterest", 0) or 0)
+            ce = row.get("CE") if isinstance(row.get("CE"), dict) else {}
+            pe = row.get("PE") if isinstance(row.get("PE"), dict) else {}
+            call_oi_map[k_val] = max(0.0, cls._safe_num(ce.get("openInterest"), 0.0))
+            put_oi_map[k_val] = max(0.0, cls._safe_num(pe.get("openInterest"), 0.0))
 
         strikes = sorted(list(set(strikes)))
         if not strikes:
@@ -217,6 +255,7 @@ class NSEFeed:
     def get_fii_dii_activity(cls) -> Dict[str, Any]:
         """
         Fetches daily Institutional FII / DII activity in Indian cash market.
+        Gracefully handles network drops, non-200 responses, malformed non-list payloads, and invalid values.
         """
         url = f"{NSE_BASE_URL}/api/fiidiiTradeReact"
         for attempt in range(2):
@@ -224,26 +263,29 @@ class NSEFeed:
                 session = cls.get_session()
                 resp = session.get(url, headers=cls._get_headers(), timeout=10)
                 if resp.status_code == 200:
-                    data = resp.json()
-                    fii_net = 0.0
-                    dii_net = 0.0
-                    for item in data:
-                        cat = item.get("category", "").upper()
-                        try:
-                            val = float(item.get("netValue", 0.0) or 0.0)
-                        except (ValueError, TypeError):
-                            val = 0.0
-                        if "FII" in cat or "FPI" in cat:
-                            fii_net += val
-                        elif "DII" in cat:
-                            dii_net += val
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = None
+                    if isinstance(data, list):
+                        fii_net = 0.0
+                        dii_net = 0.0
+                        for item in data:
+                            if not isinstance(item, dict):
+                                continue
+                            cat = str(item.get("category", "")).upper()
+                            val = cls._safe_num(item.get("netValue"), 0.0)
+                            if "FII" in cat or "FPI" in cat:
+                                fii_net += val
+                            elif "DII" in cat:
+                                dii_net += val
 
-                    return {
-                        "fii_net_crores": round(fii_net, 2),
-                        "dii_net_crores": round(dii_net, 2),
-                        "sentiment": "BULLISH" if (fii_net + dii_net) > 0 else "BEARISH",
-                        "timestamp": time.time(),
-                    }
+                        return {
+                            "fii_net_crores": round(fii_net, 2),
+                            "dii_net_crores": round(dii_net, 2),
+                            "sentiment": "BULLISH" if (fii_net + dii_net) > 0 else "BEARISH",
+                            "timestamp": time.time(),
+                        }
                 elif resp.status_code in (401, 403):
                     cls._session = None
                     cls._last_warmed_at = 0.0
@@ -266,7 +308,8 @@ class NSEFeed:
     def get_india_vix(cls) -> Optional[float]:
         """
         Fetches live India VIX from NSE India allIndices API.
-        Returns percentage (e.g. 14.5) or None on failure.
+        Returns percentage (e.g. 14.5) or None on failure/timeout.
+        Immune to non-dict JSON responses, unexpected types, and missing data lists.
         """
         url = f"{NSE_BASE_URL}/api/allIndices"
         for attempt in range(2):
@@ -274,16 +317,21 @@ class NSEFeed:
                 session = cls.get_session()
                 resp = session.get(url, headers=cls._get_headers(), timeout=10)
                 if resp.status_code == 200:
-                    data = resp.json()
-                    for item in data.get("data", []):
-                        idx_name = item.get("index", "").upper().replace(" ", "")
-                        if "INDIAVIX" in idx_name or "VIX" in idx_name:
-                            try:
-                                val = float(item.get("last", 0.0) or 0.0)
-                                if val > 0:
-                                    return round(val, 2)
-                            except (ValueError, TypeError):
-                                pass
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = None
+                    if isinstance(data, dict):
+                        data_rows = data.get("data")
+                        if isinstance(data_rows, list):
+                            for item in data_rows:
+                                if not isinstance(item, dict):
+                                    continue
+                                idx_name = str(item.get("index", "")).upper().replace(" ", "")
+                                if "INDIAVIX" in idx_name or "VIX" in idx_name:
+                                    val = cls._safe_num(item.get("last"), 0.0)
+                                    if val > 0:
+                                        return round(val, 2)
                 elif resp.status_code in (401, 403):
                     cls._session = None
                     cls._last_warmed_at = 0.0

@@ -75,7 +75,7 @@ const CAPITAL_PRESETS = [
 
 const INDEX_PRESETS = [
   { id: 'ALL', label: 'All F&O Indices', desc: 'NIFTY, BANKNIFTY, SENSEX, FINNIFTY, MIDCPNIFTY' },
-  { id: 'NIFTY', label: 'NIFTY 50', desc: 'Lot: 25 | Interval: 50 | Expiry: Thu' },
+  { id: 'NIFTY', label: 'NIFTY 50', desc: 'Lot: 50 | Interval: 50 | Expiry: Thu' },
   { id: 'BANKNIFTY', label: 'BANK NIFTY', desc: 'Lot: 15 | Interval: 100 | Expiry: Wed' },
   { id: 'SENSEX', label: 'BSE SENSEX', desc: 'Lot: 10 | Interval: 100 | Expiry: Fri' },
   { id: 'FINNIFTY', label: 'FIN NIFTY', desc: 'Lot: 25 | Interval: 50 | Expiry: Tue' },

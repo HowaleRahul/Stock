@@ -47,9 +47,9 @@ class StartTrainingRequest(BaseModel):
         default="ALL",
         description="Target index: 'NIFTY', 'BANKNIFTY', 'SENSEX', 'FINNIFTY', 'MIDCPNIFTY', or 'ALL'"
     )
-    derivative_type: Optional[Literal["AUTO", "OPTIONS", "FUTURES", "SELL_OPTIONS", "CREDIT_SPREAD"]] = Field(
+    derivative_type: Optional[Literal["AUTO", "OPTIONS", "FUTURES", "SELL_OPTIONS", "CREDIT_SPREAD", "IRON_CONDOR"]] = Field(
         default="AUTO",
-        description="Derivative instrument: 'AUTO' (budget-optimized), 'OPTIONS' (CE/PE), 'FUTURES', 'SELL_OPTIONS', 'CREDIT_SPREAD'"
+        description="Derivative instrument: 'AUTO' (budget-optimized), 'OPTIONS' (CE/PE), 'FUTURES', 'SELL_OPTIONS', 'CREDIT_SPREAD', 'IRON_CONDOR'"
     )
     strike_preference: Optional[Literal["AUTO", "ITM", "ATM", "OTM"]] = Field(
         default="AUTO",

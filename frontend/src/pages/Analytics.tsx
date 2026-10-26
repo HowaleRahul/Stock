@@ -94,7 +94,7 @@ const Analytics = () => {
         width: chartContainerRef.current.clientWidth,
         height: 400,
         localization: {
-          priceFormatter: (val: number) => `₹${val.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`,
+          priceFormatter: (val: number) => formatIndianCurrency(val, { decimals: 0 }),
         },
       });
 

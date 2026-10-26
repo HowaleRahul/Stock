@@ -407,7 +407,7 @@ const Portfolio = () => {
                         <td className="py-3 px-4 text-right font-medium">
                           <div>{formatIndianCurrency(t.entry_price || 0)}</div>
                           {isShort && t.net_credit && (
-                            <span className="text-[9px] text-emerald-400 block font-mono">Net Cr: ₹{t.net_credit}</span>
+                            <span className="text-[9px] text-emerald-400 block font-mono">Net Cr: {formatIndianCurrency(t.net_credit)}</span>
                           )}
                         </td>
                         <td className="py-3 px-4 text-right font-bold text-white">
@@ -451,7 +451,7 @@ const Portfolio = () => {
                         <td className="py-3 px-4 text-right text-xs">
                           {payoff && (
                             <div className="text-amber-400 font-mono font-semibold">
-                              BE: ₹{payoff.breakeven.toLocaleString('en-IN', { minimumFractionDigits: 1 })}
+                              BE: {formatIndianCurrency(payoff.breakeven, { decimals: 1 })}
                             </div>
                           )}
                           <div className="text-emerald-400 font-semibold">TP: {formatIndianCurrency(t.take_profit || 0)}</div>

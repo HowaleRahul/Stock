@@ -321,7 +321,7 @@ async def run_loop():
                     strat = str(trade.get("strategy_type", "DIRECTIONAL")).upper()
                     qty = trade.get("total_quantity") or trade.get("quantity") or opt_engine.get_lot_size(ticker)
 
-                    if strat == "CREDIT_SPREAD" or trade.get("instrument_type") == "SPREAD":
+                    if strat in ("CREDIT_SPREAD", "IRON_CONDOR") or trade.get("instrument_type") in ("SPREAD", "IRON_CONDOR"):
                         short_k = trade.get("opt_strike", 0.0)
                         long_k = trade.get("hedge_strike_price", 0.0)
                         opt_t = trade.get("opt_type", "PE")
@@ -491,7 +491,7 @@ async def run_loop():
                     strat = str(trade.get("strategy_type", "DIRECTIONAL")).upper()
                     qty = trade.get("total_quantity") or trade.get("quantity") or opt_engine.get_lot_size(ticker)
 
-                    if strat == "CREDIT_SPREAD" or trade.get("instrument_type") == "SPREAD":
+                    if strat in ("CREDIT_SPREAD", "IRON_CONDOR") or trade.get("instrument_type") in ("SPREAD", "IRON_CONDOR"):
                         gross_cash = (entry_prem - curr_prem) * qty
                     elif act == "SELL":
                         gross_cash = (entry_prem - curr_prem) * qty
@@ -595,12 +595,14 @@ async def run_loop():
             # Wire live NSE PCR, Max-Pain, GEX regime, and FII/DII net flows
             current_close = float(df['close'].iloc[-1])
             live_opts, live_sent = MultiAgentConsensusEngine.fetch_live_context(ticker, spot=current_close)
+            min_consensus = float(current_config.get("min_consensus_weight", 1.2))
             consensus = MultiAgentConsensusEngine.evaluate(
                 ticker=ticker,
                 regime_data=regime,
                 setup_signals=setups,
                 options_data=live_opts,
                 sentiment_data=live_sent,
+                min_conviction_threshold=min_consensus,
             )
             is_rejected = (
                 consensus.recommended_action.startswith("STAND ASIDE")
@@ -711,7 +713,7 @@ async def run_loop():
                 "setup_weights": setup_weights,
                 # F&O specific fields
                 "is_fo": True,
-                "is_options": fo_plan.instrument_type in ("OPTION", "SPREAD"),
+                "is_options": fo_plan.instrument_type in ("OPTION", "SPREAD", "IRON_CONDOR"),
                 "instrument_type": fo_plan.instrument_type,
                 "action": fo_plan.action,
                 "strategy_type": fo_plan.strategy_type,
@@ -720,7 +722,7 @@ async def run_loop():
                 "hedge_strike_price": fo_plan.hedge_strike_price,
                 "hedge_entry_price": fo_plan.hedge_entry_price,
                 "net_credit": fo_plan.net_credit,
-                "opt_entry_premium": fo_plan.entry_price if fo_plan.instrument_type in ("OPTION", "SPREAD") else 0.0,
+                "opt_entry_premium": fo_plan.entry_price if fo_plan.instrument_type in ("OPTION", "SPREAD", "IRON_CONDOR") else 0.0,
                 "opt_delta": fo_plan.delta,
                 "opt_theta": fo_plan.theta,
                 "strike_type": fo_plan.strike_type,

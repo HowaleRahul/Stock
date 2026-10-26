@@ -261,6 +261,69 @@ class IndianFOFrictionModel:
         )
 
     @classmethod
+    def calculate_iron_condor_friction(
+        cls,
+        short_put_entry: float,
+        short_put_exit: float,
+        long_put_entry: float,
+        long_put_exit: float,
+        short_call_entry: float,
+        short_call_exit: float,
+        long_call_entry: float,
+        long_call_exit: float,
+        quantity: int
+    ) -> FOFrictionBreakdown:
+        """
+        Calculates exact round-trip transaction friction for a 4-leg Indian Iron Condor
+        (Short Put, Long Put, Short Call, Long Call).
+        Total 8 orders (4 entry legs + 4 exit legs).
+        """
+        qty = max(1, int(quantity))
+        sp_in = max(0.0, float(short_put_entry))
+        sp_out = max(0.0, float(short_put_exit))
+        lp_in = max(0.0, float(long_put_entry))
+        lp_out = max(0.0, float(long_put_exit))
+
+        sc_in = max(0.0, float(short_call_entry))
+        sc_out = max(0.0, float(short_call_exit))
+        lc_in = max(0.0, float(long_call_entry))
+        lc_out = max(0.0, float(long_call_exit))
+
+        # 8 orders: 4 entries + 4 exits = 8 * ₹20 = ₹160 flat brokerage
+        brokerage = 8.0 * cls.OPTIONS_BROKERAGE_BUY
+
+        total_sell_turnover = (sp_in + lp_out + sc_in + lc_out) * qty
+        total_buy_turnover = (lp_in + sp_out + lc_in + sc_out) * qty
+        total_turnover = total_sell_turnover + total_buy_turnover
+
+        stt = total_sell_turnover * cls.OPTIONS_STT_SELL_RATE
+        exchange_txn = total_turnover * cls.OPTIONS_EXCHANGE_TXN_RATE
+        sebi_charges = total_turnover * cls.OPTIONS_SEBI_CHARGES_RATE
+        gst = (brokerage + exchange_txn) * cls.OPTIONS_GST_RATE
+        stamp_duty = total_buy_turnover * cls.OPTIONS_STAMP_DUTY_BUY_RATE
+
+        total_friction = brokerage + stt + exchange_txn + sebi_charges + gst + stamp_duty
+        gross_pnl = total_sell_turnover - total_buy_turnover
+        net_pnl = gross_pnl - total_friction
+
+        combined_net_credit = (sp_in - lp_in) + (sc_in - lc_in)
+
+        return FOFrictionBreakdown(
+            instrument_type="IRON_CONDOR",
+            brokerage=brokerage,
+            stt=stt,
+            exchange_txn_charge=exchange_txn,
+            sebi_charges=sebi_charges,
+            gst=gst,
+            stamp_duty=stamp_duty,
+            total_friction=round(total_friction, 2),
+            gross_pnl=round(gross_pnl, 2),
+            net_pnl=round(net_pnl, 2),
+            breakeven_exit_price=round(combined_net_credit, 2),
+            breakeven_points_required=round(total_friction / qty, 2)
+        )
+
+    @classmethod
     def calculate_futures_friction(
         cls,
         entry_price: float,
@@ -601,10 +664,12 @@ class RiskEngine:
         sl_distance = abs(entry - sl_price)
         tp_distance = abs(tp_price - entry)
 
-        if sl_distance <= 0:
-            sl_distance = atr  # Fallback
+        if sl_distance <= 1e-4:
+            sl_distance = max(1.0, atr if atr > 0 else entry * 0.01)  # Fallback
 
-        rr_ratio = tp_distance / sl_distance if sl_distance > 0 else 0.0
+        calc_rr = tp_distance / sl_distance if sl_distance > 1e-4 else 0.0
+        # Cap rr_ratio at 100.0 to prevent infinite or absurd values if sl_distance is tiny
+        rr_ratio = min(100.0, max(0.0, calc_rr)) if math.isfinite(calc_rr) else 0.0
 
         # 5. Position Sizing adapted dynamically to User Capital Tier
         tier = self.get_capital_tier(capital)
@@ -810,13 +875,14 @@ class RiskEngine:
         Returns:
             Fraction of capital to risk (capped at MAX_RISK_PER_TRADE_PCT)
         """
-        p = max(0.01, min(0.99, win_probability))
+        p = max(0.01, min(0.99, win_probability if (isinstance(win_probability, (int, float)) and math.isfinite(win_probability)) else 0.5))
         q = 1.0 - p
-        b = max(0.01, reward_risk_ratio)
+        safe_b = reward_risk_ratio if (isinstance(reward_risk_ratio, (int, float)) and math.isfinite(reward_risk_ratio)) else 1.0
+        b = max(0.01, safe_b)
 
         full_kelly = p - (q / b)
 
-        if full_kelly <= 0:
+        if full_kelly <= 0 or not math.isfinite(full_kelly):
             # Negative Kelly means the edge is insufficient — size at minimum
             return 0.005  # 0.5% risk floor for exploration
 
@@ -851,13 +917,14 @@ class RiskEngine:
         percentage rule completely misses. A trader with 55% win rate and 2:1 R:R
         has very different ruin probability at 2% risk vs 10% risk.
         """
-        p = max(0.01, min(0.99, win_rate))
+        safe_wr = win_rate if (isinstance(win_rate, (int, float)) and math.isfinite(win_rate)) else 0.5
+        p = max(0.01, min(0.99, safe_wr))
         q = 1.0 - p
 
         # Expected value per trade in risk-units
-        if avg_loss <= 0:
-            avg_loss = 1.0
-        payoff_ratio = avg_win / avg_loss if avg_loss > 0 else 1.0
+        safe_win = avg_win if (isinstance(avg_win, (int, float)) and math.isfinite(avg_win) and avg_win >= 0) else 1.0
+        safe_loss = avg_loss if (isinstance(avg_loss, (int, float)) and math.isfinite(avg_loss) and avg_loss > 0) else 1.0
+        payoff_ratio = safe_win / safe_loss if safe_loss > 0 else 1.0
 
         # Edge per trade
         edge = (p * payoff_ratio) - q
@@ -867,10 +934,11 @@ class RiskEngine:
             return 0.99
 
         # Number of risk units until ruin
-        if risk_fraction <= 0:
+        if not (isinstance(risk_fraction, (int, float)) and math.isfinite(risk_fraction)) or risk_fraction <= 0:
             return 0.0
         
-        n_units = -math.log(1.0 - ruin_threshold) / risk_fraction
+        safe_thresh = max(0.01, min(0.99, ruin_threshold if (isinstance(ruin_threshold, (int, float)) and math.isfinite(ruin_threshold)) else 0.5))
+        n_units = -math.log(1.0 - safe_thresh) / risk_fraction
 
         # Ruin probability using the adapted formula
         ratio = q / (p * payoff_ratio) if (p * payoff_ratio) > 0 else 1.0

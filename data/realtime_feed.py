@@ -365,13 +365,19 @@ class RealTimeDataFeed:
                 except Exception:
                     continue
 
+                open_val = row.get("Open") if "Open" in row else row.get("open", 0.0)
+                high_val = row.get("High") if "High" in row else row.get("high", 0.0)
+                low_val = row.get("Low") if "Low" in row else row.get("low", 0.0)
+                close_val = row.get("Close") if "Close" in row else row.get("close", 0.0)
+                vol_val = row.get("Volume") if "Volume" in row else row.get("volume", 0.0)
+
                 candles.append({
                     "time": t_val,
-                    "open": round(float(row.get("Open", 0.0)), 2),
-                    "high": round(float(row.get("High", 0.0)), 2),
-                    "low": round(float(row.get("Low", 0.0)), 2),
-                    "close": round(float(row.get("Close", 0.0)), 2),
-                    "volume": float(row.get("Volume", 0.0))
+                    "open": round(float(open_val or 0.0), 2),
+                    "high": round(float(high_val or 0.0), 2),
+                    "low": round(float(low_val or 0.0), 2),
+                    "close": round(float(close_val or 0.0), 2),
+                    "volume": float(vol_val or 0.0)
                 })
 
         # Inject / update live LTP into the latest candle if real-time quote is available

@@ -313,7 +313,7 @@ const AIJournal = () => {
         <ErrorBoundary compact title="Profitability Matrix Error">
           <div className="bg-gray-900 p-6 rounded-lg border border-gray-800 overflow-x-auto">
             <h2 className="text-lg font-bold text-white mb-4">📊 Setup × Regime Profitability Matrix</h2>
-            <table className="w-full text-sm min-w-[600px]">
+            <table className="w-full text-sm min-w-[760px]">
               <caption className="sr-only">Setup and Regime Profitability Matrix</caption>
               <thead>
                 <tr className="text-gray-400 border-b border-gray-700">

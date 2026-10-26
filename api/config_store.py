@@ -22,7 +22,7 @@ _config_file_lock = threading.RLock()
 def load_config_atomic(path: Optional[str] = None) -> Dict[str, Any]:
     """
     Reads configuration from disk under lock.
-    Returns empty dict if file does not exist.
+    Returns empty dict if file does not exist, is 0 bytes, or contains corrupted JSON.
     """
     target = path or CONFIG_PATH
     with _config_file_lock:
@@ -30,10 +30,17 @@ def load_config_atomic(path: Optional[str] = None) -> Dict[str, Any]:
             return {}
         try:
             with open(target, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                content = f.read().strip()
+                if not content:
+                    return {}
+                data = json.loads(content)
             if not isinstance(data, dict):
-                raise ValueError("Configuration root must be a JSON object.")
+                logger.warning("Configuration in %s is not a JSON object; resetting to empty dict.", target)
+                return {}
             return data
+        except json.JSONDecodeError as jde:
+            logger.warning("Configuration in %s is corrupted JSON (%s); resetting to empty dict.", target, jde)
+            return {}
         except Exception as e:
             logger.exception("Failed to load configuration from %s: %s", target, e)
             raise e

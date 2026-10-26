@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "last_update": "2026-10-25T20:25:18.461218",
-  "total_fo_trades": 47,
-  "options_wins": 47,
+  "last_update": "2026-10-26T10:44:47.895800",
+  "total_fo_trades": 65,
+  "options_wins": 65,
   "options_losses": 0,
   "futures_wins": 0,
   "futures_losses": 0,
@@ -16,10 +16,10 @@
           "n": 6
         },
         "ATM": {
-          "alpha": 52.0,
+          "alpha": 70.0,
           "beta": 2.0,
-          "ewma": 0.3230385506978125,
-          "n": 54
+          "ewma": 0.35593900374663534,
+          "n": 72
         },
         "OTM": {
           "alpha": 3.0,

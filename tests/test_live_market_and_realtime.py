@@ -426,3 +426,28 @@ def test_fo_learner_reinforcement_updates():
             pass
 
 
+def test_live_market_learner_scan_for_entries_spot_ltp_defined():
+    """
+    Regression test for: [WARNING] Live trading cycle error: name 'spot_ltp' is not defined.
+    Ensures scan_for_entries executes without NameError when consensus is triggered.
+    """
+    learner = LiveMarketLearner(starting_capital=500000.0)
+    learner.tickers = ["NIFTY"]
+    learner.min_ai_confidence = 0.50
+
+    fake_candles = [
+        {"time": 1700000000 + i * 3600, "open": 24000.0 + i, "high": 24050.0 + i, "low": 23950.0 + i, "close": 24020.0 + i, "volume": 1000}
+        for i in range(150)
+    ]
+
+    with patch.object(RealTimeDataFeed, "get_chart_candles_sync", return_value=fake_candles), \
+         patch.object(RealTimeDataFeed, "get_tradingview_analysis_sync", return_value={"summary": {"RECOMMENDATION": "BUY"}}), \
+         patch.object(RealTimeDataFeed, "get_realtime_quote_sync", return_value={"ltp": 24150.0, "high": 24200.0, "low": 24100.0, "open": 24110.0}), \
+         patch.object(learner.ai_brain, "predict", return_value={"signal": "bullish", "probability": 0.85}):
+
+        learner.scan_for_entries()
+        learner.execute_live_cycle()
+        assert learner.last_cycle_time > 0
+
+
+

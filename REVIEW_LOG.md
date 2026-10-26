@@ -834,6 +834,149 @@
 - `.\venv\Scripts\python.exe start.py --check`: Cleanly recognized active virtual environment without redundant relaunching, exiting with status 0.
 - Brain files synchronized: `ai/current-state.md`, `ai/decisions.md` (Decision 28), `ai/known-issues.md` (Issue 35), `ai/instructions.md`, and `REVIEW_LOG.md`.
 
+---
+
+## Pass 26 — Indian F&O Non-Directional Options Selling, Statutory Friction & Adversarial QA Hardening
+
+### 1. Non-Directional Iron Condor & Dual Positive Theta Decay (`ml/options_engine.py`)
+- **Rangebound Strategy Architecture (`_build_iron_condor_plan`)**:
+  - Implemented 4-leg defined-risk Iron Condor strategy for sideways market regimes (ADX < 20).
+  - 4-leg structure: Short OTM Put + Long OTM Put hedge wing, Short OTM Call + Long OTM Call hedge wing.
+  - Generates dual positive theta decay ($+\Theta_1 + +\Theta_2 > 0$), delta neutrality, analytical breakevens, and SPAN margin benefit under Indian exchange rules (margin blocked on only the wider wing).
+  - Integrated into `generate_derivative_plan()` auto-dispatch and `api/training_router.py`.
+
+### 2. 8-Order Transaction Friction & Breakeven Modeling (`ml/risk_engine.py`)
+- **Statutory Charges Calculation (`calculate_iron_condor_friction`)**:
+  - Models statutory costs across 8 total orders (4 entry + 4 exit):
+    - ₹160 total flat brokerage (₹20 per order).
+    - STT on sell option turnover.
+    - NSE transaction charges (0.05% of turnover).
+    - 18% GST on brokerage and transaction fees.
+    - SEBI turnover charges and stamp duty on buyer turnover.
+    - Exact analytical breakeven premium required per leg.
+
+### 3. NSE Scraper Sanitization & Exchange Segment Routing
+- **String & Dash Hardening (`data/nse_feed.py`)**:
+  - Live NSE option chains regularly return `"-"` for inactive strikes and formatted strings with commas (`"12,345"`). Added `_safe_num()` helper to harden `calculate_pcr` and `calculate_max_pain` against `TypeError` and `ValueError`.
+- **Exchange Segment Routing (`live_trader.py`)**:
+  - Fixed exchange segment routing bug: `NIFTY FUT` and `BANKNIFTY FUT` were defaulting to cash `NSE` instead of `NFO`, which brokers reject.
+  - Aligned routing: `BFO` for SENSEX derivatives, `NFO` for NSE index futures and options.
+
+### 4. Interactive SVG Multi-Leg Payoff Diagram & Frontend Hardening
+- **Dynamic Payoff Diagram (`frontend/src/components/OptionChartViewer.tsx`, `foUtils.ts`)**:
+  - Built `OptionPayoffDiagram` with continuous SVG curve, `<clipPath>` for green profit and red loss fills, strike markers, breakeven flags, and crosshair hover tracker.
+  - Added `IRON_CONDOR` payoff computation to `/api/v1/market/option-strategy-payoff`.
+- **Accessibility & Focus Trapping (`frontend/src/pages/SwingToolkit.tsx`, `AIJournal.tsx`)**:
+  - Added modal focus trapping (`WCAG AA`) in candidate checklist modals.
+  - Standardized currency formatting with `formatIndianCurrency()` across all 8 pages.
+
+### 5. Math Robustness & Strategy Validation
+- **Sortino Ratio (`ml/performance_dashboard.py`, `ml/journal_analyzer.py`)**:
+  - Added Sortino Ratio alongside Sharpe Ratio, completely immune to zero variance (division by zero), NaN, Inf, and downside singularities.
+- **Poison Keyword Rejection (`api/strategy_router.py`)**:
+  - Rejection of floating-point poison keywords (`nan`, `inf`, `null`, `none`) in condition validation.
+
+### Verification — Pass 26
+- Full Backend Test Suite: **313 passed, 0 failed in 64.57s** (`pytest -q`).
+- Frontend Oxlint: **0 warnings, 0 errors** across 23 files (`oxlint`).
+- Frontend Build: **Vite production bundle compiled cleanly in 1.55s** (`npm run build`).
+- Compulsory project brain synchronization verified across `ai/current-state.md`, `ai/decisions.md` (Decision 29), `ai/known-issues.md` (Issues 36–38), `ai/instructions.md`, and `REVIEW_LOG.md`.
+
+---
+
+## Pass 27 — Live Market Learner `spot_ltp` Undefined Variable Resolution & Quote Hardening
+
+### 1. Root Cause Resolution
+- In `ml/live_market_learner.py` line 551 inside `scan_for_entries()`, `MultiAgentConsensusEngine.fetch_live_context(ticker, spot=spot_ltp)` called `spot_ltp` without it being initialized in the scanning loop.
+- When an AI setup met the minimum confidence threshold, this threw `NameError: name 'spot_ltp' is not defined`, caught and logged by `ml/continuous_trainer.py` as `[WARNING] Live trading cycle error: name 'spot_ltp' is not defined`, aborting order generation for that scan.
+
+### 2. Defensive Implementation
+- In `ml/live_market_learner.py`:
+  - `spot_ltp` is defensively resolved: `current_close = float(df["close"].iloc[-1]) if ("close" in df.columns and len(df) > 0) else 0.0`.
+  - Tries `RealTimeDataFeed.get_realtime_quote_sync(ticker)`. If positive LTP is found, sets `spot_ltp = float(raw_ltp)`, otherwise falls back to `current_close`.
+  - Hardened `update_live_mtm` and `check_exits` against non-dict or `None` quotes, casting `high`, `low`, and `open` defensively to floats.
+
+### 3. Verification — Pass 27
+- Unit & Regression Tests: `pytest -q tests/test_live_market_and_realtime.py` passed all 24 tests (including new `test_live_market_learner_scan_for_entries_spot_ltp_defined`).
+- Security Suite: `pytest -q tests/test_fo_options_selling_and_security.py` passed all 87 tests.
+- Brain files synchronized: `ai/current-state.md`, `ai/decisions.md` (Decision 30), `ai/known-issues.md` (Issue 39), `ai/instructions.md`, and `REVIEW_LOG.md`.
+
+---
+
+## Pass 28 — Multi-Agent Consensus Conviction Calibration & Configurable Confluence
+
+### 1. Multi-Agent Conviction Architecture
+- Evaluated live engine cycle telemetry (`Chief Risk ruling: APPROVED ... Action: STAND ASIDE: Insufficient multi-agent conviction for new risk entry.. Consensus: neutral (0.50)`).
+- Confirmed that this is an intentional safety filter inspired by TauricResearch/TradingAgents: when technical setups are mixed (e.g. 1 bullish vs 1 bearish), the consensus engine protects capital by standing aside rather than entering chops.
+- Decoupled hardcoded `1.2` conviction threshold: added `min_conviction_threshold: float = 1.2` parameter to `MultiAgentConsensusEngine.evaluate()`.
+- Exposed `min_consensus_weight` in `config.json` (default `1.2`), `ConfigUpdate` schema, `LiveMarketLearner`, `paper_trader.py`, and `live_trader.py`.
+
+### 2. Verification — Pass 28
+- Test Suite: **349 passed, 0 failed in 55.80s** across all test suites.
+- Frontend: Oxlint passed with **0 warnings, 0 errors**; Vite production bundle compiled cleanly in **1.63s**.
+- Brain files synchronized: `ai/current-state.md`, `ai/decisions.md` (Decision 31), `ai/known-issues.md`, `ai/instructions.md`, and `REVIEW_LOG.md`.
+
+---
+
+## Pass 29 — Swing Toolkit `fetch_history` Resolution, Direct Yahoo Chart Fallback & Session Volume Normalization
+
+### 1. Root Cause Analysis of "0 Hits Displayed"
+- User report: `Scanned universe complete: Found 0 hits (0 passed the 8-Factor filter)`.
+- Investigation revealed two compound failure modes:
+  1. `AttributeError: type object 'YFinanceFetcher' has no attribute 'fetch_history'`: `setups/swing_toolkit/toolkit.py` called `await YFinanceFetcher.fetch_history()`, which was never implemented in `data/fetcher.py`. Every ticker in the scan caught this exception, logged a warning, and returned `None`, leaving `candidates = []`.
+  2. Yahoo Finance Rate Limiting: When queried concurrently across 25+ symbols, `yfinance` threw `YFRateLimitError: Too Many Requests. Rate limited. Try after a while.` due to failing cookie/crumb retrieval.
+  3. Intraday Volume Suppression: When scanned during morning/midday trading hours, raw volume on the forming daily candle (~0.2x ADV) failed the `has_volume` threshold in `MomentumScanner`.
+
+### 2. Architectural Remediation
+1. **Asynchronous `fetch_history` (`data/fetcher.py`)**:
+   - Added `@classmethod async def fetch_history(ticker, period, interval, timeout=45.0) -> pd.DataFrame` running inside `asyncio.to_thread`.
+   - Normalizes all DataFrame columns to lowercase (`open`, `high`, `low`, `close`, `volume`).
+2. **Direct Yahoo v8 Chart API Fallback (`data/fetcher.py`)**:
+   - Built `_fetch_chart_direct_sync(yahoo_ticker, period, interval)` calling `https://query1.finance.yahoo.com/v8/finance/chart/{ticker}` directly with browser headers. Bypasses cookie/crumb authentication failures completely.
+3. **In-Memory TTL Caching (`data/fetcher.py`)**:
+   - Integrated `cachetools.TTLCache(maxsize=1000, ttl=300)` with thread safety, eliminating redundant external API hits.
+4. **Intraday Market Session Volume Projection (`setups/swing_toolkit/scanners.py`)**:
+   - Added live session volume normalization via `get_session_phase()` for today's active candles, correctly projecting full-day volume while preserving strict unprojected checks for historical bars and unit tests.
+5. **Multi-Week Inside Bar & ATH Contraction**:
+   - `DWIBScanner` now detects both current-week squeezes and textbook carried-over inside weeks where the prior completed week formed an inside bar relative to its preceding week.
+   - `ATHScanner` tolerances updated to 4.5% to capture market leaders consolidating tightly along the 10 and 20 EMAs.
+6. **Startup Environment Selection (`start.py`, `start.bat`, `start.ps1`)**:
+   - Prioritized `.venv` where all 148 project packages are installed.
+
+### 3. Verification — Pass 29
+- End-to-End API Test: `/api/v1/swing/scanners/run?universe_size=10` returned **4 hits** (`ICICIBANK`, `KOTAKBANK`, `AXISBANK`, `SENSEX`) and **2 approved candidates** (Score $\ge 70$).
+- Regression Test Suite: `pytest -q tests/test_swing_toolkit.py` passed all **13 tests** (including 3 new async fetcher and direct fallback tests).
+- Full Test Suite: **352 passed, 0 failed in 81.86s** across all test suites.
+- Frontend: Oxlint passed with **0 warnings, 0 errors**; Vite production bundle compiled cleanly in **1.91s**.
+- Compulsory project brain synchronization verified across `ai/current-state.md`, `ai/decisions.md` (Decision 32), `ai/known-issues.md` (Issue 40), `ai/instructions.md`, and `REVIEW_LOG.md`.
+
+---
+
+## Pass 30 — Intraday Yahoo Chart Range Boundaries & RealTimeDataFeed Column Casing Hardening
+
+### 1. Root Cause Analysis
+- User report:
+  - `Failed to load market candles. Please check if the market data service is running.`
+  - `Scan failed: Request failed with status code 502`
+- Root Causes:
+  1. `HTTP 422 Unprocessable Entity` in `_fetch_chart_direct_sync`: For intraday intervals (`5m`, `15m`, `1h`), Yahoo Finance enforces a hard 60-day maximum range (`"The requested range must be within the last 60 days"`). `_fetch_chart_direct_sync` previously mapped `60d` to `3mo`, triggering an HTTP 422 error and returning 0 candles.
+  2. Column Case Sensitivity in `RealTimeDataFeed.get_chart_candles()`: It indexed `row.get("Open")` and `row.get("Close")`, which returned `0.0` if the incoming DataFrame normalized column names to lowercase.
+  3. Stale Terminal Processes: Multiple orphaned `start.py` processes running against older/unpopulated virtualenvs caused the Uvicorn backend to terminate, leading Vite's proxy to return `502 Bad Gateway`.
+
+### 2. Implementation & Fixes
+- `data/fetcher.py`: Strictly mapped intraday intervals to Yahoo's valid range limits (`interval in ("2m", "5m", "15m", "30m", "60m", "1h")` -> `range="60d"`).
+- `data/realtime_feed.py`: Defensively checked both Title Case and lowercase column names (`row.get("Open") if "Open" in row else row.get("open", 0.0)`).
+- Cleaned up background processes and validated that `start.py` uses `.venv` directly.
+
+### 3. Verification — Pass 30
+- Verified `RealTimeDataFeed.get_chart_candles('NIFTY', '5m', 5)` retrieves live 5m candles successfully (`time`, `open`, `high`, `low`, `close`, `volume`).
+- Full Test Suite: **352 passed, 0 failed in 71.82s**.
+- Frontend: Oxlint **0 warnings, 0 errors**; Vite bundle built cleanly in **1.27s**.
+- Compulsory brain synchronization verified across `ai/current-state.md`, `ai/decisions.md` (Decision 33), `ai/known-issues.md` (Issue 41), `ai/instructions.md`, and `REVIEW_LOG.md`.
+
+
+
+
 
 
 

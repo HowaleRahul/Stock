@@ -41,6 +41,8 @@ class StrategyCondition(BaseModel):
     @classmethod
     def validate_indicator(cls, v: str) -> str:
         clean = v.strip().replace("\x00", "")
+        if clean.lower() in ("nan", "inf", "infinity", "-inf", "-infinity", "null", "none"):
+            raise ValueError(f"Indicator identifier cannot be reserved keyword '{clean}'.")
         if not re.match(r"^[A-Za-z0-9_]{1,64}$", clean):
             raise ValueError(f"Invalid indicator identifier '{clean}'. Must be alphanumeric with underscores.")
         return clean
@@ -60,6 +62,8 @@ class StrategyCondition(BaseModel):
     @classmethod
     def validate_value(cls, v: str) -> str:
         clean = v.strip().replace("\x00", "")
+        if clean.lower() in ("nan", "inf", "infinity", "-inf", "-infinity", "null", "none"):
+            raise ValueError(f"Condition value cannot be reserved keyword '{clean}'.")
         # Either numeric (integer/float) or a valid indicator identifier
         if not (re.match(r"^-?\d+(\.\d+)?$", clean) or re.match(r"^[A-Za-z0-9_]{1,64}$", clean)):
             raise ValueError(f"Invalid condition value '{clean}'. Must be numeric or a valid indicator identifier.")
@@ -132,12 +136,16 @@ def _read_strategies() -> list:
                     return []
                 strategies = json.loads(content)
             if not isinstance(strategies, list):
-                raise ValueError("strategy store is not a list")
+                logger.warning("Strategy store is not a list; returning empty list.")
+                return []
             return strategies
+        except json.JSONDecodeError as jde:
+            logger.warning("Strategy store is corrupted JSON (%s); returning empty list.", jde)
+            return []
         except HTTPException:
             raise
-        except (OSError, ValueError, json.JSONDecodeError) as e:
-            logger.exception("Strategy store is unreadable: %s", e)
+        except OSError as e:
+            logger.exception("Strategy store I/O error: %s", e)
             raise HTTPException(status_code=503, detail="Strategy store is unavailable.")
 
 

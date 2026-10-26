@@ -10,9 +10,11 @@ Provides:
 """
 
 import time
+import math
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field, ConfigDict
 
 
 from data.market_hours import get_market_status, is_market_open
@@ -399,43 +401,46 @@ async def get_option_tick(
     }
 
 
-@router.get("/option-strategy-payoff")
-async def get_strategy_payoff(
-    underlying: str = Query("NIFTY", description="Underlying index: NIFTY, BANKNIFTY, SENSEX, FINNIFTY, MIDCPNIFTY"),
-    strategy: str = Query("BULL_PUT_SPREAD", description="BUY_CALL, BUY_PUT, SELL_CALL, SELL_PUT, BULL_PUT_SPREAD, BEAR_CALL_SPREAD, LONG_FUTURES, SHORT_FUTURES"),
-    strike: Optional[float] = Query(None, description="Primary strike price (ATM if omitted)"),
-    _rate_limit: bool = Depends(rate_limiter(60))
-):
-    """
-    Computes institutional Payoff Diagrams and Greeks for Indian F&O strategies:
-    - Long Option (CE / PE Buying)
-    - Short Option (CE / PE Directional Writing with positive theta)
-    - Bull Put Credit Spread (Sell OTM PE, Buy lower PE hedge)
-    - Bear Call Credit Spread (Sell OTM CE, Buy higher CE hedge)
-    - Long / Short Futures
-    Returns curve data points, breakeven levels, max profit, max loss, and net margin.
-    """
-    clean_und = _sanitize_ticker(underlying)
-    strat = strategy.strip().upper()
-    valid_strats = {
-        "BUY_CALL", "BUY_PUT", "SELL_CALL", "SELL_PUT",
-        "BULL_PUT_SPREAD", "BEAR_CALL_SPREAD", "LONG_FUTURES", "SHORT_FUTURES"
-    }
-    if strat not in valid_strats:
-        raise HTTPException(status_code=400, detail=f"Invalid strategy '{strategy}'. Allowed: {sorted(valid_strats)}")
+class OptionLegInput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    strike: float = Field(..., description="Leg strike price")
+    option_type: str = Field(..., description="'CE', 'PE', or 'FUT'")
+    action: str = Field(..., description="'BUY' or 'SELL'")
+    lots: int = Field(1, description="Number of lots")
+    lot_size: Optional[int] = Field(None, description="Override lot size")
+    premium: Optional[float] = Field(None, description="Known entry premium")
 
-    quote = await RealTimeDataFeed.get_realtime_quote(clean_und)
-    current_spot = float(quote.get("ltp", 24000.0))
-    interval = _deriv_engine.get_strike_interval(clean_und)
-    lot_size = _deriv_engine.get_lot_size(clean_und)
-    sigma = _deriv_engine.fetch_live_iv(ticker=clean_und)
-    r = _deriv_engine.RISK_FREE_RATE
-    dynamic_dte = _deriv_engine.get_days_to_expiry(clean_und)
-    T = max(0.001, dynamic_dte / 365.0)
 
-    atm_strike = float(int(interval * round(current_spot / interval)))
-    prim_strike = float(strike) if strike is not None and math.isfinite(strike) and strike > 0 else atm_strike
+class StrategyPayoffRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    underlying: str = Field("NIFTY", description="Underlying ticker symbol")
+    current_spot: Optional[float] = Field(None, description="Underlying spot price override")
+    strategy: Optional[str] = Field(None, description="Preset strategy name if applicable")
+    strike: Optional[float] = Field(None, description="Primary strike price")
+    lot_size: Optional[int] = Field(None, description="Lot size override")
+    legs: Optional[List[OptionLegInput]] = Field(None, description="Custom strategy legs")
 
+
+VALID_STRATEGIES = {
+    "BUY_CALL", "BUY_PUT", "SELL_CALL", "SELL_PUT",
+    "BULL_PUT_SPREAD", "BEAR_CALL_SPREAD", "IRON_CONDOR",
+    "LONG_FUTURES", "SHORT_FUTURES"
+}
+
+
+def _compute_preset_payoff(
+    clean_und: str,
+    strat: str,
+    current_spot: float,
+    prim_strike: float,
+    lot_size: int,
+    interval: int,
+    atm_strike: float,
+    dynamic_dte: float,
+    T: float,
+    r: float,
+    sigma: float
+) -> Dict[str, Any]:
     # Generate spot range (+/- 5% around spot in 41 steps)
     spot_min = round(current_spot * 0.95, 2)
     spot_max = round(current_spot * 1.05, 2)
@@ -451,7 +456,7 @@ async def get_strategy_payoff(
     if strat == "BUY_CALL":
         bs_entry = _deriv_engine.black_scholes(current_spot, prim_strike, T, r, sigma, "CE")
         prem = bs_entry["premium"]
-        margin_req = prem * lot_size
+        margin_req = max(0.0, prem * lot_size)
         max_loss = -margin_req
         max_profit = float("inf")
         be = prim_strike + prem
@@ -466,7 +471,7 @@ async def get_strategy_payoff(
     elif strat == "BUY_PUT":
         bs_entry = _deriv_engine.black_scholes(current_spot, prim_strike, T, r, sigma, "PE")
         prem = bs_entry["premium"]
-        margin_req = prem * lot_size
+        margin_req = max(0.0, prem * lot_size)
         max_loss = -margin_req
         max_profit = (prim_strike - prem) * lot_size
         be = prim_strike - prem
@@ -479,10 +484,10 @@ async def get_strategy_payoff(
             payoff_curve.append({"spot": s, "pnl": round(pnl, 2)})
 
     elif strat == "SELL_CALL":
-        short_k = prim_strike if strike is not None else atm_strike + interval
+        short_k = prim_strike if prim_strike != atm_strike else atm_strike + interval
         bs_entry = _deriv_engine.black_scholes(current_spot, short_k, T, r, sigma, "CE")
         prem = bs_entry["premium"]
-        margin_req = current_spot * lot_size * _deriv_engine.FUTURES_MARGIN_RATES.get(clean_und, 0.15)
+        margin_req = max(0.0, current_spot * lot_size * _deriv_engine.FUTURES_MARGIN_RATES.get(clean_und, 0.15))
         max_profit = prem * lot_size
         max_loss = float("-inf")
         be = short_k + prem
@@ -495,10 +500,10 @@ async def get_strategy_payoff(
             payoff_curve.append({"spot": s, "pnl": round(pnl, 2)})
 
     elif strat == "SELL_PUT":
-        short_k = prim_strike if strike is not None else atm_strike - interval
+        short_k = prim_strike if prim_strike != atm_strike else max(interval, atm_strike - interval)
         bs_entry = _deriv_engine.black_scholes(current_spot, short_k, T, r, sigma, "PE")
         prem = bs_entry["premium"]
-        margin_req = current_spot * lot_size * _deriv_engine.FUTURES_MARGIN_RATES.get(clean_und, 0.15)
+        margin_req = max(0.0, current_spot * lot_size * _deriv_engine.FUTURES_MARGIN_RATES.get(clean_und, 0.15))
         max_profit = prem * lot_size
         max_loss = -(short_k - prem) * lot_size
         be = short_k - prem
@@ -511,15 +516,15 @@ async def get_strategy_payoff(
             payoff_curve.append({"spot": s, "pnl": round(pnl, 2)})
 
     elif strat == "BULL_PUT_SPREAD":
-        short_k = prim_strike if strike is not None else atm_strike - interval
-        long_k = short_k - interval
+        short_k = prim_strike if prim_strike != atm_strike else max(interval, atm_strike - interval)
+        long_k = max(float(interval), short_k - interval)
         bs_s = _deriv_engine.black_scholes(current_spot, short_k, T, r, sigma, "PE")
         bs_l = _deriv_engine.black_scholes(current_spot, long_k, T, r, sigma, "PE")
         net_credit = max(1.0, round(bs_s["premium"] - bs_l["premium"], 2))
-        spread_w = short_k - long_k
+        spread_w = max(1.0, short_k - long_k)
         max_profit = net_credit * lot_size
         max_loss = -(spread_w - net_credit) * lot_size
-        margin_req = (spread_w - net_credit) * lot_size + 2500.0
+        margin_req = max(0.0, (spread_w - net_credit) * lot_size + 2500.0)
         be = short_k - net_credit
         breakevens.append(round(be, 2))
         legs.append({"type": "SELL_PE", "strike": short_k, "premium": bs_s["premium"]})
@@ -532,15 +537,15 @@ async def get_strategy_payoff(
             payoff_curve.append({"spot": s, "pnl": round(pnl, 2)})
 
     elif strat == "BEAR_CALL_SPREAD":
-        short_k = prim_strike if strike is not None else atm_strike + interval
+        short_k = prim_strike if prim_strike != atm_strike else atm_strike + interval
         long_k = short_k + interval
         bs_s = _deriv_engine.black_scholes(current_spot, short_k, T, r, sigma, "CE")
         bs_l = _deriv_engine.black_scholes(current_spot, long_k, T, r, sigma, "CE")
         net_credit = max(1.0, round(bs_s["premium"] - bs_l["premium"], 2))
-        spread_w = long_k - short_k
+        spread_w = max(1.0, long_k - short_k)
         max_profit = net_credit * lot_size
         max_loss = -(spread_w - net_credit) * lot_size
-        margin_req = (spread_w - net_credit) * lot_size + 2500.0
+        margin_req = max(0.0, (spread_w - net_credit) * lot_size + 2500.0)
         be = short_k + net_credit
         breakevens.append(round(be, 2))
         legs.append({"type": "SELL_CE", "strike": short_k, "premium": bs_s["premium"]})
@@ -552,8 +557,43 @@ async def get_strategy_payoff(
             pnl = (net_credit - (val_short - val_long)) * lot_size
             payoff_curve.append({"spot": s, "pnl": round(pnl, 2)})
 
+    elif strat == "IRON_CONDOR":
+        sp = max(float(interval), (prim_strike - interval) if prim_strike != atm_strike else (atm_strike - interval))
+        lp = max(float(interval), sp - interval)
+        sc = (prim_strike + interval) if prim_strike != atm_strike else (atm_strike + interval)
+        lc = sc + interval
+        bs_sp = _deriv_engine.black_scholes(current_spot, sp, T, r, sigma, "PE")
+        bs_lp = _deriv_engine.black_scholes(current_spot, lp, T, r, sigma, "PE")
+        bs_sc = _deriv_engine.black_scholes(current_spot, sc, T, r, sigma, "CE")
+        bs_lc = _deriv_engine.black_scholes(current_spot, lc, T, r, sigma, "CE")
+
+        put_credit = max(0.5, round(bs_sp["premium"] - bs_lp["premium"], 2))
+        call_credit = max(0.5, round(bs_sc["premium"] - bs_lc["premium"], 2))
+        net_credit = round(put_credit + call_credit, 2)
+        wing_w = float(interval)
+        max_loss_per_share = max(1.0, wing_w - net_credit)
+        max_profit = net_credit * lot_size
+        max_loss = -max_loss_per_share * lot_size
+        margin_req = max(0.0, max_loss_per_share * lot_size + 3500.0)
+
+        lower_be = round(sp - net_credit, 2)
+        upper_be = round(sc + net_credit, 2)
+        breakevens.append(lower_be)
+        breakevens.append(upper_be)
+
+        legs.append({"type": "SELL_PE", "strike": sp, "premium": bs_sp["premium"]})
+        legs.append({"type": "BUY_PE", "strike": lp, "premium": bs_lp["premium"]})
+        legs.append({"type": "SELL_CE", "strike": sc, "premium": bs_sc["premium"]})
+        legs.append({"type": "BUY_CE", "strike": lc, "premium": bs_lc["premium"]})
+
+        for s in spot_steps:
+            val_put_spread = max(0.0, sp - s) - max(0.0, lp - s)
+            val_call_spread = max(0.0, s - sc) - max(0.0, s - lc)
+            pnl = (net_credit - val_put_spread - val_call_spread) * lot_size
+            payoff_curve.append({"spot": s, "pnl": round(pnl, 2)})
+
     elif strat == "LONG_FUTURES":
-        margin_req = current_spot * lot_size * _deriv_engine.FUTURES_MARGIN_RATES.get(clean_und, 0.15)
+        margin_req = max(0.0, current_spot * lot_size * _deriv_engine.FUTURES_MARGIN_RATES.get(clean_und, 0.15))
         max_profit = float("inf")
         max_loss = -current_spot * lot_size
         breakevens.append(current_spot)
@@ -563,7 +603,7 @@ async def get_strategy_payoff(
             payoff_curve.append({"spot": s, "pnl": round(pnl, 2)})
 
     elif strat == "SHORT_FUTURES":
-        margin_req = current_spot * lot_size * _deriv_engine.FUTURES_MARGIN_RATES.get(clean_und, 0.15)
+        margin_req = max(0.0, current_spot * lot_size * _deriv_engine.FUTURES_MARGIN_RATES.get(clean_und, 0.15))
         max_profit = current_spot * lot_size
         max_loss = float("-inf")
         breakevens.append(current_spot)
@@ -578,13 +618,325 @@ async def get_strategy_payoff(
         "current_spot": round(current_spot, 2),
         "days_to_expiry": round(dynamic_dte, 4),
         "lot_size": lot_size,
-        "margin_required": round(margin_req, 2),
+        "margin_required": max(0.0, round(margin_req, 2)),
         "max_profit": None if math.isinf(max_profit) else round(max_profit, 2),
         "max_loss": None if math.isinf(max_loss) else round(max_loss, 2),
         "breakevens": breakevens,
         "legs": legs,
         "payoff_curve": payoff_curve
     }
+
+
+def _compute_custom_legs_payoff(
+    clean_und: str,
+    current_spot: float,
+    legs_input: List[OptionLegInput],
+    base_lot_size: int,
+    dynamic_dte: float,
+    T: float,
+    r: float,
+    sigma: float
+) -> Dict[str, Any]:
+    all_strikes = [float(l.strike) for l in legs_input]
+    min_k = min(current_spot, min(all_strikes))
+    max_k = max(current_spot, max(all_strikes))
+    spot_min = round(min_k * 0.90, 2)
+    spot_max = round(max_k * 1.10, 2)
+    if spot_max <= spot_min:
+        spot_min = round(current_spot * 0.95, 2)
+        spot_max = round(current_spot * 1.05, 2)
+    spot_steps = [round(spot_min + (spot_max - spot_min) * (i / 40.0), 2) for i in range(41)]
+
+    evaluated_legs = []
+    total_debit = 0.0
+    total_credit = 0.0
+    has_short = False
+    has_fut = False
+
+    for leg in legs_input:
+        l_strike = float(leg.strike)
+        opt_t = str(leg.option_type).strip().upper()
+        act = str(leg.action).strip().upper()
+        eff_lots = int(leg.lots)
+        eff_l_size = int(leg.lot_size) if (leg.lot_size and leg.lot_size > 0) else base_lot_size
+        qty = eff_lots * eff_l_size
+
+        if leg.premium is not None:
+            prem = float(leg.premium)
+        elif opt_t == "FUT":
+            prem = 0.0
+        else:
+            bs = _deriv_engine.black_scholes(current_spot, l_strike, T, r, sigma, opt_t)
+            prem = float(bs["premium"])
+
+        if opt_t == "FUT":
+            has_fut = True
+
+        if act == "BUY":
+            if opt_t != "FUT":
+                total_debit += prem * qty
+        else:
+            has_short = True
+            if opt_t != "FUT":
+                total_credit += prem * qty
+
+        evaluated_legs.append({
+            "type": f"{act}_{opt_t}",
+            "strike": l_strike,
+            "lots": eff_lots,
+            "lot_size": eff_l_size,
+            "total_qty": qty,
+            "premium": round(prem, 2)
+        })
+
+    payoff_curve = []
+    for s in spot_steps:
+        leg_pnl_sum = 0.0
+        for leg_info in evaluated_legs:
+            t = leg_info["type"]
+            k = leg_info["strike"]
+            q = leg_info["total_qty"]
+            p = leg_info["premium"]
+            if t == "BUY_CE":
+                val = max(0.0, s - k)
+                leg_pnl_sum += (val - p) * q
+            elif t == "BUY_PE":
+                val = max(0.0, k - s)
+                leg_pnl_sum += (val - p) * q
+            elif t == "SELL_CE":
+                val = max(0.0, s - k)
+                leg_pnl_sum += (p - val) * q
+            elif t == "SELL_PE":
+                val = max(0.0, k - s)
+                leg_pnl_sum += (p - val) * q
+            elif t == "BUY_FUT":
+                leg_pnl_sum += (s - k) * q
+            elif t == "SELL_FUT":
+                leg_pnl_sum += (k - s) * q
+        payoff_curve.append({"spot": s, "pnl": round(leg_pnl_sum, 2)})
+
+    pnls = [pt["pnl"] for pt in payoff_curve]
+    max_pnl = max(pnls)
+    min_pnl = min(pnls)
+
+    # Breakeven calculation via root-crossing interpolation
+    breakevens = []
+    for i in range(len(payoff_curve) - 1):
+        s1, p1 = payoff_curve[i]["spot"], payoff_curve[i]["pnl"]
+        s2, p2 = payoff_curve[i+1]["spot"], payoff_curve[i+1]["pnl"]
+        if p1 == 0:
+            breakevens.append(round(s1, 2))
+        elif (p1 < 0 and p2 > 0) or (p1 > 0 and p2 < 0):
+            be = s1 - p1 * (s2 - s1) / (p2 - p1)
+            breakevens.append(round(be, 2))
+    if payoff_curve and payoff_curve[-1]["pnl"] == 0:
+        breakevens.append(round(payoff_curve[-1]["spot"], 2))
+    breakevens = sorted(list(set(breakevens)))
+
+    # Margin calculation
+    if has_short or has_fut:
+        margin_rate = _deriv_engine.FUTURES_MARGIN_RATES.get(clean_und, 0.15)
+        span_margin = current_spot * base_lot_size * margin_rate
+        if min_pnl < 0 and not math.isinf(min_pnl):
+            margin_req = max(2500.0, abs(min_pnl) + 2500.0)
+        else:
+            margin_req = max(0.0, span_margin + max(0.0, total_debit - total_credit))
+    else:
+        margin_req = max(0.0, total_debit)
+
+    return {
+        "underlying": clean_und,
+        "strategy": "CUSTOM",
+        "current_spot": round(current_spot, 2),
+        "days_to_expiry": round(dynamic_dte, 4),
+        "lot_size": base_lot_size,
+        "margin_required": max(0.0, round(margin_req, 2)),
+        "max_profit": None if math.isinf(max_pnl) else round(max_pnl, 2),
+        "max_loss": None if math.isinf(min_pnl) else round(min_pnl, 2),
+        "breakevens": breakevens,
+        "legs": evaluated_legs,
+        "payoff_curve": payoff_curve
+    }
+
+
+@router.get("/option-strategy-payoff")
+async def get_strategy_payoff(
+    underlying: str = Query("NIFTY", description="Underlying index: NIFTY, BANKNIFTY, SENSEX, FINNIFTY, MIDCPNIFTY"),
+    strategy: str = Query("BULL_PUT_SPREAD", description="BUY_CALL, BUY_PUT, SELL_CALL, SELL_PUT, BULL_PUT_SPREAD, BEAR_CALL_SPREAD, IRON_CONDOR, LONG_FUTURES, SHORT_FUTURES"),
+    strike: Optional[float] = Query(None, description="Primary strike price (ATM if omitted)"),
+    spot: Optional[float] = Query(None, description="Underlying spot price override"),
+    lot_size: Optional[int] = Query(None, description="Lot size override"),
+    _rate_limit: bool = Depends(rate_limiter(60))
+):
+    """
+    Computes institutional Payoff Diagrams and Greeks for Indian F&O strategies:
+    - Long Option (CE / PE Buying)
+    - Short Option (CE / PE Directional Writing with positive theta)
+    - Bull Put Credit Spread (Sell OTM PE, Buy lower PE hedge)
+    - Bear Call Credit Spread (Sell OTM CE, Buy higher CE hedge)
+    - Iron Condor (Sell OTM PE+CE, Buy outer protective wings)
+    - Long / Short Futures
+    Returns curve data points, breakeven levels, max profit, max loss, and net margin.
+    """
+    clean_und = _sanitize_ticker(underlying)
+    strat = strategy.strip().upper()
+    if strat not in VALID_STRATEGIES:
+        raise HTTPException(status_code=400, detail=f"Invalid strategy '{strategy}'. Allowed: {sorted(VALID_STRATEGIES)}")
+
+    # Strike validation
+    if strike is not None:
+        if not math.isfinite(strike) or strike <= 0 or strike > 10_000_000.0:
+            raise HTTPException(status_code=400, detail="Invalid strike price. Must be a finite positive number <= 10,000,000.")
+
+    # Spot price resolution & validation
+    if spot is not None:
+        if not math.isfinite(spot) or spot < 0.05 or spot > 10_000_000.0:
+            raise HTTPException(status_code=400, detail="Invalid spot price. Must be between 0.05 and 10,000,000.")
+        current_spot = float(spot)
+    else:
+        quote = await RealTimeDataFeed.get_realtime_quote(clean_und)
+        raw_spot = quote.get("ltp") if quote else None
+        if raw_spot is not None and isinstance(raw_spot, (int, float)) and math.isfinite(raw_spot) and raw_spot >= 0.05 and raw_spot <= 10_000_000.0:
+            current_spot = float(raw_spot)
+        else:
+            current_spot = 24000.0
+
+    if not math.isfinite(current_spot) or current_spot < 0.05 or current_spot > 10_000_000.0:
+        raise HTTPException(status_code=400, detail="Underlying spot price out of bounds (must be between 0.05 and 10,000,000).")
+
+    # Lot size validation
+    if lot_size is not None and lot_size <= 0:
+        raise HTTPException(status_code=400, detail="Lot size must be a positive integer.")
+    eff_lot_size = lot_size if (lot_size is not None and lot_size > 0) else _deriv_engine.get_lot_size(clean_und)
+
+    interval = max(1, _deriv_engine.get_strike_interval(clean_und))
+    sigma = _deriv_engine.fetch_live_iv(ticker=clean_und)
+    r = _deriv_engine.RISK_FREE_RATE
+    dynamic_dte = _deriv_engine.get_days_to_expiry(clean_und)
+    T = max(0.001, dynamic_dte / 365.0)
+
+    atm_strike = float(max(1, int(interval * round(current_spot / interval))))
+    prim_strike = float(strike) if strike is not None else atm_strike
+
+    return _compute_preset_payoff(
+        clean_und=clean_und,
+        strat=strat,
+        current_spot=current_spot,
+        prim_strike=prim_strike,
+        lot_size=eff_lot_size,
+        interval=interval,
+        atm_strike=atm_strike,
+        dynamic_dte=dynamic_dte,
+        T=T,
+        r=r,
+        sigma=sigma
+    )
+
+
+@router.post("/option-strategy-payoff")
+async def calculate_custom_strategy_payoff(
+    payload: StrategyPayoffRequest,
+    _rate_limit: bool = Depends(rate_limiter(60))
+):
+    """
+    Computes institutional Payoff Diagrams and Greeks for custom multi-leg Option strategies
+    or preset strategies posted via JSON payload.
+    Supports up to 50 custom legs (CE/PE/FUT with custom strikes, actions, lots, and premiums).
+    """
+    clean_und = _sanitize_ticker(payload.underlying)
+
+    # Spot price resolution & validation
+    if payload.current_spot is not None:
+        if not math.isfinite(payload.current_spot) or payload.current_spot < 0.05 or payload.current_spot > 10_000_000.0:
+            raise HTTPException(status_code=400, detail="Invalid spot price. Must be between 0.05 and 10,000,000.")
+        current_spot = float(payload.current_spot)
+    else:
+        quote = await RealTimeDataFeed.get_realtime_quote(clean_und)
+        raw_spot = quote.get("ltp") if quote else None
+        if raw_spot is not None and isinstance(raw_spot, (int, float)) and math.isfinite(raw_spot) and raw_spot >= 0.05 and raw_spot <= 10_000_000.0:
+            current_spot = float(raw_spot)
+        else:
+            current_spot = 24000.0
+
+    if not math.isfinite(current_spot) or current_spot < 0.05 or current_spot > 10_000_000.0:
+        raise HTTPException(status_code=400, detail="Underlying spot price out of bounds.")
+
+    # Lot size validation
+    if payload.lot_size is not None and payload.lot_size <= 0:
+        raise HTTPException(status_code=400, detail="Lot size must be a positive integer.")
+    base_lot_size = payload.lot_size if (payload.lot_size and payload.lot_size > 0) else _deriv_engine.get_lot_size(clean_und)
+
+    interval = max(1, _deriv_engine.get_strike_interval(clean_und))
+    sigma = _deriv_engine.fetch_live_iv(ticker=clean_und)
+    r = _deriv_engine.RISK_FREE_RATE
+    dynamic_dte = _deriv_engine.get_days_to_expiry(clean_und)
+    T = max(0.001, dynamic_dte / 365.0)
+
+    # Primary strike validation if passed
+    if payload.strike is not None:
+        if not math.isfinite(payload.strike) or payload.strike <= 0 or payload.strike > 10_000_000.0:
+            raise HTTPException(status_code=400, detail="Invalid strike price. Must be a finite positive number <= 10,000,000.")
+
+    # Check legs vs preset strategy
+    if payload.legs is not None:
+        if len(payload.legs) == 0:
+            raise HTTPException(status_code=400, detail="Custom strategy payoff must have at least 1 leg (0 legs provided).")
+        if len(payload.legs) > 50:
+            raise HTTPException(status_code=400, detail="Custom strategy payoff cannot exceed 50 legs (maximum 50 legs allowed).")
+
+        for idx, leg in enumerate(payload.legs):
+            opt_t = str(leg.option_type).strip().upper()
+            if opt_t not in ("CE", "PE", "FUT"):
+                raise HTTPException(status_code=400, detail=f"Invalid option_type '{leg.option_type}' in leg {idx+1}. Must be 'CE', 'PE', or 'FUT'.")
+
+            act = str(leg.action).strip().upper()
+            if act not in ("BUY", "SELL"):
+                raise HTTPException(status_code=400, detail=f"Invalid action '{leg.action}' in leg {idx+1}. Must be 'BUY' or 'SELL'.")
+
+            if not isinstance(leg.strike, (int, float)) or not math.isfinite(leg.strike) or leg.strike <= 0 or leg.strike > 10_000_000.0:
+                raise HTTPException(status_code=400, detail=f"Invalid strike price {leg.strike} in leg {idx+1}. Must be a finite positive number <= 10,000,000.")
+
+            if not isinstance(leg.lots, int) or leg.lots <= 0:
+                raise HTTPException(status_code=400, detail=f"Leg {idx+1} lots must be a positive integer.")
+
+            if leg.lot_size is not None and (not isinstance(leg.lot_size, int) or leg.lot_size <= 0):
+                raise HTTPException(status_code=400, detail=f"Leg {idx+1} lot size must be a positive integer.")
+
+            if leg.premium is not None and (not isinstance(leg.premium, (int, float)) or not math.isfinite(leg.premium) or leg.premium < 0):
+                raise HTTPException(status_code=400, detail=f"Leg {idx+1} premium must be a non-negative finite number.")
+
+        return _compute_custom_legs_payoff(
+            clean_und=clean_und,
+            current_spot=current_spot,
+            legs_input=payload.legs,
+            base_lot_size=base_lot_size,
+            dynamic_dte=dynamic_dte,
+            T=T,
+            r=r,
+            sigma=sigma
+        )
+
+    # If no custom legs provided, evaluate preset strategy
+    strat = (payload.strategy or "BULL_PUT_SPREAD").strip().upper()
+    if strat not in VALID_STRATEGIES:
+        raise HTTPException(status_code=400, detail=f"Invalid strategy '{strat}'. Allowed: {sorted(VALID_STRATEGIES)}")
+
+    atm_strike = float(max(1, int(interval * round(current_spot / interval))))
+    prim_strike = float(payload.strike) if payload.strike is not None else atm_strike
+
+    return _compute_preset_payoff(
+        clean_und=clean_und,
+        strat=strat,
+        current_spot=current_spot,
+        prim_strike=prim_strike,
+        lot_size=base_lot_size,
+        interval=interval,
+        atm_strike=atm_strike,
+        dynamic_dte=dynamic_dte,
+        T=T,
+        r=r,
+        sigma=sigma
+    )
 
 
 @router.get("/news-sentiment/{ticker}")

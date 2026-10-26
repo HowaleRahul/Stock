@@ -277,10 +277,10 @@ class DerivativeTradePlan:
             "hedge_strike_price": round(self.hedge_strike_price, 2),
             "hedge_entry_price": round(self.hedge_entry_price, 2),
             "net_credit": round(self.net_credit, 2),
-            "margin_or_premium_required": round(self.margin_or_premium_required, 2),
-            "max_loss_amount": round(self.max_loss_amount, 2),
-            "max_profit_amount": round(self.max_profit_amount, 2),
-            "risk_reward_ratio": round(self.risk_reward_ratio, 2),
+            "margin_or_premium_required": max(0.0, round(self.margin_or_premium_required, 2)) if math.isfinite(self.margin_or_premium_required) else 0.0,
+            "max_loss_amount": round(self.max_loss_amount, 2) if math.isfinite(self.max_loss_amount) else 0.0,
+            "max_profit_amount": round(self.max_profit_amount, 2) if math.isfinite(self.max_profit_amount) else 0.0,
+            "risk_reward_ratio": min(100.0, max(0.0, round(self.risk_reward_ratio, 2))) if math.isfinite(self.risk_reward_ratio) else 0.0,
             "delta": round(self.delta, 4),
             "theta": round(self.theta, 4),
             "gamma": round(self.gamma, 6),
@@ -593,7 +593,9 @@ class DerivativeEngine:
         Calculate Theoretical Option Premium and Greeks using Black-Scholes-Merton.
         Accurately settles intrinsic value upon expiry (T <= 0) or extreme volatility bounds.
         """
-        opt_type = option_type.upper().strip()
+        opt_type = str(option_type).upper().strip() if option_type else ""
+        if opt_type not in ("CE", "PE"):
+            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
 
         # Input validation: non-numeric, NaN, inf, or non-positive spot/strike
         if not all(isinstance(v, (int, float)) for v in (S, K, T, r, sigma)):
@@ -607,10 +609,10 @@ class DerivativeEngine:
         # Expiry moment (T <= 0) or zero volatility boundary: Option value converges to intrinsic value
         if T <= 0.0 or sigma <= 1e-9:
             if opt_type == "CE":
-                intrinsic = max(0.05, S - K)
+                intrinsic = max(0.05, max(0.0, S - K))
                 delta = 1.0 if S > K else 0.0
             else:
-                intrinsic = max(0.05, K - S)
+                intrinsic = max(0.05, max(0.0, K - S))
                 delta = -1.0 if K > S else 0.0
             return {
                 "premium": round(float(intrinsic), 2),
@@ -623,10 +625,10 @@ class DerivativeEngine:
         denom = sigma * np.sqrt(T)
         if denom <= 1e-9 or (S * denom) <= 1e-12:
             if opt_type == "CE":
-                intrinsic = max(0.05, S - K)
+                intrinsic = max(0.05, max(0.0, S - K))
                 delta = 1.0 if S > K else 0.0
             else:
-                intrinsic = max(0.05, K - S)
+                intrinsic = max(0.05, max(0.0, K - S))
                 delta = -1.0 if K > S else 0.0
             return {
                 "premium": round(float(intrinsic), 2),
@@ -711,10 +713,10 @@ class DerivativeEngine:
             }
         except Exception:
             if opt_type == "CE":
-                intrinsic = max(0.05, S - K)
+                intrinsic = max(0.05, max(0.0, S - K))
                 delta = 1.0 if S > K else 0.0
             else:
-                intrinsic = max(0.05, K - S)
+                intrinsic = max(0.05, max(0.0, K - S))
                 delta = -1.0 if K > S else 0.0
             return {"premium": round(intrinsic, 2), "delta": float(delta), "gamma": 0.0, "theta": 0.0, "vega": 0.0}
 
@@ -767,14 +769,16 @@ class DerivativeEngine:
         margin_rate = self.FUTURES_MARGIN_RATES.get(underlying, 0.15)
         futures_margin = contract_value * margin_rate
 
-        # 1. Decide Instrument Type: FUTURES vs OPTIONS vs SPREAD vs SELL_OPTIONS
+        # 1. Decide Instrument Type: FUTURES vs OPTIONS vs SPREAD vs SELL_OPTIONS vs IRON_CONDOR
         chosen_instrument = derivative_type.upper().strip()
         if chosen_instrument == "AUTO":
             # Real Indian F&O Allocation Logic:
-            # Rangebound / Low-ADX / Chop regime -> Option Selling (Credit Spreads / Directional Writing)
+            # Rangebound / Low-ADX / Chop regime -> Option Selling (Iron Condor / Credit Spreads / Directional Writing)
             # Trending / Breakout regime -> Futures (if large cap) or Option Buying
             if "range" in regime.lower() or "chop" in regime.lower():
-                if capital >= futures_margin:
+                if capital >= 50000.0 and abs(spot_plan.ai_probability - 0.5) <= 0.15:
+                    chosen_instrument = "IRON_CONDOR"
+                elif capital >= futures_margin:
                     chosen_instrument = "SELL_OPTIONS"
                 elif capital >= 25000.0:
                     chosen_instrument = "CREDIT_SPREAD"
@@ -813,6 +817,16 @@ class DerivativeEngine:
             )
         elif chosen_instrument in ("CREDIT_SPREAD", "SPREAD"):
             return self._build_credit_spread_plan(
+                spot_plan=spot_plan,
+                underlying=underlying,
+                capital=capital,
+                lot_size=lot_size,
+                interval=interval,
+                regime=regime,
+                iv=real_iv
+            )
+        elif chosen_instrument in ("IRON_CONDOR", "CONDOR"):
+            return self._build_iron_condor_plan(
                 spot_plan=spot_plan,
                 underlying=underlying,
                 capital=capital,
@@ -1117,6 +1131,163 @@ class DerivativeEngine:
             theta=round(net_theta, 4),
             gamma=round(-abs(bs_short["gamma"]) + abs(bs_long["gamma"]), 6),
             vega=round(-abs(bs_short["vega"]) + abs(bs_long["vega"]), 4),
+            days_to_expiry=round(dte, 4),
+            iv=sigma,
+            is_approved=is_approved,
+            rejection_reasons=rejections,
+            reasoning=reasoning
+        )
+
+    # -----------------------------------------------------------------------
+    # Defined-Risk Iron Condor Plan Builder (Rangebound / Expiry Day)
+    # -----------------------------------------------------------------------
+
+    def _build_iron_condor_plan(
+        self,
+        spot_plan: TradePlan,
+        underlying: str,
+        capital: float,
+        lot_size: int,
+        interval: int,
+        regime: str,
+        iv: float
+    ) -> DerivativeTradePlan:
+        """
+        Non-Directional 4-Leg Iron Condor Strategy for Rangebound / Expiry Day Markets:
+        - Downside (Bull Put Spread):
+            * Sell OTM Put: atm_strike - interval
+            * Buy OTM Put: atm_strike - 2 * interval (hedge wing)
+        - Upside (Bear Call Spread):
+            * Sell OTM Call: atm_strike + interval
+            * Buy OTM Call: atm_strike + 2 * interval (hedge wing)
+        - Margin required: Capped at (Wing Width * Lot Size) - Net Credit + buffer (~₹35k-₹45k).
+        - Theta: Substantial positive (+ve) net decay income from both sides.
+        - Breakevens:
+            * Lower Breakeven = (atm_strike - interval) - Net Credit
+            * Upper Breakeven = (atm_strike + interval) + Net Credit
+        """
+        spot = spot_plan.entry_price
+        atm_strike = self._round_to_nearest(spot, interval)
+
+        dte = self.get_days_to_expiry(underlying)
+        safe_dte = max(0.05, dte)
+        T = safe_dte / 365.0
+        r = self.RISK_FREE_RATE
+        sigma = iv
+
+        short_put = atm_strike - interval
+        long_put = atm_strike - (2 * interval)
+        short_call = atm_strike + interval
+        long_call = atm_strike + (2 * interval)
+
+        bs_sp = self.black_scholes(spot, short_put, T, r, sigma, "PE")
+        bs_lp = self.black_scholes(spot, long_put, T, r, sigma, "PE")
+        bs_sc = self.black_scholes(spot, short_call, T, r, sigma, "CE")
+        bs_lc = self.black_scholes(spot, long_call, T, r, sigma, "CE")
+
+        put_credit = max(0.5, round(bs_sp["premium"] - bs_lp["premium"], 2))
+        call_credit = max(0.5, round(bs_sc["premium"] - bs_lc["premium"], 2))
+        net_credit = round(put_credit + call_credit, 2)
+        wing_width = float(interval)
+        max_loss_per_share = max(1.0, wing_width - net_credit)
+
+        # Hedged SPAN margin under NSE rules (only one side at risk)
+        hedged_margin = round(max_loss_per_share * lot_size + 3500.0, 2)
+
+        target_net_credit = max(0.05, round(net_credit * 0.30, 2))  # 70% decay capture
+        sl_net_debit = round(net_credit * 1.50, 2)
+
+        max_profit = round((net_credit - target_net_credit) * lot_size, 2)
+        max_loss = round(max_loss_per_share * lot_size, 2)
+        rr = max_profit / max_loss if max_loss > 0 else 0.0
+
+        contract_symbol = f"{underlying} {short_put}/{short_call} IRON CONDOR"
+        hedge_symbol = f"{underlying} {long_put} PE / {long_call} CE HEDGE"
+
+        f_breakdown = IndianFOFrictionModel.calculate_iron_condor_friction(
+            short_put_entry=bs_sp["premium"],
+            short_put_exit=target_net_credit * 0.4,
+            long_put_entry=bs_lp["premium"],
+            long_put_exit=0.05,
+            short_call_entry=bs_sc["premium"],
+            short_call_exit=target_net_credit * 0.4,
+            long_call_entry=bs_lc["premium"],
+            long_call_exit=0.05,
+            quantity=lot_size
+        )
+        total_friction = f_breakdown.total_friction
+        net_profit = round(max_profit - total_friction, 2)
+
+        lower_be = round(short_put - net_credit, 2)
+        upper_be = round(short_call + net_credit, 2)
+
+        rejections = []
+        is_approved = True
+
+        if capital < hedged_margin:
+            is_approved = False
+            rejections.append(
+                f"Iron Condor Margin Deficit: 1 lot requires ₹{hedged_margin:,.2f} margin "
+                f"(Max loss ₹{max_loss:,.2f}). Available capital: ₹{capital:,.2f}."
+            )
+
+        if net_credit < 15.0:
+            is_approved = False
+            rejections.append(
+                f"Low Net Credit: Combined credit ₹{net_credit:.2f} is insufficient for 4-leg friction (₹{total_friction:.2f})."
+            )
+
+        if max_profit <= total_friction:
+            is_approved = False
+            rejections.append(
+                f"Iron Condor Breakeven Deficit: Net profit ₹{max_profit:.2f} fails to clear transaction friction ₹{total_friction:.2f}."
+            )
+
+        net_delta = round((abs(bs_sp["delta"]) - abs(bs_lp["delta"])) + (-bs_sc["delta"] + bs_lc["delta"]), 4)
+        net_theta = round((abs(bs_sp["theta"]) - abs(bs_lp["theta"])) + (abs(bs_sc["theta"]) - abs(bs_lc["theta"])), 4)
+        net_theta = max(0.2, net_theta)
+
+        reasoning = (
+            f"{'✅ APPROVED' if is_approved else '⛔ REJECTED'}: {contract_symbol}\n"
+            f"  ⚡ Net Delta: {net_delta:+.3f} (Delta Neutral) | ⏳ Net Theta: +₹{net_theta:.2f}/day | IV: {sigma*100:.1f}%\n"
+            f"  💰 Put Wing: Sell {short_put} PE (₹{bs_sp['premium']:.2f}) / Buy {long_put} PE (₹{bs_lp['premium']:.2f})\n"
+            f"  💰 Call Wing: Sell {short_call} CE (₹{bs_sc['premium']:.2f}) / Buy {long_call} CE (₹{bs_lc['premium']:.2f})\n"
+            f"  🏷️  Combined Net Credit: ₹{net_credit:,.2f} | Max Risk: ₹{max_loss:,.2f} | Max Profit: ₹{max_profit:,.2f}\n"
+            f"  🎯 Breakevens: ₹{lower_be:,.2f} to ₹{upper_be:,.2f} | Est. 4-Leg Friction: ₹{total_friction:,.2f}\n"
+            f"  📊 Hedged Margin: ₹{hedged_margin:,.2f} (1 lot = {lot_size} qty) | R:R: {rr:.2f}:1 | DTE: {dte:.2f} days"
+        )
+        if rejections:
+            reasoning += "\n  " + "\n  ".join(f"• {r}" for r in rejections)
+
+        return DerivativeTradePlan(
+            original_spot_plan=spot_plan,
+            instrument_type="IRON_CONDOR",
+            underlying_ticker=underlying,
+            contract_symbol=contract_symbol,
+            direction="NEUTRAL",
+            option_type="IRON_CONDOR",
+            strike_price=atm_strike,
+            strike_type="IRON_CONDOR",
+            action="SELL",
+            strategy_type="IRON_CONDOR",
+            lot_size=lot_size,
+            lots_to_trade=1,
+            total_quantity=lot_size,
+            entry_price=net_credit,
+            target_price=target_net_credit,
+            stop_loss_price=sl_net_debit,
+            hedge_contract_symbol=hedge_symbol,
+            hedge_strike_price=long_put,
+            hedge_entry_price=bs_lp["premium"],
+            net_credit=net_credit,
+            margin_or_premium_required=hedged_margin,
+            max_loss_amount=max_loss,
+            max_profit_amount=max_profit,
+            risk_reward_ratio=rr,
+            delta=net_delta,
+            theta=net_theta,
+            gamma=round(-abs(bs_sp["gamma"] + bs_sc["gamma"]), 6),
+            vega=round(-abs(bs_sp["vega"] + bs_sc["vega"]), 4),
             days_to_expiry=round(dte, 4),
             iv=sigma,
             is_approved=is_approved,

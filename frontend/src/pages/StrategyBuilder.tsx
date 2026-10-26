@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Save, SlidersHorizontal, CheckCircle2, Sparkles } from 'lucide-react';
+import { Plus, Trash2, Save, SlidersHorizontal, CheckCircle2, Sparkles, Layers } from 'lucide-react';
 import ErrorBoundary from '../components/ErrorBoundary';
+import { formatIndianCurrency } from '../utils/formatters';
 
 interface Condition {
   id: string;
@@ -20,10 +21,19 @@ const createCondition = (): Condition => ({
   value: '',
 });
 
+const UNDERLYING_SPECS = [
+  { id: 'NIFTY' as const, label: 'NIFTY 50', lotSize: 50, strikeStep: 50, typicalSpot: 24500, spreadMargin: 32500, debitOutlay: 6000, netCredit: 2250, thetaGain: 450 },
+  { id: 'BANKNIFTY' as const, label: 'BANKNIFTY 15', lotSize: 15, strikeStep: 100, typicalSpot: 52000, spreadMargin: 36000, debitOutlay: 3750, netCredit: 1800, thetaGain: 520 },
+  { id: 'SENSEX' as const, label: 'SENSEX 10', lotSize: 10, strikeStep: 100, typicalSpot: 80000, spreadMargin: 38000, debitOutlay: 3500, netCredit: 1600, thetaGain: 480 },
+  { id: 'FINNIFTY' as const, label: 'FINNIFTY 25', lotSize: 25, strikeStep: 50, typicalSpot: 23500, spreadMargin: 28000, debitOutlay: 2500, netCredit: 1250, thetaGain: 380 },
+  { id: 'MIDCPNIFTY' as const, label: 'MIDCPNIFTY 50', lotSize: 50, strikeStep: 25, typicalSpot: 12500, spreadMargin: 25000, debitOutlay: 3500, netCredit: 1400, thetaGain: 400 },
+];
+
 const F_AND_O_TEMPLATES = [
   {
-    name: 'NIFTY Bull Put Spread (Credit Spread)',
+    name: 'Bull Put Credit Spread (Sell OTM Put, Buy lower Put)',
     category: 'CREDIT_SPREAD' as const,
+    underlying: 'NIFTY' as const,
     description: 'High-probability OTM put credit spread harvesting positive daily theta decay. Sells 0.25 Delta Put with lower protective wing hedge for defined risk and margin relief.',
     bullish: [
       { indicator: 'RSI', operator: '>', value: '50' },
@@ -36,8 +46,9 @@ const F_AND_O_TEMPLATES = [
     ],
   },
   {
-    name: 'BANKNIFTY Bear Call Spread (Credit Spread)',
+    name: 'Bear Call Credit Spread (Sell OTM Call, Buy higher Call)',
     category: 'CREDIT_SPREAD' as const,
+    underlying: 'BANKNIFTY' as const,
     description: 'Resistance writing credit spread. Sells OTM Call at key resistance ceiling and buys higher protective call to harvest time decay with strictly defined risk.',
     bullish: [
       { indicator: 'RSI', operator: '<', value: '45' },
@@ -50,22 +61,26 @@ const F_AND_O_TEMPLATES = [
     ],
   },
   {
-    name: 'NIFTY Delta-Neutral Hedged Writing',
+    name: 'Iron Condor (Sell OTM Put + Buy further OTM Put, Sell OTM Call + Buy further OTM Call)',
     category: 'HEDGED_WRITING' as const,
-    description: 'Double-wing theta decay harvesting during low-volatility ADX consolidation regimes with hedged wings.',
+    underlying: 'NIFTY' as const,
+    description: 'Double-wing delta-neutral theta harvesting during low-volatility consolidation regimes. Sells OTM Put & Call with further OTM protective wings for defined risk.',
     bullish: [
-      { indicator: 'RSI', operator: '>', value: '42' },
-      { indicator: 'Price', operator: '>', value: '60' },
+      { indicator: 'RSI', operator: '>', value: '45' },
+      { indicator: 'EMA 20', operator: '>', value: '48' },
+      { indicator: 'Price', operator: '>', value: '50' },
     ],
     bearish: [
-      { indicator: 'RSI', operator: '<', value: '58' },
-      { indicator: 'Price', operator: '<', value: '20' },
+      { indicator: 'RSI', operator: '<', value: '55' },
+      { indicator: 'EMA 20', operator: '<', value: '52' },
+      { indicator: 'Price', operator: '<', value: '15' },
     ],
   },
   {
-    name: 'NIFTY 24500 CE Trend Follower',
+    name: 'Momentum Scalp Call (Fast CE Momentum)',
     category: 'DIRECTIONAL' as const,
-    description: 'Bullish intraday momentum riding above 20 EMA with RSI expansion on Nifty Call options.',
+    underlying: 'NIFTY' as const,
+    description: 'High-speed bullish intraday momentum scalp riding above 20 EMA with RSI expansion on index Call options.',
     bullish: [
       { indicator: 'RSI', operator: '>', value: '60' },
       { indicator: 'EMA 20', operator: '>', value: '50' },
@@ -77,9 +92,10 @@ const F_AND_O_TEMPLATES = [
     ],
   },
   {
-    name: 'BANKNIFTY 52000 PE Reversal',
+    name: 'Momentum Scalp Put (Fast PE Momentum)',
     category: 'DIRECTIONAL' as const,
-    description: 'Mean-reversion put hedge when BankNifty contracts show extreme overbought conditions and exhaust.',
+    underlying: 'BANKNIFTY' as const,
+    description: 'Mean-reversion and breakdown put momentum scalp when contracts show extreme overbought exhaustion or breakdown below 20 EMA.',
     bullish: [
       { indicator: 'RSI', operator: '<', value: '35' },
       { indicator: 'Price', operator: '>', value: '250' },
@@ -89,25 +105,13 @@ const F_AND_O_TEMPLATES = [
       { indicator: 'EMA 20', operator: '<', value: '40' },
     ],
   },
-  {
-    name: 'SENSEX 80000 Expiry Momentum',
-    category: 'DIRECTIONAL' as const,
-    description: 'High-speed BSE Sensex weekly expiry gamma scalp triggered on volume surge and directional breakout.',
-    bullish: [
-      { indicator: 'Volume', operator: '>', value: '50000' },
-      { indicator: 'RSI', operator: '>', value: '65' },
-    ],
-    bearish: [
-      { indicator: 'RSI', operator: '<', value: '40' },
-      { indicator: 'Price', operator: '<', value: '50' },
-    ],
-  },
 ];
 
 const StrategyBuilder = () => {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [strategyStyle, setStrategyStyle] = useState<'DIRECTIONAL' | 'CREDIT_SPREAD' | 'HEDGED_WRITING'>('DIRECTIONAL');
+  const [selectedUnderlying, setSelectedUnderlying] = useState<'NIFTY' | 'BANKNIFTY' | 'SENSEX' | 'FINNIFTY' | 'MIDCPNIFTY'>('NIFTY');
   const [strategies, setStrategies] = useState<any[]>([]);
   const [bullishConditions, setBullishConditions] = useState<Condition[]>([createCondition()]);
   const [bearishConditions, setBearishConditions] = useState<Condition[]>([createCondition()]);
@@ -128,6 +132,9 @@ const StrategyBuilder = () => {
     setName(tpl.name);
     setDescription(tpl.description);
     setStrategyStyle(tpl.category || 'DIRECTIONAL');
+    if (tpl.underlying) {
+      setSelectedUnderlying(tpl.underlying);
+    }
     setBullishConditions(tpl.bullish.map(c => ({ id: Math.random().toString(36).substring(2, 11), ...c })));
     setBearishConditions(tpl.bearish.map(c => ({ id: Math.random().toString(36).substring(2, 11), ...c })));
     setError('');
@@ -218,6 +225,7 @@ const StrategyBuilder = () => {
         name: trimmedName,
         description: description.trim(),
         strategy_style: strategyStyle,
+        underlying: selectedUnderlying,
         bullish_conditions: bullishConditions.map(({ indicator, operator, value }) => ({
           indicator,
           operator,
@@ -380,6 +388,77 @@ const StrategyBuilder = () => {
               </div>
             </div>
 
+            {/* Indian F&O Underlying Asset & Margin Estimator */}
+            <div className="mb-4 p-3 bg-gray-900/60 rounded-lg border border-gray-800">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold text-gray-200 flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-blue-400" />
+                  Select F&amp;O Underlying Asset
+                </span>
+                <span className="text-[10px] text-gray-400 font-mono">SEBI / NSE Lot &amp; SPAN Margins</span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5" role="group" aria-label="Underlying Selection">
+                {UNDERLYING_SPECS.map(u => (
+                  <button
+                    key={u.id}
+                    type="button"
+                    onClick={() => setSelectedUnderlying(u.id)}
+                    className={`p-2 rounded-lg border text-left transition-all ${
+                      selectedUnderlying === u.id
+                        ? 'bg-blue-600/20 border-blue-500 text-white shadow-sm ring-1 ring-blue-500/40'
+                        : 'bg-gray-800/60 border-gray-700/60 text-gray-300 hover:text-white hover:border-gray-600'
+                    }`}
+                  >
+                    <div className="font-bold text-xs font-mono">{u.label}</div>
+                    <div className="text-[10px] text-gray-400 mt-0.5">Lot: {u.lotSize} Qty</div>
+                    <div className="text-[9px] text-gray-500 font-mono">Step: {u.strikeStep} pts</div>
+                  </button>
+                ))}
+              </div>
+
+              {/* Dynamic Margin Feedback Banner */}
+              {(() => {
+                const spec = UNDERLYING_SPECS.find(s => s.id === selectedUnderlying) || UNDERLYING_SPECS[0];
+                const isCredit = strategyStyle === 'CREDIT_SPREAD';
+                const isCondor = strategyStyle === 'HEDGED_WRITING';
+                const estMargin = isCredit ? spec.spreadMargin : isCondor ? spec.spreadMargin * 1.4 : spec.debitOutlay;
+                const netCash = isCredit ? spec.netCredit : isCondor ? spec.netCredit * 1.8 : 0;
+                const thetaEst = isCredit ? spec.thetaGain : isCondor ? spec.thetaGain * 1.7 : -spec.thetaGain * 0.7;
+
+                return (
+                  <div className="mt-2.5 p-2.5 bg-gray-950/80 rounded-lg border border-gray-800 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
+                    <div>
+                      <span className="text-[10px] text-gray-400 block">Exchange Lot:</span>
+                      <span className="font-bold text-white">{spec.lotSize} Qty</span>{' '}
+                      <span className="text-[9px] text-gray-500">(Step: {spec.strikeStep})</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-gray-400 block">
+                        {strategyStyle === 'DIRECTIONAL' ? 'Est. 1 Lot Outlay:' : 'SPAN / Spread Margin:'}
+                      </span>
+                      <span className="font-bold text-amber-300">
+                        {formatIndianCurrency(estMargin)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-gray-400 block">
+                        {strategyStyle === 'DIRECTIONAL' ? 'Premium Outlay:' : 'Net Credit Upfront:'}
+                      </span>
+                      <span className={`font-bold ${strategyStyle !== 'DIRECTIONAL' ? 'text-emerald-400' : 'text-gray-300'}`}>
+                        {strategyStyle !== 'DIRECTIONAL' ? `+${formatIndianCurrency(netCash)}` : formatIndianCurrency(spec.debitOutlay)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-gray-400 block">Net Theta / Day:</span>
+                      <span className={`font-bold ${thetaEst > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {thetaEst > 0 ? `+${formatIndianCurrency(thetaEst)}/d` : `-${formatIndianCurrency(Math.abs(thetaEst))}/d`}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
             <div className="strategy-fields">
               <div className="field-block">
                 <label htmlFor="strat-name">Strategy name</label>
@@ -501,28 +580,44 @@ const StrategyBuilder = () => {
             <p>{description.trim() || 'Your strategy summary will appear here as you write it.'}</p>
 
             {/* Greek & Capital Profile Box */}
-            <div className="mt-4 p-3 rounded-lg bg-gray-900/90 border border-gray-800 space-y-2 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-gray-400">Theta Dynamics:</span>
-                <span className={`font-mono font-semibold ${
-                  strategyStyle !== 'DIRECTIONAL' ? 'text-emerald-400' : 'text-rose-400'
-                }`}>
-                  {strategyStyle !== 'DIRECTIONAL' ? '+₹Theta/day (Time Decay Profit)' : '-₹Theta/day (Time Decay Cost)'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-gray-400">Capital Requirement:</span>
-                <span className="font-mono text-gray-200">
-                  {strategyStyle !== 'DIRECTIONAL' ? 'Defined Spread Margin' : '100% Premium Outlay'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-gray-400">Payoff Profile:</span>
-                <span className="font-mono text-emerald-400">
-                  {strategyStyle === 'CREDIT_SPREAD' ? 'Defined Net Credit Max Gain' : strategyStyle === 'HEDGED_WRITING' ? 'Range-Bound Max Credit' : 'Directional Asymmetric Payoff'}
-                </span>
-              </div>
-            </div>
+            {(() => {
+              const spec = UNDERLYING_SPECS.find(s => s.id === selectedUnderlying) || UNDERLYING_SPECS[0];
+              const isCredit = strategyStyle === 'CREDIT_SPREAD';
+              const isCondor = strategyStyle === 'HEDGED_WRITING';
+              const estMargin = isCredit ? spec.spreadMargin : isCondor ? spec.spreadMargin * 1.4 : spec.debitOutlay;
+              const thetaEst = isCredit ? spec.thetaGain : isCondor ? spec.thetaGain * 1.7 : -spec.thetaGain * 0.7;
+
+              return (
+                <div className="mt-4 p-3 rounded-lg bg-gray-900/90 border border-gray-800 space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400">Target Underlying:</span>
+                    <span className="font-mono font-bold text-white">
+                      {spec.label} • Lot: {spec.lotSize} Qty
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400">Theta Dynamics:</span>
+                    <span className={`font-mono font-semibold ${
+                      strategyStyle !== 'DIRECTIONAL' ? 'text-emerald-400' : 'text-rose-400'
+                    }`}>
+                      {thetaEst > 0 ? `+${formatIndianCurrency(thetaEst)}/day (Decay Profit)` : `-${formatIndianCurrency(Math.abs(thetaEst))}/day (Decay Cost)`}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400">Capital Requirement:</span>
+                    <span className="font-mono text-amber-300 font-bold">
+                      {formatIndianCurrency(estMargin)} {strategyStyle !== 'DIRECTIONAL' ? '(SPAN Margin)' : '(Outlay)'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-400">Payoff Profile:</span>
+                    <span className="font-mono text-emerald-400">
+                      {strategyStyle === 'CREDIT_SPREAD' ? 'Defined Net Credit Max Gain' : strategyStyle === 'HEDGED_WRITING' ? 'Range-Bound Max Credit' : 'Directional Asymmetric Payoff'}
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
 
             <div className="preview-rule-title">Rule summary</div>
             <div className="preview-rule">

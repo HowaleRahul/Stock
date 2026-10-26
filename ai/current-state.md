@@ -12,8 +12,9 @@ Primary focus:
 1. **Indian Stock Market F&O Specialization**: The system specializes WHOLE AND SOLE in Futures & Options (F&O) trading on the Indian stock market (NSE & BSE). Cash equity delivery, US markets, and cryptocurrencies have been completely removed.
 2. **Supported Underlyings**: NIFTY 50 (`^NSEI`), BANK NIFTY (`^NSEBANK`), BSE SENSEX (`^BSESN`), FINNIFTY, and MIDCPNIFTY with exact exchange lot sizes, strike intervals, and weekly expiry schedules.
 3. **Dual Scalp & Swing Framework**: Fast intraday scalp trading (`5m`, `15m`) with tight ATR barriers, and multiday positional swing trading (`1h`, `1d`) with wide trailing stops.
-4. **Derivatives Execution Engine**: All trade allocations execute strictly as Index Options (CE/PE calls & puts with Black-Scholes Delta, Theta, Gamma, Vega, IV), directional option selling, credit spreads (Bull Put & Bear Call spreads), or linear Index Futures depending on user capital tier, volatility regime, and SPAN margin availability. Naked unlimited-risk option selling without margin gating is prohibited; retail accounts deploy defined-risk credit spreads, while institutional allocations harvest positive theta decay (+\Theta > 0) with exchange SPAN + exposure margins.
-5. **Continuous AI Retraining**: Fresh stacking classifiers trained from scratch on historical Indian index data, coupled with contextual bandit strike selection and TimescaleDB hypertable persistence.
+4. **Derivatives Execution Engine**: All trade allocations execute strictly as Index Options (CE/PE calls & puts with Black-Scholes Delta, Theta, Gamma, Vega, IV), directional option selling, defined-risk credit spreads (Bull Put & Bear Call spreads), non-directional Iron Condors (rangebound sideways regimes), or linear Index Futures depending on user capital tier, volatility regime, and SPAN margin availability. Naked unlimited-risk option selling without margin gating is prohibited; retail accounts deploy defined-risk credit spreads and Iron Condors, while institutional allocations harvest dual positive theta decay ($+\Theta > 0$) with exchange SPAN + exposure margins.
+5. **Interactive Option Payoff Visualization**: Real-time continuous SVG multi-leg option payoff diagrams in the frontend with green profit and red loss clipped gradients, breakeven markers, live spot tracking, and friction breakeven modeling.
+6. **Continuous AI Retraining**: Fresh stacking classifiers trained from scratch on historical Indian index data, coupled with contextual bandit strike selection and TimescaleDB hypertable persistence.
 
 ---
 
@@ -311,7 +312,7 @@ Starts container `trading_timescaledb` on `127.0.0.1:5432` with volume `pgdata`.
 | **TimescaleDB Storage** | Production-ready | Verified | Stores bars and news; requires Docker container online. |
 | **Dual Persistence** | Production-ready | Verified | Automatically falls back to JSON files if DB is offline. |
 | **Core Setup Engine** | Production-ready | Verified | 5 deterministic setups + ADX regime detection. |
-| **Swing Toolkit** | Production-ready | Verified | 3 scanners, 8-factor checklist, 15m ORB volume gate, candidate filtering toolbar, and 45s cancellation. |
+| **Swing Toolkit** | Production-ready | Verified | 3 institutional scanners, 8-factor checklist, 15m ORB volume gate, candidate filtering toolbar, async `YFinanceFetcher.fetch_history` with direct v8 chart fallback and 5-min TTL cache, live session volume normalization, and 45s cancellation. |
 | **Real-Time Data Feeds**| Production-ready | Verified | TradingView-ta with bounded TTL caching & yfinance fallback. |
 | **Paper Trading Daemon**| Production-ready | Verified | Autonomous 1-hour scan loop, Kelly sizing, MTM drawdown lock. |
 | **Risk Engine** | Production-ready | Verified | 2% risk cap, 1.5:1 min R:R, ATR stops, ruin probability. |

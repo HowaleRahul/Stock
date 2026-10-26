@@ -280,3 +280,82 @@ def test_swing_api_endpoints():
     res_del = client.delete("/api/v1/swing/watchlist/TEST_AUTO", headers={"X-API-KEY": "trading_secret_key"})
     assert res_del.status_code == 200
     assert res_del.json()["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_yfinance_fetcher_fetch_history_and_caching(monkeypatch):
+    """Test YFinanceFetcher.fetch_history returns lowercase standardized DataFrame and uses cache."""
+    from data.fetcher import YFinanceFetcher, _HISTORY_CACHE, _CACHE_LOCK
+
+    synthetic_df = _generate_synthetic_ohlcv(bars=60)
+    # Give it yfinance title case columns
+    synthetic_df.columns = ["Open", "High", "Low", "Close", "Volume"]
+
+    with _CACHE_LOCK:
+        _HISTORY_CACHE.clear()
+
+    monkeypatch.setattr(YFinanceFetcher, "_fetch_history_sync", lambda *args, **kwargs: synthetic_df.copy())
+
+    df = await YFinanceFetcher.fetch_history("TESTSYM", period="1y", interval="1d")
+    assert not df.empty
+    assert "close" in df.columns
+    assert "open" in df.columns
+    assert "high" in df.columns
+    assert "low" in df.columns
+    assert "volume" in df.columns
+    assert "Close" not in df.columns  # Ensured normalized to lowercase
+
+
+@pytest.mark.asyncio
+async def test_yfinance_fetcher_direct_v8_fallback(monkeypatch):
+    """Test YFinanceFetcher._fetch_history_sync seamlessly falls back to direct v8 chart when yfinance fails."""
+    from data.fetcher import YFinanceFetcher, _HISTORY_CACHE, _CACHE_LOCK
+
+    synthetic_df = _generate_synthetic_ohlcv(bars=55)
+    synthetic_df.columns = ["Open", "High", "Low", "Close", "Volume"]
+
+    with _CACHE_LOCK:
+        _HISTORY_CACHE.clear()
+
+    # Mock yfinance to fail / rate limit
+    class FailingTicker:
+        def history(self, *args, **kwargs):
+            raise Exception("Too Many Requests. Rate limited.")
+
+    monkeypatch.setattr("data.fetcher.yf.Ticker", lambda sym: FailingTicker())
+    monkeypatch.setattr(YFinanceFetcher, "_fetch_chart_direct_sync", lambda *args, **kwargs: synthetic_df.copy())
+
+    df = YFinanceFetcher._fetch_history_sync("TEST_FAILOVER", period="1y", interval="1d")
+    assert not df.empty
+    assert len(df) == 55
+
+
+@pytest.mark.asyncio
+async def test_swing_toolkit_run_scanners_and_filter_pipeline(monkeypatch):
+    """Test SwingToolkitManager.run_scanners_and_filter executes end-to-end without AttributeError."""
+    from setups.swing_toolkit.toolkit import SwingToolkitManager
+    from data.fetcher import YFinanceFetcher
+
+    # Generate synthetic breakout data
+    df_breakout = _generate_synthetic_ohlcv(bars=80, trend=2.5, vol_base=100000)
+    df_breakout.iloc[-1, df_breakout.columns.get_loc("close")] = df_breakout["high"].iloc[:-1].max() + 10.0
+    df_breakout.iloc[-1, df_breakout.columns.get_loc("high")] = df_breakout["close"].iloc[-1] + 2.0
+    df_breakout.iloc[-1, df_breakout.columns.get_loc("volume")] = 300000.0
+    df_breakout.columns = [c.lower() for c in df_breakout.columns]
+
+    async def mock_fetch_history(ticker, period="1y", interval="1d", **kwargs):
+        return df_breakout.copy()
+
+    monkeypatch.setattr(YFinanceFetcher, "fetch_history", mock_fetch_history)
+
+    mgr = SwingToolkitManager()
+    res = await mgr.run_scanners_and_filter(universe=["TEST_HAL", "TEST_TRENT"])
+
+    assert res["total_universe_scanned"] == 2
+    assert res["total_scanner_hits"] == 2
+    assert len(res["candidates"]) == 2
+    for cand in res["candidates"]:
+        assert cand["ticker"] in ("TEST_HAL", "TEST_TRENT")
+        assert len(cand["matched_scanners"]) > 0
+        assert cand["composite_score"] > 0.0
+        assert "checklist" in cand

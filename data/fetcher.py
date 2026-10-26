@@ -1,15 +1,22 @@
 import asyncio
 import logging
+import threading
 from typing import List, Dict, Any, Optional
 import pandas as pd
+import requests
 import yfinance as yf
+from cachetools import TTLCache
 
 logger = logging.getLogger("trading.data.fetcher")
+
+_HISTORY_CACHE = TTLCache(maxsize=1000, ttl=300)  # 5-minute TTL cache for OHLCV bars
+_CACHE_LOCK = threading.Lock()
 
 class YFinanceFetcher:
     """
     Async wrapper around yfinance for downloading OHLCV bars, corporate actions, and symbol metadata.
-    Runs synchronous yfinance calls inside asyncio threads to avoid blocking the loop.
+    Runs synchronous yfinance calls inside asyncio threads to avoid blocking the loop,
+    with a direct v8 Yahoo Finance fallback and in-memory TTL caching to prevent rate limiting.
     """
 
     YAHOO_TICKER_ALIASES = {
@@ -22,12 +29,82 @@ class YFinanceFetcher:
         "NIFTY BANK": "^NSEBANK",
         "^NSEBANK": "^NSEBANK",
         "SENSEX": "^BSESN",
+        "SENSEX.NS": "^BSESN",
         "SENSEX.BO": "^BSESN",
         "BSE SENSEX": "^BSESN",
         "^BSESN": "^BSESN",
         "FINNIFTY": "^NSEI",
         "MIDCPNIFTY": "^NSEI",
     }
+
+    @classmethod
+    def _fetch_chart_direct_sync(
+        cls,
+        yahoo_ticker: str,
+        period: str = "1y",
+        interval: str = "1d",
+    ) -> pd.DataFrame:
+        """
+        Direct HTTP fallback querying Yahoo Finance's v8 chart API.
+        Bypasses cookie/crumb authentication and avoids YFRateLimitError.
+        """
+        # Enforce valid Yahoo Finance ranges per interval
+        # Intraday bars (1m..1h) must be within last 60 days
+        if interval in ("1m",):
+            p = "5d"
+        elif interval in ("2m", "5m", "15m", "30m"):
+            p = "30d" if period in ("30d", "1mo") else "60d"
+        elif interval in ("60m", "1h", "90m"):
+            p = "60d"
+        else:
+            p = period
+            if p in ("max", "10y"):
+                p = "5y"
+            elif p in ("730d", "2y"):
+                p = "2y"
+            elif p in ("60d", "3mo"):
+                p = "3mo"
+            elif p in ("7d", "5d"):
+                p = "5d"
+
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?range={p}&interval={interval}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+        }
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code != 200:
+                logger.warning(f"Yahoo v8 chart API returned HTTP {r.status_code} for {yahoo_ticker}")
+                return pd.DataFrame()
+            data = r.json()
+            results = data.get("chart", {}).get("result")
+            if not results:
+                return pd.DataFrame()
+            chart_res = results[0]
+            timestamps = chart_res.get("timestamp", [])
+            indicators = chart_res.get("indicators", {}).get("quote", [{}])[0]
+            if not timestamps or not indicators:
+                return pd.DataFrame()
+
+            idx = pd.to_datetime(timestamps, unit="s", utc=True)
+            df = pd.DataFrame(
+                {
+                    "Open": indicators.get("open", []),
+                    "High": indicators.get("high", []),
+                    "Low": indicators.get("low", []),
+                    "Close": indicators.get("close", []),
+                    "Volume": indicators.get("volume", []),
+                },
+                index=idx,
+            )
+            df = df.dropna(subset=["Close"])
+            if not df.empty:
+                logger.info(f"Direct v8 chart API retrieved {len(df)} bars for {yahoo_ticker}.")
+            return df
+        except Exception as e:
+            logger.warning(f"Direct v8 chart API failed for {yahoo_ticker}: {e}")
+            return pd.DataFrame()
 
     @classmethod
     def _fetch_history_sync(
@@ -40,6 +117,14 @@ class YFinanceFetcher:
     ) -> pd.DataFrame:
         ticker = ticker.upper().strip()
         yahoo_ticker = cls.YAHOO_TICKER_ALIASES.get(ticker, ticker)
+
+        cache_key = (yahoo_ticker, period, interval, start, end)
+        with _CACHE_LOCK:
+            if cache_key in _HISTORY_CACHE:
+                cached = _HISTORY_CACHE[cache_key]
+                if cached is not None and not cached.empty:
+                    return cached.copy()
+
         # Map non-native intervals to native yfinance intervals
         yf_interval = interval
         resample_rule = None
@@ -89,11 +174,20 @@ class YFinanceFetcher:
         else:
             kwargs["period"] = period
 
+        df = pd.DataFrame()
         try:
             df = yt.history(**kwargs)
-            if df.empty:
-                return df
-                
+        except Exception as e:
+            logger.warning(f"Error fetching history from yfinance for {ticker}: {e}. Trying direct chart API fallback...")
+
+        # If yfinance returned empty or raised rate limit, fallback to direct chart API
+        if df is None or df.empty:
+            df = cls._fetch_chart_direct_sync(yahoo_ticker, period=period, interval=yf_interval)
+
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        try:
             if resample_rule:
                 agg_dict = {
                     "Open": "first",
@@ -110,10 +204,55 @@ class YFinanceFetcher:
                     agg_dict["Adj Close"] = "last"
                     
                 df = df.resample(resample_rule).agg(agg_dict).dropna(subset=["Close"])
-                
+
+            with _CACHE_LOCK:
+                _HISTORY_CACHE[cache_key] = df.copy()
+
             return df
         except Exception as e:
-            logger.warning(f"Error fetching history from yfinance for {ticker}: {e}")
+            logger.warning(f"Error processing history for {ticker}: {e}")
+            return df if not df.empty else pd.DataFrame()
+
+    @classmethod
+    async def fetch_history(
+        cls,
+        ticker: str,
+        period: str = "1y",
+        interval: str = "1d",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        timeout: float = 45.0,
+    ) -> pd.DataFrame:
+        """
+        Asynchronously fetches OHLCV history for a ticker and returns a cleaned pandas DataFrame
+        with standardized lowercase column names ('open', 'high', 'low', 'close', 'volume').
+        """
+        ticker = ticker.upper().strip()
+        try:
+            df = await asyncio.wait_for(
+                asyncio.to_thread(
+                    cls._fetch_history_sync,
+                    ticker=ticker,
+                    period=period,
+                    interval=interval,
+                    start=start,
+                    end=end,
+                ),
+                timeout=timeout,
+            )
+            if df is None or df.empty:
+                logger.warning(f"No OHLCV history DataFrame returned for {ticker}.")
+                return pd.DataFrame()
+
+            # Normalize column names to lowercase and strip whitespaces
+            df_norm = df.copy()
+            df_norm.columns = [str(c).lower().replace(" ", "_") for c in df_norm.columns]
+            return df_norm
+        except asyncio.TimeoutError:
+            logger.error(f"Network timeout ({timeout}s) while fetching history DataFrame for {ticker}.")
+            return pd.DataFrame()
+        except Exception as e:
+            logger.warning(f"Error asynchronously fetching history for {ticker}: {e}")
             return pd.DataFrame()
 
     @classmethod

@@ -76,6 +76,7 @@ class MultiAgentConsensusEngine:
         options_data: Optional[Dict[str, Any]] = None,
         fundamental_data: Optional[Dict[str, Any]] = None,
         sentiment_data: Optional[Dict[str, Any]] = None,
+        min_conviction_threshold: float = 1.2,
     ) -> MultiAgentVerdict:
         """Runs the multi-agent consensus workflow."""
         reports: List[AgentReport] = []
@@ -247,15 +248,16 @@ class MultiAgentConsensusEngine:
         denom = max(0.01, total_bull_weight + total_bear_weight)
 
         # Check for clear majority conviction
-        if total_bull_weight > total_bear_weight and total_bull_weight >= 1.2:
+        thresh = cls._safe_float(min_conviction_threshold, default=1.2, min_val=0.4, max_val=3.0)
+        if total_bull_weight > total_bear_weight and total_bull_weight >= thresh:
             consensus_sig = "bullish"
             confidence = min(0.92, total_bull_weight / (denom + 0.5))
             action = f"BUY {ticker} Call / Long Future with target trailing stop."
-        elif total_bear_weight > total_bull_weight and total_bear_weight >= 1.2:
+        elif total_bear_weight > total_bull_weight and total_bear_weight >= thresh:
             consensus_sig = "bearish"
             confidence = min(0.92, total_bear_weight / (denom + 0.5))
             action = f"BUY {ticker} Put / Short Future with target trailing stop."
-        elif total_bull_weight >= 1.2 and total_bear_weight >= 1.2:
+        elif total_bull_weight >= thresh and total_bear_weight >= thresh:
             # Tie-breaker when both bull and bear weights are high and equal:
             # Break tie using Technical Analyst stance and CRO risk ruling
             if tech_stance == "BULLISH" and "REJECT" not in risk_ruling:

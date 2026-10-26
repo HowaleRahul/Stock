@@ -136,12 +136,13 @@ async def close_trade(trade_id, exit_price, broker=None):
                     trade_action = getattr(trade, "action", None) or ("SELL" if "SELL" in (trade.ticker or "").upper() else "BUY")
                     if broker and getattr(broker, "is_connected", False):
                         try:
-                            if is_option:
+                            is_fo = is_option or "FUT" in (trade.ticker or "").upper() or "SPREAD" in (trade.ticker or "").upper() or "CONDOR" in (trade.ticker or "").upper()
+                            if is_fo:
                                 exit_dir = "BUY" if trade_action == "SELL" else "SELL"
                                 exchange = "BFO" if "SENSEX" in (trade.ticker or "").upper() else "NFO"
                             else:
                                 exit_dir = "SELL" if str(trade.direction).upper() in {"LONG", "BULLISH", "BUY"} else "BUY"
-                                exchange = "NSE"
+                                exchange = "BSE" if "SENSEX" in (trade.ticker or "").upper() else "NSE"
 
                             broker.place_order(
                                 ticker=trade.ticker,
@@ -204,11 +205,13 @@ async def close_trade(trade_id, exit_price, broker=None):
             if closed_rec is None:
                 if broker and getattr(broker, "is_connected", False):
                     try:
-                        if is_option:
+                        is_fo = is_option or "FUT" in str(dt.get("ticker")).upper() or "SPREAD" in str(dt.get("ticker")).upper() or "CONDOR" in str(dt.get("ticker")).upper()
+                        if is_fo:
                             exit_dir = "BUY" if dt_action == "SELL" else "SELL"
+                            exchange = "BFO" if "SENSEX" in str(dt.get("ticker")).upper() else "NFO"
                         else:
                             exit_dir = "SELL" if str(dt.get("direction")).upper() in {"LONG", "BULLISH", "BUY"} else "BUY"
-                        exchange = "BFO" if "SENSEX" in str(dt.get("ticker")).upper() else ("NFO" if is_option else "NSE")
+                            exchange = "BSE" if "SENSEX" in str(dt.get("ticker")).upper() else "NSE"
                         broker.place_order(ticker=dt.get("ticker"), quantity=dt.get("quantity", 1), direction=exit_dir, exchange=exchange)
                     except Exception as b_err:
                         logger.error(f"Broker exit failed in disk fallback: {b_err}")
@@ -419,12 +422,14 @@ async def run_live_loop_async():
                     # Multi-Agent Adversarial Debate & Consensus confirmation (TradingAgents)
                     current_close = float(df['close'].iloc[-1])
                     live_opts, live_sent = MultiAgentConsensusEngine.fetch_live_context(ticker, spot=current_close)
+                    min_consensus = float(config.get("min_consensus_weight", 1.2))
                     consensus = MultiAgentConsensusEngine.evaluate(
                         ticker=ticker,
                         regime_data=regime,
                         setup_signals=setups,
                         options_data=live_opts,
-                        sentiment_data=live_sent
+                        sentiment_data=live_sent,
+                        min_conviction_threshold=min_consensus,
                     )
                     is_rejected = (
                         consensus.recommended_action.startswith("STAND ASIDE")
@@ -475,7 +480,7 @@ async def run_live_loop_async():
                                 "invested": opt_plan.margin_or_premium_required,
                                 "sl": opt_plan.original_spot_plan.stop_loss,
                                 "tp": opt_plan.original_spot_plan.take_profit,
-                                "is_options": opt_plan.instrument_type in ("OPTION", "SPREAD"),
+                                "is_options": opt_plan.instrument_type in ("OPTION", "SPREAD", "IRON_CONDOR"),
                                 "hedge_strike_price": opt_plan.hedge_strike_price,
                                 "hedge_entry_price": opt_plan.hedge_entry_price,
                                 "net_credit": opt_plan.net_credit

@@ -393,6 +393,66 @@ This document catalogs all verified defects, technical debt, incomplete features
 - **Current Behavior**: Implemented `ensure_virtualenv()` in `start.py` that auto-detects `.\venv\Scripts\python.exe` and re-executes itself inside the virtual environment with updated `PATH` and `VIRTUAL_ENV`. UTF-8 streams are safely reconfigured with ASCII-safe console tags.
 - **Status**: Resolved / Verified (Pass 25).
 
+---
+
+### Issue 36: NSE Option Chain Scraper Crash on Dash and Formatted String Numbers
+- **Severity**: High (Data Ingestion Stability)
+- **Evidence**: Live NSE option chains return `"-"` for inactive strikes and formatted strings with commas (`"12,345"`). In `data/nse_feed.py`, `int(0) + "-"` threw a `TypeError` in `calculate_pcr`, while `float("-")` threw a `ValueError` in `calculate_max_pain`.
+- **Affected Area**: `data/nse_feed.py`
+- **Current Behavior**: Built `_safe_num()` helper in `data/nse_feed.py` that safely sanitizes strings, strips commas, converts `"-"` and invalid tokens to `0.0`, and validates finite numbers before arithmetic.
+- **Status**: Resolved / Verified (Pass 26).
+
+---
+
+### Issue 37: Index Futures Exchange Segment Misrouting to Cash NSE
+- **Severity**: High (Broker Regulatory Compliance & Order Rejection)
+- **Evidence**: In `live_trader.py`, `NIFTY FUT` and `BANKNIFTY FUT` defaulted to the cash `NSE` segment rather than the derivatives `NFO` segment. In Indian market operations, brokers reject any futures or options contract submitted to cash `NSE`.
+- **Affected Area**: `live_trader.py`
+- **Current Behavior**: Aligned segment routing: `BFO` for SENSEX derivatives, and `NFO` for all NSE index futures and options.
+- **Status**: Resolved / Verified (Pass 26).
+
+---
+
+### Issue 38: Non-Directional Rangebound Strategy Execution & Multi-Leg Option Payoff Gap
+- **Severity**: Medium-High (Trading Strategy Completeness)
+- **Evidence**: In rangebound/sideways regimes (ADX < 20), the system previously lacked a non-directional strategy to harvest positive theta decay ($+\Theta$), and the frontend lacked a continuous SVG payoff curve diagram with interactive spot simulation.
+- **Affected Area**: `ml/options_engine.py`, `ml/risk_engine.py`, `api/market_router.py`, `frontend/src/components/OptionChartViewer.tsx`
+- **Current Behavior**: Implemented the 4-leg defined-risk `IRON_CONDOR` strategy in `OptionsEngine`, added an 8-order statutory friction model in `IndianFOFrictionModel`, and built interactive continuous SVG payoff curve rendering with green/red profit/loss gradient fills, breakeven markers, and live spot trackers.
+- **Status**: Resolved / Verified (Pass 26).
+
+---
+
+### Issue 39: NameError `spot_ltp` in Live Market Learner Scan Cycle
+- **Severity**: High (Runtime Exception in Live Cycle)
+- **Evidence**: In `ml/live_market_learner.py` line 551, `MultiAgentConsensusEngine.fetch_live_context(ticker, spot=spot_ltp)` referenced `spot_ltp` before assignment, causing `NameError: name 'spot_ltp' is not defined` whenever a live scan discovered an AI setup meeting the confidence threshold. The continuous trainer caught and logged `[WARNING] Live trading cycle error: name 'spot_ltp' is not defined`, aborting order generation for that cycle.
+- **Affected Area**: `ml/live_market_learner.py`, `ml/continuous_trainer.py`
+- **Current Behavior**: `spot_ltp` is now defensively resolved from `RealTimeDataFeed.get_realtime_quote_sync(ticker)` with instant fallback to `float(df["close"].iloc[-1])`. MTM and exit quote parsing are fully wrapped against non-dict/None quotes.
+- **Status**: Resolved / Verified (Pass 27).
+
+---
+
+### Issue 40: AttributeError `YFinanceFetcher.fetch_history` & Yahoo Rate Limiting in Swing Scanners
+- **Severity**: Critical (Feature Functional Block)
+- **Evidence**: Clicking "Run All 3 Scanners" in Swing Toolkit returned `Scanned universe complete: Found 0 hits (0 passed the 8-Factor filter)`. In `setups/swing_toolkit/toolkit.py`, `await YFinanceFetcher.fetch_history(...)` was called on each symbol, but `YFinanceFetcher` in `data/fetcher.py` had no `fetch_history` method, raising `AttributeError: type object 'YFinanceFetcher' has no attribute 'fetch_history'`. Every symbol was caught by the broad `except Exception` block, silently returning `None` and yielding zero hits. Additionally, rapid concurrent requests to yfinance triggered `YFRateLimitError: Too Many Requests`.
+- **Affected Area**: `data/fetcher.py`, `setups/swing_toolkit/toolkit.py`, `setups/swing_toolkit/scanners.py`
+- **Current Behavior**: 
+  1. Implemented `@classmethod async def fetch_history()` in `YFinanceFetcher` returning standardized lowercase DataFrames.
+  2. Implemented `_fetch_chart_direct_sync()` calling Yahoo's public `/v8/finance/chart/` API when yfinance fails or gets rate limited, bypassing crumb/cookie requirements entirely.
+  3. Added `TTLCache(maxsize=1000, ttl=300)` to eliminate duplicate downloads.
+  4. Added live market session volume normalization in `MomentumScanner` using `get_session_phase()`.
+- **Status**: Resolved / Verified (Pass 29).
+
+---
+
+### Issue 41: HTTP 422 in Direct Yahoo Chart Fallback on Intraday Ranges & RealTimeDataFeed Column Casing
+- **Severity**: High (Market Chart Feed Interruption & 502 Bad Gateway)
+- **Evidence**: Frontend reported `Failed to load market candles. Please check if the market data service is running.` and `Scan failed: Request failed with status code 502`. In `data/fetcher.py`, `_fetch_chart_direct_sync` mapped `60d` to `3mo` for all intervals. Yahoo Finance rejects intraday intervals (`1m`..`1h`) with `HTTP 422 Unprocessable Entity ("The requested range must be within the last 60 days")`. Additionally, `RealTimeDataFeed.get_chart_candles()` assumed Title Case (`"Close"`) and returned `0.0` when receiving lowercase DataFrames, while stale background processes triggered proxy 502 disconnects.
+- **Affected Area**: `data/fetcher.py`, `data/realtime_feed.py`
+- **Current Behavior**: Intraday ranges are strictly bounded to `range="60d"` for `5m`, `15m`, `30m`, `1h` (and `5d` for `1m`). `RealTimeDataFeed.get_chart_candles()` defensively checks both Title Case and lowercase column names.
+- **Status**: Resolved / Verified (Pass 30).
+
+
+
 
 
 

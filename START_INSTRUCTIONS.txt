@@ -1,0 +1,114 @@
+Signal Desk - Project Startup Instructions
+========================================
+
+This project is a Python + FastAPI backend, a React/Vite frontend, and a PostgreSQL/TimescaleDB database.
+
+Important: use Python 3.12 for this project. The pinned dependency set in requirements.txt is compatible with Python 3.12. Do not use Python 3.13 with the repo as-is.
+
+1) Prerequisites
+----------------
+- Python 3.12 installed
+- Node.js 18+ installed
+- Docker Desktop (or Docker Engine) installed and running
+- Git installed
+
+2) Open a terminal in the project root
+--------------------------------------
+Project root example:
+C:\Users\Rahul\OneDrive\Desktop\Stock
+
+3) Create and activate the virtual environment
+---------------------------------------------
+PowerShell:
+
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+If you use Command Prompt instead:
+
+py -3.12 -m venv .venv
+.\.venv\Scripts\activate.bat
+
+4) Install Python dependencies
+------------------------------
+From the project root:
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+5) Install frontend dependencies
+---------------------------------
+From the project root:
+
+cd frontend
+npm install
+cd ..
+
+6) Configure environment variables
+----------------------------------
+Copy the sample config:
+
+Copy-Item .env.example .env
+
+Then edit .env and set the required values, especially:
+- POSTGRES_PASSWORD
+- DATABASE_URL
+- API_KEY
+- KITE_API_KEY / KITE_API_SECRET (if you plan to connect a broker)
+
+Example minimum values:
+- POSTGRES_USER=postgres
+- POSTGRES_PASSWORD=your_secure_password
+- POSTGRES_DB=trading_db
+- DATABASE_URL=postgresql+asyncpg://postgres:your_secure_password@127.0.0.1:5432/trading_db
+- ENVIRONMENT=development
+- API_PORT=8000
+- API_HOST=127.0.0.1
+
+7) Start the database container
+-------------------------------
+From the project root:
+
+docker compose up -d
+
+This starts the TimescaleDB service defined in docker-compose.yml.
+
+8) Start the application
+-------------------------
+From the project root:
+
+python start.py
+
+This automatically detects the project virtual environment and starts:
+- FastAPI backend on http://127.0.0.1:8000
+- Background paper trader process
+- Vite React frontend on http://localhost:5173/app/
+
+If port 5173 is already occupied, Vite will automatically choose another port and print the new URL.
+
+9) Open the app
+---------------
+- API docs: http://localhost:8000/docs
+- Frontend: http://localhost:5173/app/
+- Health check: http://localhost:8000/health
+
+10) Stop everything
+-------------------
+Press Ctrl+C in the terminal running python start.py.
+
+This will stop all spawned services.
+
+11) Quick validation command
+----------------------------
+To validate the launcher without starting the full stack:
+
+python start.py --check
+
+This confirms the project can resolve the correct Python interpreter.
+
+12) Notes / Common issues
+-------------------------
+- If you see ModuleNotFoundError: uvicorn, yfinance, or other packages, your virtual environment is not active or dependencies were not installed.
+- If a port is already in use, the frontend may move to another localhost port automatically.
+- Do not use the global Python unless the repository venv is active.
+- Use Python 3.12; Python 3.13 and the old pinned NumPy version conflict.

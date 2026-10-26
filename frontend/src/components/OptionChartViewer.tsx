@@ -4,7 +4,9 @@ import { createChart, CandlestickSeries, LineSeries, LineStyle } from 'lightweig
 import type { Time } from 'lightweight-charts';
 import {
   Zap,
-  RefreshCw
+  RefreshCw,
+  TrendingUp,
+  BarChart2,
 } from 'lucide-react';
 import { formatIndianCurrency } from '../utils/formatters';
 import {
@@ -12,6 +14,7 @@ import {
   formatContractSymbol,
   calculateOptionPayoffProfile,
 } from '../utils/foUtils';
+import type { OptionPayoffProfile, PayoffCurvePoint } from '../utils/foUtils';
 
 interface OptionChartProps {
   initialUnderlying?: string;
@@ -27,6 +30,369 @@ interface OptionChartProps {
   stopLossPrice?: number;
   height?: number;
 }
+
+/**
+ * Interactive SVG Multi-Leg Option Payoff Curve Diagram
+ * Visualizes Profit (green fill/line above zero) and Loss (red fill/line below zero)
+ * with dynamic markers for Breakeven spot, Current spot, and Strikes.
+ */
+const OptionPayoffDiagram: React.FC<{
+  payoff: OptionPayoffProfile;
+  currentSpot: number;
+  lotSize: number;
+  height?: number;
+}> = ({ payoff, currentSpot, lotSize, height = 360 }) => {
+  const curve = payoff.curve;
+  const [hoveredPoint, setHoveredPoint] = useState<PayoffCurvePoint | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+
+  if (!curve || curve.points.length === 0) {
+    return (
+      <div className="h-[360px] flex items-center justify-center text-gray-500 text-sm bg-gray-900/50 rounded-lg border border-gray-800">
+        Payoff data currently unavailable for this strategy configuration.
+      </div>
+    );
+  }
+
+  const { points, minSpot, maxSpot, minPnl, maxPnl, breakevens, strikes, spotPnl } = curve;
+
+  const width = 800;
+  const h = height;
+  const pad = { top: 35, bottom: 45, left: 75, right: 45 };
+  const plotW = width - pad.left - pad.right;
+  const plotH = h - pad.top - pad.bottom;
+
+  // Compute Y-limits with padding so flat lines don't hug the edge
+  const rawMin = Math.min(0, minPnl);
+  const rawMax = Math.max(0, maxPnl);
+  const ySpan = Math.max(100, rawMax - rawMin);
+  const yTop = rawMax + ySpan * 0.15;
+  const yBottom = rawMin - ySpan * 0.15;
+
+  const getX = (spot: number) => {
+    const clamped = Math.max(minSpot, Math.min(maxSpot, spot));
+    return pad.left + ((clamped - minSpot) / (maxSpot - minSpot)) * plotW;
+  };
+
+  const getY = (pnl: number) => {
+    const clamped = Math.max(yBottom, Math.min(yTop, pnl));
+    return pad.top + ((yTop - clamped) / (yTop - yBottom)) * plotH;
+  };
+
+  const yZero = getY(0);
+
+  // Generate SVG path for the continuous curve
+  const pathData = points
+    .map((pt, idx) => `${idx === 0 ? 'M' : 'L'} ${getX(pt.spot).toFixed(1)} ${getY(pt.pnl).toFixed(1)}`)
+    .join(' ');
+
+  // Generate area path closed at zero line
+  const areaData = `${pathData} L ${getX(points[points.length - 1].spot).toFixed(1)} ${yZero.toFixed(1)} L ${getX(points[0].spot).toFixed(1)} ${yZero.toFixed(1)} Z`;
+
+  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const clientX = e.clientX - rect.left;
+    const svgX = (clientX / rect.width) * width;
+    const plotX = svgX - pad.left;
+    const ratio = Math.max(0, Math.min(1, plotX / plotW));
+    const targetSpot = minSpot + ratio * (maxSpot - minSpot);
+
+    let closest = points[0];
+    let minDist = Math.abs(points[0].spot - targetSpot);
+    for (let i = 1; i < points.length; i++) {
+      const d = Math.abs(points[i].spot - targetSpot);
+      if (d < minDist) {
+        minDist = d;
+        closest = points[i];
+      }
+    }
+    setHoveredPoint(closest);
+  };
+
+  const handleMouseLeave = () => {
+    setHoveredPoint(null);
+  };
+
+  // Y-axis grid ticks
+  const yTicks = [
+    { val: yTop * 0.8, y: getY(yTop * 0.8) },
+    { val: 0, y: yZero },
+    { val: yBottom * 0.8, y: getY(yBottom * 0.8) },
+  ];
+
+  return (
+    <div className="relative select-none bg-gray-950 rounded-lg border border-gray-800/80 p-2">
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${width} ${h}`}
+        className="w-full h-auto block"
+        onMouseMove={handleMouseMove}
+        onMouseLeave={handleMouseLeave}
+      >
+        <defs>
+          {/* Clip path for Profit (above zero) */}
+          <clipPath id="profitClip">
+            <rect x={pad.left} y={pad.top} width={plotW} height={Math.max(0, yZero - pad.top)} />
+          </clipPath>
+
+          {/* Clip path for Loss (below zero) */}
+          <clipPath id="lossClip">
+            <rect x={pad.left} y={yZero} width={plotW} height={Math.max(0, pad.top + plotH - yZero)} />
+          </clipPath>
+
+          {/* Profit Gradient Fill */}
+          <linearGradient id="profitGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#10b981" stopOpacity="0.45" />
+            <stop offset="100%" stopColor="#10b981" stopOpacity="0.05" />
+          </linearGradient>
+
+          {/* Loss Gradient Fill */}
+          <linearGradient id="lossGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#ef4444" stopOpacity="0.05" />
+            <stop offset="100%" stopColor="#ef4444" stopOpacity="0.45" />
+          </linearGradient>
+        </defs>
+
+        {/* Gridlines */}
+        {yTicks.map((tick, i) => (
+          <g key={i}>
+            <line
+              x1={pad.left}
+              y1={tick.y}
+              x2={pad.left + plotW}
+              y2={tick.y}
+              stroke="#1e293b"
+              strokeDasharray={tick.val === 0 ? undefined : "3 3"}
+              strokeWidth={tick.val === 0 ? 1.5 : 1}
+            />
+            <text
+              x={pad.left - 8}
+              y={tick.y + 4}
+              textAnchor="end"
+              fill={tick.val === 0 ? "#94a3b8" : tick.val > 0 ? "#10b981" : "#ef4444"}
+              fontSize="10"
+              fontFamily="monospace"
+              fontWeight={tick.val === 0 ? "bold" : "normal"}
+            >
+              {tick.val === 0 ? "₹0" : (tick.val > 0 ? `+₹${Math.round(tick.val)}` : `-₹${Math.abs(Math.round(tick.val))}`)}
+            </text>
+          </g>
+        ))}
+
+        {/* Profit Fill (clipped above zero) */}
+        <path d={areaData} fill="url(#profitGrad)" clipPath="url(#profitClip)" />
+
+        {/* Loss Fill (clipped below zero) */}
+        <path d={areaData} fill="url(#lossGrad)" clipPath="url(#lossClip)" />
+
+        {/* Profit Stroke Line (clipped above zero) */}
+        <path
+          d={pathData}
+          fill="none"
+          stroke="#10b981"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          clipPath="url(#profitClip)"
+        />
+
+        {/* Loss Stroke Line (clipped below zero) */}
+        <path
+          d={pathData}
+          fill="none"
+          stroke="#ef4444"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          clipPath="url(#lossClip)"
+        />
+
+        {/* Strike Price Vertical Markers */}
+        {strikes.map((s, idx) => {
+          const xK = getX(s.strike);
+          return (
+            <g key={idx}>
+              <line
+                x1={xK}
+                y1={pad.top}
+                x2={xK}
+                y2={pad.top + plotH}
+                stroke={s.type === 'SHORT' ? "#f43f5e" : "#818cf8"}
+                strokeDasharray="2 3"
+                strokeWidth="1.2"
+                opacity="0.8"
+              />
+              <text
+                x={xK}
+                y={pad.top - 6}
+                textAnchor="middle"
+                fill={s.type === 'SHORT' ? "#f43f5e" : "#818cf8"}
+                fontSize="9"
+                fontFamily="monospace"
+                fontWeight="bold"
+              >
+                {s.label}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Breakeven Vertical Markers */}
+        {breakevens.map((be, idx) => {
+          const xBe = getX(be);
+          return (
+            <g key={idx}>
+              <line
+                x1={xBe}
+                y1={pad.top}
+                x2={xBe}
+                y2={pad.top + plotH}
+                stroke="#f59e0b"
+                strokeDasharray="4 4"
+                strokeWidth="1.8"
+              />
+              <circle cx={xBe} cy={yZero} r="4" fill="#f59e0b" />
+              <rect
+                x={xBe - 34}
+                y={pad.top + plotH + 8}
+                width="68"
+                height="16"
+                rx="3"
+                fill="#78350f"
+                stroke="#d97706"
+                strokeWidth="1"
+              />
+              <text
+                x={xBe}
+                y={pad.top + plotH + 20}
+                textAnchor="middle"
+                fill="#fef3c7"
+                fontSize="9"
+                fontFamily="monospace"
+                fontWeight="bold"
+              >
+                BE ₹{Math.round(be)}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Current Underlying Spot Marker */}
+        {currentSpot > 0 && (
+          <g>
+            <line
+              x1={getX(currentSpot)}
+              y1={pad.top}
+              x2={getX(currentSpot)}
+              y2={pad.top + plotH}
+              stroke="#38bdf8"
+              strokeWidth="2"
+            />
+            <circle cx={getX(currentSpot)} cy={getY(spotPnl)} r="5" fill="#38bdf8" stroke="#0369a1" strokeWidth="2" />
+            <rect
+              x={getX(currentSpot) - 38}
+              y={pad.top - 24}
+              width="76"
+              height="18"
+              rx="4"
+              fill="#082f49"
+              stroke="#0284c7"
+              strokeWidth="1"
+            />
+            <text
+              x={getX(currentSpot)}
+              y={pad.top - 12}
+              textAnchor="middle"
+              fill="#bae6fd"
+              fontSize="9"
+              fontFamily="monospace"
+              fontWeight="bold"
+            >
+              Spot ₹{Math.round(currentSpot)}
+            </text>
+          </g>
+        )}
+
+        {/* Interactive Hover Crosshair */}
+        {hoveredPoint && (
+          <g>
+            <line
+              x1={getX(hoveredPoint.spot)}
+              y1={pad.top}
+              x2={getX(hoveredPoint.spot)}
+              y2={pad.top + plotH}
+              stroke="#94a3b8"
+              strokeDasharray="2 2"
+              strokeWidth="1"
+            />
+            <circle
+              cx={getX(hoveredPoint.spot)}
+              cy={getY(hoveredPoint.pnl)}
+              r="6"
+              fill={hoveredPoint.pnl >= 0 ? "#10b981" : "#ef4444"}
+              stroke="#ffffff"
+              strokeWidth="2"
+            />
+          </g>
+        )}
+      </svg>
+
+      {/* Floating Hover Readout */}
+      {hoveredPoint && (
+        <div
+          className="absolute z-10 pointer-events-none p-2 rounded-lg bg-gray-900/95 border border-gray-700 shadow-xl backdrop-blur-sm text-xs font-mono"
+          style={{
+            top: 12,
+            right: 12,
+          }}
+        >
+          <div className="text-gray-400">
+            Simulated Spot: <span className="text-white font-bold">₹{hoveredPoint.spot.toLocaleString('en-IN')}</span>{' '}
+            <span className={hoveredPoint.pctFromSpot >= 0 ? "text-emerald-400" : "text-red-400"}>
+              ({hoveredPoint.pctFromSpot >= 0 ? '+' : ''}{hoveredPoint.pctFromSpot}%)
+            </span>
+          </div>
+          <div className="mt-1">
+            Strategy Expiry P&amp;L:{' '}
+            <span className={`font-bold ${hoveredPoint.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {hoveredPoint.pnl >= 0 ? '+' : ''}₹{hoveredPoint.pnl.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+            </span>
+          </div>
+          {payoff.marginEstimated > 0 && (
+            <div className="text-[10px] text-gray-400 mt-0.5">
+              Return on Margin:{' '}
+              <span className={hoveredPoint.pnl >= 0 ? "text-emerald-400 font-semibold" : "text-red-400 font-semibold"}>
+                {((hoveredPoint.pnl / payoff.marginEstimated) * 100).toFixed(1)}%
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Legend & Instructions Footer */}
+      <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] text-gray-400 mt-2 px-2 border-t border-gray-900 pt-2 font-mono">
+        <div className="flex items-center gap-4">
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-1 bg-emerald-500 rounded inline-block" /> Profit Zone (Above 0)
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-1 bg-rose-500 rounded inline-block" /> Loss Zone (Below 0)
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 border-t-2 border-b-2 border-dashed border-amber-400 inline-block" /> Breakeven Points
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-1 bg-sky-400 rounded inline-block" /> Current Spot
+          </span>
+        </div>
+        <span className="text-[10px] text-gray-500">
+          Lot: {lotSize} Qty • Hover over payoff curve to preview P&amp;L at any simulated spot price
+        </span>
+      </div>
+    </div>
+  );
+};
 
 export const OptionChartViewer: React.FC<OptionChartProps> = ({
   initialUnderlying = 'NIFTY',
@@ -49,6 +415,7 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
   );
   const [activeStrategy, setActiveStrategy] = useState<string>(strategyType);
   const [timeframe, setTimeframe] = useState<string>('1h');
+  const [displayMode, setDisplayMode] = useState<'candlestick' | 'payoff'>('candlestick');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -510,6 +877,32 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
           </button>
         </div>
 
+        {/* View Mode Toggle: Candlestick vs Payoff Curve */}
+        <div className="flex items-center gap-1 bg-gray-950/90 p-1 rounded-md border border-gray-800">
+          <button
+            type="button"
+            onClick={() => setDisplayMode('candlestick')}
+            className={`px-2.5 py-1 rounded text-[11px] font-bold border transition-colors flex items-center gap-1.5 ${
+              displayMode === 'candlestick'
+                ? 'bg-purple-600 border-purple-500 text-white shadow-sm'
+                : 'bg-gray-800 border-gray-700 text-gray-300 hover:text-white'
+            }`}
+          >
+            <BarChart2 className="w-3.5 h-3.5" /> Candlesticks
+          </button>
+          <button
+            type="button"
+            onClick={() => setDisplayMode('payoff')}
+            className={`px-2.5 py-1 rounded text-[11px] font-bold border transition-colors flex items-center gap-1.5 ${
+              displayMode === 'payoff'
+                ? 'bg-emerald-600 border-emerald-500 text-white shadow-sm'
+                : 'bg-gray-800 border-gray-700 text-gray-300 hover:text-white'
+            }`}
+          >
+            <TrendingUp className="w-3.5 h-3.5" /> Payoff Diagram
+          </button>
+        </div>
+
         <div className="flex items-center gap-1.5 ml-auto">
           {['5m', '15m', '1h', '1d'].map(tf => (
             <button
@@ -617,7 +1010,7 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
         </div>
       )}
 
-      {/* Main Lightweight Option Candlestick Chart */}
+      {/* Main Lightweight Option Candlestick Chart or Strategy Payoff Diagram */}
       {error && (
         <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-red-800 bg-red-950/50 p-3 text-sm text-red-200" role="alert">
           <span>{error}</span>
@@ -627,22 +1020,45 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
         </div>
       )}
       <div className="relative">
-        <div ref={chartContainerRef} className="w-full rounded-lg overflow-hidden border border-gray-800/80" />
-        {loading && (
+        <div
+          ref={chartContainerRef}
+          className="w-full rounded-lg overflow-hidden border border-gray-800/80"
+          style={{ display: displayMode === 'candlestick' ? 'block' : 'none' }}
+        />
+        {displayMode === 'payoff' && (
+          <OptionPayoffDiagram
+            payoff={payoff}
+            currentSpot={chartData?.current_spot || strike}
+            lotSize={lotSize}
+            height={height}
+          />
+        )}
+        {loading && displayMode === 'candlestick' && (
           <div className="absolute inset-0 bg-gray-950/60 backdrop-blur-sm flex items-center justify-center text-xs text-gray-300">
             <RefreshCw className="w-4 h-4 animate-spin mr-2 text-purple-400" /> Calculating Black-Scholes Option Candlesticks...
           </div>
         )}
       </div>
 
-      <div className="flex items-center justify-between text-[11px] text-gray-500 mt-2 px-1">
-        <span className="flex items-center gap-1.5">
-          <span className="w-2.5 h-0.5 bg-amber-400 inline-block" /> Intraday Option VWAP Benchmark Line
-        </span>
-        <span>
-          High: ₹{chartData?.indicators?.day_high?.toFixed(2) || '—'} | Low: ₹{chartData?.indicators?.day_low?.toFixed(2) || '—'}
-        </span>
-      </div>
+      {displayMode === 'candlestick' ? (
+        <div className="flex items-center justify-between text-[11px] text-gray-500 mt-2 px-1">
+          <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-0.5 bg-amber-400 inline-block" /> Intraday Option VWAP Benchmark Line
+          </span>
+          <span>
+            High: ₹{chartData?.indicators?.day_high?.toFixed(2) || '—'} | Low: ₹{chartData?.indicators?.day_low?.toFixed(2) || '—'}
+          </span>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between text-[11px] text-gray-400 mt-2 px-1 font-mono">
+          <span className="flex items-center gap-1 text-emerald-400 font-semibold">
+            <TrendingUp className="w-3.5 h-3.5" /> Expiry P&amp;L Surface Active
+          </span>
+          <span>
+            Model: Indian Exchange Standard Payoff ({underlying} • Lot: {lotSize})
+          </span>
+        </div>
+      )}
     </div>
   );
 };

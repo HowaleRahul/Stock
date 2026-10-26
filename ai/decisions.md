@@ -501,6 +501,117 @@ This document records the major architectural, structural, and design decisions 
 - **Evidence/source in the project**: Tested via `python start.py --check` which cleanly auto-reloads and resolves `venv\Scripts\python.exe` with exit code 0.
 - **Reason status**: **Verified**.
 
+---
+
+### Decision 29: Non-Directional Iron Condor Strategy, Indian F&O Exchange Segment Routing, and Dynamic Multi-Leg Option Payoff Visualization
+- **Date**: Comprehensive Adversarial QA, F&O Hardening & UI/UX Audit (October 2026; Pass 26)
+- **What was decided**:
+  1. **Non-Directional Iron Condor Strategy (`ml/options_engine.py`)**:
+     - Implemented `_build_iron_condor_plan()` to harvest dual positive theta decay ($+\Theta$) in rangebound/sideways regimes (ADX < 20).
+     - Deploys a 4-leg defined-risk credit structure: Short Put + Long Put hedge wing, Short Call + Long Call hedge wing.
+     - Evaluates dual positive theta decay, delta neutrality, hedged SPAN margin under Indian exchange rules (margin blocked only on the wider wing, as both wings cannot be simultaneously breached at expiry), and analytical breakeven bounds.
+     - Wired into `generate_derivative_plan()` auto-dispatch and `api/training_router.py`.
+  2. **8-Order Statutory Friction Model (`ml/risk_engine.py`)**:
+     - Implemented `IndianFOFrictionModel.calculate_iron_condor_friction()` computing exact statutory costs for 4 entry and 4 exit orders (₹160 brokerage, STT on sell legs, NSE transaction charges, 18% GST, SEBI turnover fees, and stamp duty).
+  3. **Live Broker Exchange Segment Alignment (`live_trader.py`)**:
+     - Fixed exchange segment routing bug: `NIFTY FUT` and `BANKNIFTY FUT` were defaulting to cash `NSE` instead of `NFO`, which brokers reject.
+     - Aligned routing: `BFO` for SENSEX derivatives, `NFO` for NSE index futures and options.
+  4. **NSE Scraper Dash and Comma Sanitization (`data/nse_feed.py`)**:
+     - Live NSE option chains regularly return `"-"` for inactive strikes and formatted strings with commas (`"12,345"`). Added `_safe_num()` helper to harden `calculate_pcr` and `calculate_max_pain` against `TypeError` and `ValueError`.
+  5. **Dynamic SVG Multi-Leg Option Payoff Diagram (`frontend/src/components/OptionChartViewer.tsx`, `frontend/src/utils/foUtils.ts`)**:
+     - Built `OptionPayoffDiagram` rendering SVG interactive multi-leg payoff curves with hover tooltips, green/red gradient fills above/below zero, current spot line, strike lines, breakevens, and live P&L.
+     - Added payoff curve generation math for `IRON_CONDOR` in `api/market_router.py` `/api/v1/market/option-strategy-payoff`.
+  6. **Sortino Ratio & Math Robustness (`ml/performance_dashboard.py`, `ml/journal_analyzer.py`)**:
+     - Implemented Sortino Ratio alongside Sharpe Ratio, completely immune to zero variance (division by zero), NaN, Inf, and downside singularities.
+  7. **Accessibility & Focus Trapping (`frontend/src/pages/SwingToolkit.tsx`, `frontend/src/pages/AIJournal.tsx`)**:
+     - Implemented modal focus trapping (WCAG AA) in candidate checklist modals and standardized responsive table overflow and currency formatting.
+- **Why it was made**: Real Indian F&O trading heavily utilizes non-directional option selling (Iron Condors, Strangle credit spreads) in low-volatility regimes. Previous implementations lacked non-directional 4-leg execution, exchange segment routing for index futures, and dynamic payoff visualization.
+- **Files/components affected**: `ml/options_engine.py`, `ml/risk_engine.py`, `live_trader.py`, `data/nse_feed.py`, `api/market_router.py`, `api/strategy_router.py`, `api/config_store.py`, `ml/performance_dashboard.py`, `ml/journal_analyzer.py`, `frontend/src/components/OptionChartViewer.tsx`, `frontend/src/utils/foUtils.ts`, `frontend/src/pages/SwingToolkit.tsx`, `frontend/src/pages/AIJournal.tsx`, `frontend/src/pages/Portfolio.tsx`, `frontend/src/pages/StrategyBuilder.tsx`, `tests/test_fo_options_selling_and_security.py`.
+- **Known trade-offs**: Iron Condors require managing 4 legs simultaneously and incur 8 execution orders (4 entry + 4 exit).
+- **Evidence/source in the project**: 313 passed tests in pytest, 0 failed. Vite production bundle compiled cleanly in 1.55s. Oxlint passed with 0 errors and 0 warnings.
+- **Reason status**: **Verified**.
+
+---
+
+### Decision 30: Live Market Learner Spot Quote Hardening & Undefined Variable Elimination
+- **Date**: Production Reliability & Live Execution Hardening (October 2026; Pass 27)
+- **What was decided**:
+  1. **Elimination of `NameError: name 'spot_ltp' is not defined` (`ml/live_market_learner.py`)**:
+     - In `LiveMarketLearner.scan_for_entries()`, `spot_ltp` was passed to `MultiAgentConsensusEngine.fetch_live_context(ticker, spot=spot_ltp)` without prior declaration in the scanning loop.
+     - Implemented defensive resolution: extracts `current_close = float(df["close"].iloc[-1])` and checks real-time tick quote via `RealTimeDataFeed.get_realtime_quote_sync(ticker)`. If a positive LTP is returned, it uses `spot_ltp = float(raw_ltp)`, otherwise gracefully falling back to `current_close`.
+  2. **Defensive Quote Resolution in MTM and Exit Evaluation**:
+     - Hardened `update_live_mtm` and `check_exits` against non-dict, `None`, or malformed quote returns (`quote.get(...)`).
+     - Wrapped quote field conversions (`high`, `low`, `open`) in float conversions with fallback to `spot_ltp`.
+  3. **Automated Regression Verification**:
+     - Added `test_live_market_learner_scan_for_entries_spot_ltp_defined()` in `tests/test_live_market_and_realtime.py` simulating live scanning under active consensus evaluation.
+- **Why it was made**: During live trading sessions on Indian market underlyings, when a setup met the AI confidence threshold, the consensus engine invocation crashed with `name 'spot_ltp' is not defined`, aborting the scanning cycle and preventing live order generation.
+- **Files/components affected**: `ml/live_market_learner.py`, `tests/test_live_market_and_realtime.py`.
+- **Known trade-offs**: None.
+- **Evidence/source in the project**: Verified by automated regression test passing in 6.52s and 0 live trading cycle errors.
+- **Reason status**: **Verified**.
+
+---
+
+### Decision 31: Configurable Multi-Agent Consensus Conviction Threshold
+- **Date**: Trading Execution Policy & Confluence Calibration (October 2026; Pass 28)
+- **What was decided**:
+  1. **Configurable Conviction Threshold (`ml/multi_agent_consensus.py`)**:
+     - `MultiAgentConsensusEngine.evaluate()` previously hardcoded `total_bull_weight >= 1.2` and `total_bear_weight >= 1.2`, requiring at least two distinct agents to agree with strong conviction before exiting "STAND ASIDE".
+     - Added `min_conviction_threshold: float = 1.2` (bounded $0.4 \le \text{thresh} \le 3.0$), allowing users to dynamically configure multi-agent gating.
+  2. **Config & API Exposure**:
+     - Added `min_consensus_weight` to `config.json` (default `1.2`), `ConfigUpdate` in `api/dashboard_router.py`, `LiveMarketLearner`, `paper_trader.py`, and `live_trader.py`.
+     - Users seeking higher execution frequency or single-agent breakouts can tune `min_consensus_weight` to `0.6`–`0.8`, while conservative institutional risk profiles maintain the default `1.2` requiring dual-analyst agreement.
+- **Why it was made**: In live morning sessions, mixed technical indicators (e.g., 1 bullish vs 1 bearish setup) correctly trigger the "STAND ASIDE" safety gate. Exposing `min_consensus_weight` provides transparent risk tuning between conservative dual-confirmation gating and active single-signal execution.
+- **Files/components affected**: `ml/multi_agent_consensus.py`, `ml/live_market_learner.py`, `paper_trader.py`, `live_trader.py`, `api/dashboard_router.py`, `config.json`.
+- **Known trade-offs**: Lowering `min_consensus_weight` increases trade entry frequency during low-conviction or choppy sessions.
+- **Evidence/source in the project**: 349 passed unit and integration tests in pytest.
+- **Reason status**: **Verified**.
+
+---
+
+### Decision 32: Asynchronous Historical Data Fetching, Direct Chart Fallback & Swing Scanner Hardening
+- **Date**: Swing Toolkit Hardening & Data Reliability (October 2026; Pass 29)
+- **What was decided**:
+  1. **Implementation of `YFinanceFetcher.fetch_history` (`data/fetcher.py`)**:
+     - Added asynchronous `@classmethod fetch_history(ticker, period="1y", interval="1d", timeout=45.0) -> pd.DataFrame` running inside `asyncio.to_thread`.
+     - Automatically normalizes all DataFrame columns to lowercase (`open`, `high`, `low`, `close`, `volume`) to conform to downstream technical and swing setups.
+  2. **Direct Yahoo v8 Chart Fallback & In-Memory TTL Caching (`data/fetcher.py`)**:
+     - Integrated `cachetools.TTLCache(maxsize=1000, ttl=300)` protecting against rate limits across repeated universe scans.
+     - Implemented `_fetch_chart_direct_sync(yahoo_ticker, period, interval)` calling `https://query1.finance.yahoo.com/v8/finance/chart/{ticker}` directly with browser User-Agent headers, completely bypassing cookie/crumb authentication failures and `YFRateLimitError: Too Many Requests`.
+  3. **Intraday Session Volume Normalization (`setups/swing_toolkit/scanners.py`)**:
+     - `MomentumScanner` now detects if the evaluated candle is today's active trading bar. If evaluated during live NSE hours (09:15 to 15:30 IST), it projects full-day volume using `get_session_phase()`, preventing false-negative volume rejections during morning/midday scans.
+  4. **Multi-Week DWIB Squeeze & ATH Contraction Tolerance**:
+     - `DWIBScanner` now evaluates both current week inside bars and textbook carried-over inside weeks where the prior completed week formed an inside bar relative to its preceding week.
+     - `ATHScanner` tolerances updated to 4.5% to capture market leaders consolidating tightly along the 10 and 20 EMAs.
+  5. **Startup Process Virtualenv Selection (`start.py`, `start.bat`, `start.ps1`)**:
+     - Configured startup scripts to check `.venv` first, preventing conflicts with incomplete virtual environments.
+- **Why it was made**: When users clicked "Run All 3 Scanners" in Swing Toolkit, the scan returned 0 hits due to `AttributeError: type object 'YFinanceFetcher' has no attribute 'fetch_history'`, coupled with Yahoo Finance rate limits.
+- **Files/components affected**: `data/fetcher.py`, `setups/swing_toolkit/scanners.py`, `setups/swing_toolkit/toolkit.py`, `start.py`, `start.bat`, `start.ps1`, `tests/test_swing_toolkit.py`.
+- **Known trade-offs**: None; direct chart fallback provides zero-downtime reliability.
+- **Evidence/source in the project**: Full test suite: 352 passed in 81.86s. Swing API test returned 4 hits and 2 qualified candidates from top 10 liquid stocks.
+- **Reason status**: **Verified**.
+
+---
+
+### Decision 33: Intraday Yahoo Chart Range Boundaries & RealTimeDataFeed Column Normalization
+- **Date**: Chart Streaming & Intraday Data Integrity (October 2026; Pass 30)
+- **What was decided**:
+  1. **Enforce 60-Day Intraday Range Boundaries (`data/fetcher.py`)**:
+     - Yahoo Finance's `/v8/finance/chart/` endpoint rejects any request for intraday bars (`1m`..`1h`) whose `range` exceeds 60 days with `HTTP 422 Unprocessable Entity ("The requested range must be within the last 60 days")`.
+     - In `_fetch_chart_direct_sync()`, mapped intraday ranges defensively: `interval in ("1m",)` -> `range="5d"`; `interval in ("2m", "5m", "15m", "30m", "60m", "1h")` -> `range="60d"`. Daily and weekly intervals continue using full multi-year ranges (`1y`, `2y`, `5y`).
+  2. **Defensive Column Casing in `RealTimeDataFeed.get_chart_candles()` (`data/realtime_feed.py`)**:
+     - Updated row mapping in `get_chart_candles()` to defensively check both Title Case (`"Close"`, `"Open"`) and lowercase (`"close"`, `"open"`), preventing zero-price (`0.0`) candle fallbacks regardless of DataFrame source.
+  3. **Stale Process Invalidation & 502 Bad Gateway Elimination**:
+     - Documented root cause of `502 Bad Gateway`: stale `start.py` instances spawned from old or unactivated terminal sessions running empty virtualenvs where Uvicorn failed to start.
+- **Why it was made**: The frontend chart viewer reported `Failed to load market candles. Please check if the market data service is running.` and `Scan failed: Request failed with status code 502` due to HTTP 422 range rejections and stale backend process terminations.
+- **Files/components affected**: `data/fetcher.py`, `data/realtime_feed.py`, `start.py`.
+- **Known trade-offs**: None.
+- **Evidence/source in the project**: Verified `RealTimeDataFeed.get_chart_candles('NIFTY', '5m', 5)` successfully returns 5m live spot candles with exact price coordinates. 352 pytest tests pass (100% green).
+- **Reason status**: **Verified**.
+
+
+
+
 
 
 

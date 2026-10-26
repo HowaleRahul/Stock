@@ -76,12 +76,30 @@ class PerformanceDashboard:
         avg_loss = float(np.mean([abs(_safe_float(e.get("pnl_pct"))) for e in losses])) if losses else 0.0
         avg_rr = avg_win / avg_loss if avg_loss > 0 else 0.0
 
-        # Sharpe Ratio (annualized, assuming 252 trading days)
+        # Sharpe & Sortino Ratios (annualized, assuming 252 trading days)
+        # Immune to zero variance (division by zero), NaN, Inf, and downside singularities
+        sharpe = 0.0
+        sortino = 0.0
         if len(pnl_list) >= 2:
-            pnl_arr = np.array(pnl_list)
-            sharpe = float(np.mean(pnl_arr) / np.std(pnl_arr) * np.sqrt(252)) if np.std(pnl_arr) > 0 else 0.0
-        else:
-            sharpe = 0.0
+            pnl_arr = np.array([p for p in pnl_list if math.isfinite(p)], dtype=float)
+            if len(pnl_arr) >= 2:
+                mean_pnl = float(np.mean(pnl_arr))
+                std_pnl = float(np.std(pnl_arr))
+                if std_pnl > 1e-9 and math.isfinite(std_pnl):
+                    calc_sharpe = float(mean_pnl / std_pnl * np.sqrt(252))
+                    sharpe = calc_sharpe if math.isfinite(calc_sharpe) else 0.0
+
+                # Sortino Ratio (downside risk / negative returns only)
+                neg_pnls = pnl_arr[pnl_arr < 0]
+                if len(neg_pnls) >= 1:
+                    downside_std = float(np.std(neg_pnls))
+                    if downside_std > 1e-9 and math.isfinite(downside_std):
+                        calc_sortino = float(mean_pnl / downside_std * np.sqrt(252))
+                        sortino = calc_sortino if math.isfinite(calc_sortino) else 0.0
+                    else:
+                        sortino = float(sharpe) if sharpe > 0 else 0.0
+                elif mean_pnl > 0:
+                    sortino = float(sharpe) if sharpe > 0 else 0.0
 
         # Max consecutive losses
         max_consec_loss = 0
@@ -107,6 +125,7 @@ class PerformanceDashboard:
             "avg_loss_pct": round(avg_loss * 100, 4),
             "avg_rr": round(avg_rr, 2),
             "sharpe_ratio": round(sharpe, 4),
+            "sortino_ratio": round(sortino, 4),
             "profit_factor": profit_factor,
             "total_cash_pnl": round(sum(cash_pnl_list), 2),
             "max_consecutive_losses": max_consec_loss,
@@ -158,7 +177,12 @@ class PerformanceDashboard:
 
             win_rate = stats["wins"] / total if total > 0 else 0.0
             avg_pnl = float(np.mean(pnl_arr))
-            sharpe = float(np.mean(pnl_arr) / np.std(pnl_arr) * np.sqrt(252)) if len(pnl_arr) >= 2 and np.std(pnl_arr) > 0 else 0.0
+            std_pnl = float(np.std(pnl_arr)) if len(pnl_arr) >= 2 else 0.0
+            if std_pnl > 1e-9 and math.isfinite(std_pnl):
+                calc_sharpe = float(avg_pnl / std_pnl * np.sqrt(252))
+                sharpe = calc_sharpe if math.isfinite(calc_sharpe) else 0.0
+            else:
+                sharpe = 0.0
 
             result[name] = {
                 "total_trades": total,

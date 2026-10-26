@@ -25,10 +25,10 @@ def ensure_virtualenv():
     """
     root_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
-        os.path.join(root_dir, "venv", "Scripts", "python.exe"),
         os.path.join(root_dir, ".venv", "Scripts", "python.exe"),
-        os.path.join(root_dir, "venv", "bin", "python"),
+        os.path.join(root_dir, "venv", "Scripts", "python.exe"),
         os.path.join(root_dir, ".venv", "bin", "python"),
+        os.path.join(root_dir, "venv", "bin", "python"),
     ]
     venv_py = None
     for cand in candidates:

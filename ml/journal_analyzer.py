@@ -197,8 +197,10 @@ class JournalAnalyzer:
                 wins = sum(1 for p in pnl_list if p > 0)
                 win_rate = wins / n
                 avg_pnl = np.mean(pnl_list)
-                std_pnl = np.std(pnl_list) if n > 1 else 1.0
-                sharpe = (avg_pnl / std_pnl) if std_pnl > 0 else 0.0
+                std_pnl = float(np.std(pnl_list)) if n > 1 else 1.0
+                sharpe = (avg_pnl / std_pnl) if (std_pnl > 1e-9 and math.isfinite(std_pnl)) else 0.0
+                if not math.isfinite(sharpe):
+                    sharpe = 0.0
                 avg_bars = np.mean(bars_buckets[setup_name][regime]) if bars_buckets[setup_name][regime] else 0
 
                 matrix[setup_name][regime] = {
@@ -511,7 +513,9 @@ class JournalAnalyzer:
         total_cash_pnl = sum(cash_pnls)
         avg_pnl = float(np.mean(pnls)) if pnls else 0.0
         std_pnl = float(np.std(pnls)) if total > 1 else 1.0
-        sharpe = (avg_pnl / std_pnl) if std_pnl > 0 else 0.0
+        sharpe = (avg_pnl / std_pnl) if (std_pnl > 1e-9 and math.isfinite(std_pnl)) else 0.0
+        if not math.isfinite(sharpe):
+            sharpe = 0.0
 
         # Max drawdown from capital curve
         capitals = [_safe_float(e.get("capital_after_exit")) for e in self._exits if e.get("capital_after_exit") is not None]

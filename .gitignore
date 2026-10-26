@@ -1,5 +1,6 @@
 # Python / Virtual Environment
 venv/
+.venv/
 env/
 .env
 *.pyc
@@ -9,7 +10,12 @@ __pycache__/
 *.so
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
 dist/
 build/
 *.egg-info/
@@ -37,10 +43,16 @@ Thumbs.db
 node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/coverage/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # Local data files
 paper_account.json
 paper_trades.json
 custom_strategies.json
 _repo_research/
-

@@ -70,7 +70,40 @@ class MomentumScanner:
         cur_vol = float(volume.iloc[-1])
         vol_sma = sma(volume, self.vol_avg_period)
         avg_vol = float(vol_sma.iloc[-1]) if not np.isnan(vol_sma.iloc[-1]) else 1.0
-        rvol = cur_vol / max(avg_vol, 1.0)
+
+        # Check if the evaluated bar is today's live intraday forming bar
+        is_today = False
+        try:
+            last_date = None
+            if hasattr(df.index[-1], "date"):
+                last_date = df.index[-1].date()
+            elif "date" in df.columns or "time" in df.columns:
+                col = "date" if "date" in df.columns else "time"
+                last_date = pd.to_datetime(df[col].iloc[-1]).date()
+
+            from data.market_hours import get_current_ist_time, get_session_phase
+            ist_today = get_current_ist_time().date()
+            if last_date == ist_today:
+                is_today = True
+        except Exception:
+            is_today = False
+
+        if is_today:
+            from data.market_hours import get_session_phase
+            session_phase = get_session_phase()
+            if 0.05 < session_phase < 0.98:
+                projected_vol = cur_vol / max(session_phase, 0.05)
+                rvol_live = projected_vol / max(avg_vol, 1.0)
+            else:
+                rvol_live = cur_vol / max(avg_vol, 1.0)
+        else:
+            rvol_live = cur_vol / max(avg_vol, 1.0)
+
+        effective_rvol = max(rvol_live, cur_vol / max(avg_vol, 1.0))
+        prev_vol = float(volume.iloc[-2]) if len(volume) >= 2 else cur_vol
+        vol_expanding = (cur_vol > prev_vol) and (effective_rvol >= 1.0)
+        has_volume = (effective_rvol >= self.min_rvol) or vol_expanding
+        rvol = effective_rvol
 
         # 20-day high before today's bar
         pivot_high = float(high.iloc[-(self.lookback_pivot + 1):-1].max())
@@ -84,11 +117,6 @@ class MomentumScanner:
         is_breakout = cur_close >= pivot_high
         dist_to_pivot_pct = ((pivot_high - cur_close) / pivot_high) * 100.0
         is_coiling = (0.0 <= dist_to_pivot_pct <= self.coiling_threshold_pct)
-
-        # Volume condition: RVol >= min_rvol or expanding volume trend
-        prev_vol = float(volume.iloc[-2])
-        vol_expanding = (cur_vol > prev_vol) and (rvol >= 1.0)
-        has_volume = (rvol >= self.min_rvol) or vol_expanding
 
         matched = in_uptrend and (is_breakout or is_coiling) and has_volume
 
@@ -199,8 +227,17 @@ class DWIBScanner:
         w_high_prev = float(weekly_df["high"].iloc[-2])
         w_low_prev = float(weekly_df["low"].iloc[-2])
 
-        # Weekly inside bar with small 0.5% tolerance buffer
-        weekly_inside_bar = (w_high_cur <= w_high_prev * 1.005) and (w_low_cur >= w_low_prev * 0.995)
+        # Weekly inside bar check:
+        # Case A: Current weekly candle is contracting inside prior week
+        curr_w_inside = (w_high_cur <= w_high_prev * 1.005) and (w_low_cur >= w_low_prev * 0.995)
+        # Case B: Prior completed week closed as an inside bar relative to week-before-prior (textbook squeeze carried forward)
+        prev_w_inside = False
+        if len(weekly_df) >= 3:
+            w_high_prior2 = float(weekly_df["high"].iloc[-3])
+            w_low_prior2 = float(weekly_df["low"].iloc[-3])
+            prev_w_inside = (w_high_prev <= w_high_prior2 * 1.005) and (w_low_prev >= w_low_prior2 * 0.995)
+
+        weekly_inside_bar = curr_w_inside or prev_w_inside
 
         # 3. Base / Trend Filter:
         # Near prior 50-day highs (not in deep downtrend) and above 50 SMA
@@ -298,8 +335,8 @@ class ATHScanner:
 
     def __init__(
         self,
-        max_dist_from_ath_pct: float = 3.5,
-        ema_band_tolerance_pct: float = 2.0,
+        max_dist_from_ath_pct: float = 4.5,
+        ema_band_tolerance_pct: float = 2.5,
         rolling_high_window: int = 250,
     ) -> None:
         self.max_dist_from_ath_pct = max_dist_from_ath_pct

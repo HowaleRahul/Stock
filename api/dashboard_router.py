@@ -41,6 +41,7 @@ class ConfigUpdate(BaseModel):
     risk_per_trade_pct: Optional[float] = Field(default=None, gt=0, le=0.05, allow_inf_nan=False)
     max_portfolio_drawdown_pct: Optional[float] = Field(default=None, gt=0, le=1, allow_inf_nan=False)
     min_ai_confidence: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    min_consensus_weight: Optional[float] = Field(default=None, ge=0.4, le=3.0, allow_inf_nan=False)
     min_risk_reward_ratio: Optional[float] = Field(default=None, gt=0, le=100, allow_inf_nan=False)
     retrain_interval_days: Optional[int] = Field(default=None, ge=1, le=365)
     drift_check_interval_hours: Optional[int] = Field(default=None, ge=1, le=8760)
