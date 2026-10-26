@@ -265,6 +265,7 @@ async def get_option_chart(
             "theta": round(latest_greeks["theta"], 2),
             "gamma": round(latest_greeks["gamma"], 5),
             "vega": round(latest_greeks["vega"], 3),
+            "rho": round(latest_greeks.get("rho", 0.0), 4),
             "iv": round(sigma * 100, 1),
         },
         "indicators": {
@@ -384,6 +385,7 @@ async def get_option_tick(
         "theta": round(bs_res["theta"], 2),
         "gamma": round(bs_res["gamma"], 5),
         "vega": round(bs_res["vega"], 3),
+        "rho": round(bs_res.get("rho", 0.0), 4),
         "iv": round(sigma * 100, 1),
         "lot_size": _deriv_engine.get_lot_size(clean_und),
         "is_market_open": status["is_open"],

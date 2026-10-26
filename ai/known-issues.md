@@ -444,12 +444,66 @@ This document catalogs all verified defects, technical debt, incomplete features
 
 ---
 
-### Issue 41: HTTP 422 in Direct Yahoo Chart Fallback on Intraday Ranges & RealTimeDataFeed Column Casing
-- **Severity**: High (Market Chart Feed Interruption & 502 Bad Gateway)
-- **Evidence**: Frontend reported `Failed to load market candles. Please check if the market data service is running.` and `Scan failed: Request failed with status code 502`. In `data/fetcher.py`, `_fetch_chart_direct_sync` mapped `60d` to `3mo` for all intervals. Yahoo Finance rejects intraday intervals (`1m`..`1h`) with `HTTP 422 Unprocessable Entity ("The requested range must be within the last 60 days")`. Additionally, `RealTimeDataFeed.get_chart_candles()` assumed Title Case (`"Close"`) and returned `0.0` when receiving lowercase DataFrames, while stale background processes triggered proxy 502 disconnects.
-- **Affected Area**: `data/fetcher.py`, `data/realtime_feed.py`
-- **Current Behavior**: Intraday ranges are strictly bounded to `range="60d"` for `5m`, `15m`, `30m`, `1h` (and `5d` for `1m`). `RealTimeDataFeed.get_chart_candles()` defensively checks both Title Case and lowercase column names.
-- **Status**: Resolved / Verified (Pass 30).
+### Issue 42: Iron Condor 4-Leg MTM Evaluation Fallthrough & Single-Option Valuation
+- **Severity**: Critical (Quant Derivatives Valuation & Risk Governance)
+- **Evidence**: In `ml/options_engine.py`, `calculate_option_mtm()` contained an `if strat == "CREDIT_SPREAD":` branch, but lacked an explicit branch for `strat == "IRON_CONDOR"`. As a result, 4-leg condor positions fell through to the single-option Black-Scholes calculation and were re-priced as a single ATM Put option.
+- **Affected Area**: `ml/options_engine.py`, `ml/live_market_learner.py`, `paper_trader.py`
+- **Current Behavior**: `DerivativeTradePlan` now explicitly stores all 4 legs (`short_put_strike`, `long_put_strike`, `short_call_strike`, `long_call_strike`). `calculate_option_mtm()` values all 4 legs independently, accurately tracking net credit decay towards 0 and net delta.
+- **Status**: Resolved / Verified (Pass 31).
+
+---
+
+### Issue 43: Option Selling & Spread Inverted MTM PnL in Live Market Learner
+- **Severity**: Critical (Financial Accuracy & Risk Modeling)
+- **Evidence**: In `ml/live_market_learner.py`, option MTM PnL was calculated as `pnl = (live_prem - entry_p) * qty` for all options, regardless of whether they were bought or sold. When an option was sold for a credit of ₹100 and decayed to ₹60, the code computed `(60 - 100) = -40` (loss) instead of `+40` (profit).
+- **Affected Area**: `ml/live_market_learner.py`
+- **Current Behavior**: When `act == "SELL"` or `strat in ("CREDIT_SPREAD", "IRON_CONDOR")`, PnL is computed as `pnl = (entry_p - live_prem) * qty`.
+- **Status**: Resolved / Verified (Pass 31).
+
+---
+
+### Issue 44: Neutral Strategy Non-Exit in Live and Paper Trading Daemons
+- **Severity**: High (Live Execution & Capital Risk)
+- **Evidence**: In `live_trader.py` and `paper_trader.py`, exit evaluations only checked `direction in {"LONG", "BULLISH", "BUY"}` and `direction in {"SHORT", "BEARISH", "SELL"}`. When `direction == "NEUTRAL"` (Iron Condors), `live_trader.py` logged `Unknown persisted trade direction 'NEUTRAL'; refusing automatic exit.` and `should_exit = False`, leaving condors unmonitored.
+- **Affected Area**: `live_trader.py`, `paper_trader.py`
+- **Current Behavior**: Both daemons explicitly evaluate `direction in ("NEUTRAL", "RANGEBOUND")`, triggering stop-loss exits when the underlying spot breaches the outer wings and take-profit exits when net credit decays.
+- **Status**: Resolved / Verified (Pass 31).
+
+---
+
+### Issue 45: Fail-Closed Live Execution Bypass & Proxy Rate Limit Spoofing
+- **Severity**: Critical (Security & Execution Safety)
+- **Evidence**: `SmartAPIBroker.place_order` did not check `self.broker_mode == "live"`, risking live order execution in testing environments where `is_connected=True` was mocked. In `api/auth.py`, `_is_trusted_proxy` allowed any private IP to spoof `X-Forwarded-For`.
+- **Affected Area**: `api/broker.py`, `api/auth.py`, `data/fx_fetcher.py`
+- **Current Behavior**: Enforced fail-closed `if self.broker_mode != "live": raise RuntimeError(...)` and input sanitization in `SmartAPIBroker`. Pinned trusted reverse proxies strictly to loopback addresses. Added allowed redirect host whitelisting in `data/fx_fetcher.py`.
+- **Status**: Resolved / Verified (Pass 31).
+
+---
+
+### Issue 46: Paper Matching Engine Triggered-State Lifecycle & Order History Tracking
+- **Severity**: High (Execution Engine Fidelity & Order Audit)
+- **Evidence**: In `api/broker_adapter.py`, `PaperMatchingEngine.on_tick()` failed to append filled resting orders (MARKET, LIMIT, SL, SL-M) to `self.order_history`. Furthermore, for Stop-Loss Limit (`SL`) orders, once triggered (`order.status = "TRIGGERED"`), if the limit price was not immediately marketable in that tick, subsequent ticks re-evaluated the stop condition `(l <= order.trigger_price)`. If price rebounded above the trigger price before reaching the limit price, the order was never checked against its limit price and failed to execute. Additionally, `PaperMatchingEngine` lacked input sanitization (accepting non-positive quantity, invalid order directions, or non-positive limit/trigger prices) and lacked order cancellation methods.
+- **Affected Area**: `api/broker_adapter.py`, `tests/test_broker_adapter_and_greeks.py`
+- **Current Behavior**:
+  1. Once an SL order triggers, its status transitions to `"TRIGGERED"` and it is evaluated on subsequent ticks as an active limit order against current high/low/ltp boundaries.
+  2. All resting orders filled via `on_tick()` are appended to `self.order_history`.
+  3. Added `cancel_order(order_id)` and `get_order(order_id)` on both `PaperMatchingEngine` and `UnifiedBrokerAdapter`.
+  4. Added strict input validation in `submit_order`: rejecting non-positive quantities, invalid directions, invalid order types, and non-positive limit/trigger prices.
+- **Status**: Resolved / Verified (Pass 32).
+
+---
+
+### Issue 47: Option Greek Rho & Condor Wing Specs Gap Between Backend and Frontend
+- **Severity**: Medium (Frontend Data Visualization & Derivatives Greek Completeness)
+- **Evidence**: Following the addition of Greek $\text{Rho}$ ($\rho$) and 4-leg Iron Condor wing attributes to `DerivativeTradePlan` and `options_engine.py` in Pass 31, the endpoints `/option-tick` and `/option-chart` in `api/market_router.py` omitted `"rho"` in their JSON responses. Furthermore, `/dashboard/portfolio` in `api/dashboard_router.py` omitted the 4 wings and Greeks when serializing open trades, and `OptionChartViewer.tsx` / `TrainingUI.tsx` did not display Rho or the 4 wings in the Breakeven card or Trade Dossier Modal.
+- **Affected Area**: `api/market_router.py`, `api/dashboard_router.py`, `frontend/src/components/OptionChartViewer.tsx`, `frontend/src/utils/foUtils.ts`, `frontend/src/pages/TrainingUI.tsx`
+- **Current Behavior**:
+  1. `/option-tick` and `/option-chart` serialize `"rho": round(latest_greeks.get("rho", 0.0), 4)`.
+  2. `/dashboard/portfolio` serializes the full F&O trade payload: `strategy_type`, `action`, `short_put_strike`, `long_put_strike`, `short_call_strike`, `long_call_strike`, `lower_breakeven`, `upper_breakeven`, and Greeks (`opt_rho`, `opt_gamma`, `opt_vega`, `opt_iv`).
+  3. `foUtils.ts` natively supports Iron Condors: computes exact payoff with 4 legs, handles range breakevens, and sets `isSeller = true` (positive theta).
+  4. `OptionChartViewer.tsx` displays full 6 Greeks including Rho (ρ), Breakeven Range, and an interactive 4-leg Condor Wings ribbon.
+  5. `TrainingUI.tsx` Trade Dossier Modal displays Rho (ρ), Breakeven Range, and Condor Wings ribbon.
+- **Status**: Resolved / Verified (Pass 32).
 
 
 

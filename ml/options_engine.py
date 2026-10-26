@@ -209,6 +209,18 @@ class DerivativeTradePlan:
     hedge_entry_price: float = 0.0    # Long hedge entry premium
     net_credit: float = 0.0           # Net credit collected per share
 
+    # 4-Leg Iron Condor Specific Attributes
+    short_put_strike: float = 0.0
+    long_put_strike: float = 0.0
+    short_call_strike: float = 0.0
+    long_call_strike: float = 0.0
+    short_put_entry: float = 0.0
+    long_put_entry: float = 0.0
+    short_call_entry: float = 0.0
+    long_call_entry: float = 0.0
+    lower_breakeven: float = 0.0
+    upper_breakeven: float = 0.0
+
     # Margins and Capital
     margin_or_premium_required: float = 0.0  # Capital deployed
     max_loss_amount: float = 0.0
@@ -220,6 +232,7 @@ class DerivativeTradePlan:
     theta: float = 0.0
     gamma: float = 0.0
     vega: float = 0.0
+    rho: float = 0.0
     days_to_expiry: float = 7.0
     iv: float = 0.15
 
@@ -277,6 +290,16 @@ class DerivativeTradePlan:
             "hedge_strike_price": round(self.hedge_strike_price, 2),
             "hedge_entry_price": round(self.hedge_entry_price, 2),
             "net_credit": round(self.net_credit, 2),
+            "short_put_strike": round(self.short_put_strike, 2),
+            "long_put_strike": round(self.long_put_strike, 2),
+            "short_call_strike": round(self.short_call_strike, 2),
+            "long_call_strike": round(self.long_call_strike, 2),
+            "short_put_entry": round(self.short_put_entry, 2),
+            "long_put_entry": round(self.long_put_entry, 2),
+            "short_call_entry": round(self.short_call_entry, 2),
+            "long_call_entry": round(self.long_call_entry, 2),
+            "lower_breakeven": round(self.lower_breakeven, 2),
+            "upper_breakeven": round(self.upper_breakeven, 2),
             "margin_or_premium_required": max(0.0, round(self.margin_or_premium_required, 2)) if math.isfinite(self.margin_or_premium_required) else 0.0,
             "max_loss_amount": round(self.max_loss_amount, 2) if math.isfinite(self.max_loss_amount) else 0.0,
             "max_profit_amount": round(self.max_profit_amount, 2) if math.isfinite(self.max_profit_amount) else 0.0,
@@ -285,6 +308,7 @@ class DerivativeTradePlan:
             "theta": round(self.theta, 4),
             "gamma": round(self.gamma, 6),
             "vega": round(self.vega, 4),
+            "rho": round(self.rho, 4),
             "days_to_expiry": self.days_to_expiry,
             "iv": round(self.iv, 4),
             "is_approved": self.is_approved,
@@ -506,18 +530,7 @@ class DerivativeEngine:
         return int(base * round(x / base))
 
     def _normalize_ticker(self, ticker: str) -> str:
-        t = ticker.upper().replace("^", "")
-        if "BSESN" in t or "SENSEX" in t:
-            return "SENSEX"
-        if "NSEBANK" in t or "BANKNIFTY" in t:
-            return "BANKNIFTY"
-        if "NSEI" in t or "NIFTY" in t:
-            return "NIFTY"
-        if "FIN" in t:
-            return "FINNIFTY"
-        if "MID" in t:
-            return "MIDCPNIFTY"
-        return t
+        return normalize_index_ticker(ticker)
 
     def is_derivative_supported(self, ticker: str) -> bool:
         norm = self._normalize_ticker(ticker)
@@ -595,16 +608,16 @@ class DerivativeEngine:
         """
         opt_type = str(option_type).upper().strip() if option_type else ""
         if opt_type not in ("CE", "PE"):
-            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "rho": 0.0}
 
         # Input validation: non-numeric, NaN, inf, or non-positive spot/strike
         if not all(isinstance(v, (int, float)) for v in (S, K, T, r, sigma)):
-            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "rho": 0.0}
         if any(math.isnan(v) or math.isinf(v) for v in (S, K, T, r, sigma)):
-            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "rho": 0.0}
 
         if S <= 0.0 or K <= 0.0:
-            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+            return {"premium": 0.05, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "rho": 0.0}
 
         # Expiry moment (T <= 0) or zero volatility boundary: Option value converges to intrinsic value
         if T <= 0.0 or sigma <= 1e-9:
@@ -619,7 +632,8 @@ class DerivativeEngine:
                 "delta": float(delta),
                 "gamma": 0.0,
                 "theta": 0.0,
-                "vega": 0.0
+                "vega": 0.0,
+                "rho": 0.0
             }
 
         denom = sigma * np.sqrt(T)
@@ -635,7 +649,8 @@ class DerivativeEngine:
                 "delta": float(delta),
                 "gamma": 0.0,
                 "theta": 0.0,
-                "vega": 0.0
+                "vega": 0.0,
+                "rho": 0.0
             }
 
         d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / denom
@@ -647,32 +662,38 @@ class DerivativeEngine:
                 prem = max(0.05, S - K * np.exp(-r * T))
                 delta = 1.0
                 theta = (-r * K * np.exp(-r * T)) / 365.0
+                rho = (K * T * np.exp(-r * T)) / 100.0
             else:  # Put is deep OTM
                 prem = 0.05
                 delta = 0.0
                 theta = 0.0
+                rho = 0.0
             return {
                 "premium": round(float(prem), 2),
                 "delta": float(delta),
                 "gamma": 0.0,
                 "theta": round(float(theta), 4),
-                "vega": 0.0
+                "vega": 0.0,
+                "rho": round(float(rho), 4)
             }
         elif d1 <= -37.0:
             if opt_type == "CE":  # Call is deep OTM
                 prem = 0.05
                 delta = 0.0
                 theta = 0.0
+                rho = 0.0
             else:  # Put is deep ITM
                 prem = max(0.05, K * np.exp(-r * T) - S)
                 delta = -1.0
                 theta = (r * K * np.exp(-r * T)) / 365.0
+                rho = (-K * T * np.exp(-r * T)) / 100.0
             return {
                 "premium": round(float(prem), 2),
                 "delta": float(delta),
                 "gamma": 0.0,
                 "theta": round(float(theta), 4),
-                "vega": 0.0
+                "vega": 0.0,
+                "rho": round(float(rho), 4)
             }
 
         try:
@@ -681,11 +702,13 @@ class DerivativeEngine:
                 delta = si.norm.cdf(d1, 0.0, 1.0)
                 theta = (- (S * si.norm.pdf(d1, 0.0, 1.0) * sigma) / (2 * np.sqrt(T))
                          - r * K * np.exp(-r * T) * si.norm.cdf(d2, 0.0, 1.0))
+                rho = (K * T * np.exp(-r * T) * si.norm.cdf(d2, 0.0, 1.0)) / 100.0
             else:  # "PE"
                 premium = (K * np.exp(-r * T) * si.norm.cdf(-d2, 0.0, 1.0) - S * si.norm.cdf(-d1, 0.0, 1.0))
                 delta = -si.norm.cdf(-d1, 0.0, 1.0)
                 theta = (- (S * si.norm.pdf(d1, 0.0, 1.0) * sigma) / (2 * np.sqrt(T))
                          + r * K * np.exp(-r * T) * si.norm.cdf(-d2, 0.0, 1.0))
+                rho = (-K * T * np.exp(-r * T) * si.norm.cdf(-d2, 0.0, 1.0)) / 100.0
 
             gamma = si.norm.pdf(d1, 0.0, 1.0) / (S * denom)
             vega = S * si.norm.pdf(d1, 0.0, 1.0) * np.sqrt(T)
@@ -703,13 +726,15 @@ class DerivativeEngine:
             safe_gamma = float(max(0.0, gamma)) if not (math.isnan(gamma) or math.isinf(gamma)) else 0.0
             safe_theta = float(theta_per_day) if not (math.isnan(theta_per_day) or math.isinf(theta_per_day)) else 0.0
             safe_vega = float(max(0.0, vega / 100.0)) if not (math.isnan(vega) or math.isinf(vega)) else 0.0
+            safe_rho = float(rho) if not (math.isnan(rho) or math.isinf(rho)) else 0.0
 
             return {
                 "premium": max(0.05, round(safe_prem, 2)),
                 "delta": round(safe_delta, 4),
                 "gamma": round(safe_gamma, 6),
                 "theta": round(safe_theta, 4),
-                "vega": round(safe_vega, 4)
+                "vega": round(safe_vega, 4),
+                "rho": round(safe_rho, 4)
             }
         except Exception:
             if opt_type == "CE":
@@ -718,10 +743,97 @@ class DerivativeEngine:
             else:
                 intrinsic = max(0.05, max(0.0, K - S))
                 delta = -1.0 if K > S else 0.0
-            return {"premium": round(intrinsic, 2), "delta": float(delta), "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+            return {"premium": round(intrinsic, 2), "delta": float(delta), "gamma": 0.0, "theta": 0.0, "vega": 0.0, "rho": 0.0}
 
     # Alias for private method call compatibility
     _black_scholes = black_scholes
+
+    @classmethod
+    def calculate_implied_volatility(
+        cls,
+        market_price: float,
+        S: float,
+        K: float,
+        T: float,
+        r: float = 0.065,
+        option_type: str = "CE",
+        fallback_vix: Optional[float] = None
+    ) -> float:
+        """
+        Calculates Implied Volatility (IV) from option market price using Newton-Raphson
+        with analytical Vega, falling back to Brent's method (brentq), and finally
+        to India VIX or baseline IV (0.14) if non-convergent or arbitrage-violating.
+        """
+        fallback = float(fallback_vix) if (fallback_vix is not None and fallback_vix > 0) else cls.DEFAULT_IV
+        opt_type = str(option_type).upper().strip()
+
+        # Sanity checks
+        if not all(isinstance(v, (int, float)) for v in (market_price, S, K, T, r)):
+            return fallback
+        if any(math.isnan(v) or math.isinf(v) for v in (market_price, S, K, T, r)):
+            return fallback
+        if S <= 0.0 or K <= 0.0 or market_price <= 0.05 or T <= 1e-4:
+            return fallback
+
+        # Arbitrage boundary checks: market price must be >= discounted intrinsic
+        disc = math.exp(-r * T)
+        if opt_type == "CE":
+            intrinsic = max(0.0, S - K * disc)
+            upper_bound = S
+        else:
+            intrinsic = max(0.0, K * disc - S)
+            upper_bound = K * disc
+
+        if market_price <= intrinsic:
+            return 0.01  # Zero time-value (deep ITM / intrinsic only)
+        if market_price >= upper_bound:
+            return fallback
+
+        engine = cls()
+
+        # 1. Newton-Raphson with analytical Vega
+        sigma = fallback if (0.05 <= fallback <= 1.5) else 0.20
+        max_iter = 35
+        tolerance = 1e-4
+
+        for _ in range(max_iter):
+            bs = engine.black_scholes(S=S, K=K, T=T, r=r, sigma=sigma, option_type=opt_type)
+            price = bs["premium"]
+            diff = price - market_price
+
+            if abs(diff) < tolerance:
+                return round(float(np.clip(sigma, 0.01, 4.0)), 4)
+
+            # Vega = S * sqrt(T) * pdf(d1)
+            denom = sigma * math.sqrt(T)
+            if denom <= 1e-9:
+                break
+            d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / denom
+            vega = S * math.sqrt(T) * si.norm.pdf(d1, 0.0, 1.0)
+
+            if vega < 1e-6:
+                break  # Flat derivative, switch to Brent's method
+
+            step = diff / vega
+            sigma -= step
+            if sigma <= 0.005 or sigma >= 5.0:
+                break
+
+        # 2. Brent's method fallback
+        try:
+            from scipy.optimize import brentq
+            def obj(s_val):
+                return engine.black_scholes(S=S, K=K, T=T, r=r, sigma=s_val, option_type=opt_type)["premium"] - market_price
+
+            f_low = obj(0.01)
+            f_high = obj(4.0)
+            if f_low * f_high <= 0:
+                root_sigma = brentq(obj, 0.01, 4.0, xtol=1e-4, maxiter=50)
+                return round(float(np.clip(root_sigma, 0.01, 4.0)), 4)
+        except Exception:
+            pass
+
+        return round(float(fallback), 4)
 
     # Backwards compatibility alias for single options plan generation
     def generate_options_plan(
@@ -749,10 +861,12 @@ class DerivativeEngine:
         self,
         spot_plan: TradePlan,
         capital: float,
-        derivative_type: str = "AUTO",      # "AUTO", "OPTIONS", "FUTURES"
+        derivative_type: str = "AUTO",      # "AUTO", "OPTIONS", "FUTURES", "SPREAD", "IRON_CONDOR"
         strike_pref: str = "AUTO",          # "AUTO", "ITM", "ATM", "OTM"
         regime: str = "trending",
         iv: Optional[float] = None,
+        adx: Optional[float] = None,
+        options_data: Optional[Dict[str, Any]] = None,
     ) -> DerivativeTradePlan:
         """
         Creates a lot-sized, risk-controlled Derivative trade plan.
@@ -773,10 +887,15 @@ class DerivativeEngine:
         chosen_instrument = derivative_type.upper().strip()
         if chosen_instrument == "AUTO":
             # Real Indian F&O Allocation Logic:
-            # Rangebound / Low-ADX / Chop regime -> Option Selling (Iron Condor / Credit Spreads / Directional Writing)
+            # Low-ADX (< 20) or Rangebound / Chop regime -> Option Selling (Iron Condor / Credit Spreads / Directional Writing)
             # Trending / Breakout regime -> Futures (if large cap) or Option Buying
-            if "range" in regime.lower() or "chop" in regime.lower():
-                if capital >= 50000.0 and abs(spot_plan.ai_probability - 0.5) <= 0.15:
+            is_non_directional = (
+                (adx is not None and adx < 20.0)
+                or "range" in regime.lower()
+                or "chop" in regime.lower()
+            )
+            if is_non_directional:
+                if capital >= 35000.0 and abs(spot_plan.ai_probability - 0.5) <= 0.15:
                     chosen_instrument = "IRON_CONDOR"
                 elif capital >= futures_margin:
                     chosen_instrument = "SELL_OPTIONS"
@@ -813,7 +932,8 @@ class DerivativeEngine:
                 interval=interval,
                 regime=regime,
                 iv=real_iv,
-                strike_pref=strike_pref
+                strike_pref=strike_pref,
+                options_data=options_data
             )
         elif chosen_instrument in ("CREDIT_SPREAD", "SPREAD"):
             return self._build_credit_spread_plan(
@@ -823,7 +943,8 @@ class DerivativeEngine:
                 lot_size=lot_size,
                 interval=interval,
                 regime=regime,
-                iv=real_iv
+                iv=real_iv,
+                options_data=options_data
             )
         elif chosen_instrument in ("IRON_CONDOR", "CONDOR"):
             return self._build_iron_condor_plan(
@@ -833,7 +954,8 @@ class DerivativeEngine:
                 lot_size=lot_size,
                 interval=interval,
                 regime=regime,
-                iv=real_iv
+                iv=real_iv,
+                options_data=options_data
             )
         else:
             return self._build_options_plan(
@@ -861,7 +983,8 @@ class DerivativeEngine:
         interval: int,
         regime: str,
         iv: float,
-        strike_pref: str = "AUTO"
+        strike_pref: str = "AUTO",
+        options_data: Optional[Dict[str, Any]] = None,
     ) -> DerivativeTradePlan:
         """
         Directional Option Selling (Writing) Strategy:
@@ -883,11 +1006,16 @@ class DerivativeEngine:
         r = self.RISK_FREE_RATE
         sigma = iv
 
-        # Pick OTM strike for high probability theta collection
+        # Pick OTM strike for high probability theta collection, reinforced by Max Pain if available
+        max_pain = options_data.get("max_pain") if options_data else None
         if option_type == "CE":
             chosen_strike = atm_strike + interval  # OTM Call
+            if max_pain and max_pain > atm_strike:
+                chosen_strike = max(chosen_strike, self._round_to_nearest(max_pain, interval))
         else:
             chosen_strike = atm_strike - interval  # OTM Put
+            if max_pain and max_pain < atm_strike:
+                chosen_strike = min(chosen_strike, self._round_to_nearest(max_pain, interval))
 
         bs = self.black_scholes(spot, chosen_strike, T, r, sigma, option_type)
         entry_premium = bs["premium"]
@@ -998,7 +1126,8 @@ class DerivativeEngine:
         lot_size: int,
         interval: int,
         regime: str,
-        iv: float
+        iv: float,
+        options_data: Optional[Dict[str, Any]] = None,
     ) -> DerivativeTradePlan:
         """
         Defined-Risk Credit Spread Strategy:
@@ -1017,11 +1146,15 @@ class DerivativeEngine:
         r = self.RISK_FREE_RATE
         sigma = iv
 
+        max_pain = options_data.get("max_pain") if options_data else None
+
         if is_bullish:
             # Bull Put Spread: Sell strike1 PE, Buy strike2 PE (strike2 < strike1)
             spread_name = "BULL PUT SPREAD"
             short_strike = atm_strike - interval
-            long_strike = atm_strike - (2 * interval)
+            if max_pain and max_pain < atm_strike:
+                short_strike = min(short_strike, self._round_to_nearest(max_pain, interval))
+            long_strike = short_strike - interval
             opt_type = "PE"
             direction = "LONG"
             bs_short = self.black_scholes(spot, short_strike, T, r, sigma, "PE")
@@ -1030,7 +1163,9 @@ class DerivativeEngine:
             # Bear Call Spread: Sell strike1 CE, Buy strike2 CE (strike2 > strike1)
             spread_name = "BEAR CALL SPREAD"
             short_strike = atm_strike + interval
-            long_strike = atm_strike + (2 * interval)
+            if max_pain and max_pain > atm_strike:
+                short_strike = max(short_strike, self._round_to_nearest(max_pain, interval))
+            long_strike = short_strike + interval
             opt_type = "CE"
             direction = "SHORT"
             bs_short = self.black_scholes(spot, short_strike, T, r, sigma, "CE")
@@ -1041,15 +1176,15 @@ class DerivativeEngine:
         net_credit = max(1.0, round(p_short - p_long, 2))
         spread_width = float(abs(short_strike - long_strike))
         max_loss_per_share = max(1.0, spread_width - net_credit)
+        max_loss = round(max_loss_per_share * lot_size, 2)
 
-        # Hedged SPAN margin benefit under NSE rules
-        hedged_margin = round(max_loss_per_share * lot_size + 2500.0, 2)
+        # Hedged SPAN margin benefit under NSE rules (approx ₹25k-₹35k per lot for index credit spreads)
+        hedged_margin = max(25000.0, round(max_loss + 15000.0, 2))
 
         target_net_credit = max(0.05, round(net_credit * 0.30, 2))  # Capture 70% of credit
         sl_net_debit = round(net_credit * 1.50, 2)
 
         max_profit = round((net_credit - target_net_credit) * lot_size, 2)
-        max_loss = round(max_loss_per_share * lot_size, 2)
         rr = max_profit / max_loss if max_loss > 0 else 0.0
 
         contract_symbol = f"{underlying} {short_strike}/{long_strike} {spread_name}"
@@ -1131,6 +1266,7 @@ class DerivativeEngine:
             theta=round(net_theta, 4),
             gamma=round(-abs(bs_short["gamma"]) + abs(bs_long["gamma"]), 6),
             vega=round(-abs(bs_short["vega"]) + abs(bs_long["vega"]), 4),
+            rho=round(-abs(bs_short["rho"]) + abs(bs_long["rho"]), 4),
             days_to_expiry=round(dte, 4),
             iv=sigma,
             is_approved=is_approved,
@@ -1150,24 +1286,32 @@ class DerivativeEngine:
         lot_size: int,
         interval: int,
         regime: str,
-        iv: float
+        iv: float,
+        options_data: Optional[Dict[str, Any]] = None,
     ) -> DerivativeTradePlan:
         """
         Non-Directional 4-Leg Iron Condor Strategy for Rangebound / Expiry Day Markets:
         - Downside (Bull Put Spread):
-            * Sell OTM Put: atm_strike - interval
-            * Buy OTM Put: atm_strike - 2 * interval (hedge wing)
+            * Sell OTM Put: center_strike - interval
+            * Buy OTM Put: center_strike - 2 * interval (hedge wing)
         - Upside (Bear Call Spread):
-            * Sell OTM Call: atm_strike + interval
-            * Buy OTM Call: atm_strike + 2 * interval (hedge wing)
-        - Margin required: Capped at (Wing Width * Lot Size) - Net Credit + buffer (~₹35k-₹45k).
+            * Sell OTM Call: center_strike + interval
+            * Buy OTM Call: center_strike + 2 * interval (hedge wing)
+        - Margin required: Capped at (Wing Width * Lot Size) + exposure buffer (~₹35k-₹50k).
         - Theta: Substantial positive (+ve) net decay income from both sides.
         - Breakevens:
-            * Lower Breakeven = (atm_strike - interval) - Net Credit
-            * Upper Breakeven = (atm_strike + interval) + Net Credit
+            * Lower Breakeven = (center_strike - interval) - Net Credit
+            * Upper Breakeven = (center_strike + interval) + Net Credit
         """
         spot = spot_plan.entry_price
         atm_strike = self._round_to_nearest(spot, interval)
+
+        # Pin center around Max Pain strike if close to ATM (within 1 interval)
+        max_pain = options_data.get("max_pain") if options_data else None
+        if max_pain and abs(max_pain - spot) <= (interval * 1.5):
+            center_strike = self._round_to_nearest(max_pain, interval)
+        else:
+            center_strike = atm_strike
 
         dte = self.get_days_to_expiry(underlying)
         safe_dte = max(0.05, dte)
@@ -1175,10 +1319,10 @@ class DerivativeEngine:
         r = self.RISK_FREE_RATE
         sigma = iv
 
-        short_put = atm_strike - interval
-        long_put = atm_strike - (2 * interval)
-        short_call = atm_strike + interval
-        long_call = atm_strike + (2 * interval)
+        short_put = center_strike - interval
+        long_put = center_strike - (2 * interval)
+        short_call = center_strike + interval
+        long_call = center_strike + (2 * interval)
 
         bs_sp = self.black_scholes(spot, short_put, T, r, sigma, "PE")
         bs_lp = self.black_scholes(spot, long_put, T, r, sigma, "PE")
@@ -1190,15 +1334,15 @@ class DerivativeEngine:
         net_credit = round(put_credit + call_credit, 2)
         wing_width = float(interval)
         max_loss_per_share = max(1.0, wing_width - net_credit)
+        max_loss = round(max_loss_per_share * lot_size, 2)
 
-        # Hedged SPAN margin under NSE rules (only one side at risk)
-        hedged_margin = round(max_loss_per_share * lot_size + 3500.0, 2)
+        # Hedged SPAN margin under NSE rules (approx ₹35k-₹50k per lot for index Iron Condors)
+        hedged_margin = max(35000.0, round(max_loss + 25000.0, 2))
 
         target_net_credit = max(0.05, round(net_credit * 0.30, 2))  # 70% decay capture
         sl_net_debit = round(net_credit * 1.50, 2)
 
         max_profit = round((net_credit - target_net_credit) * lot_size, 2)
-        max_loss = round(max_loss_per_share * lot_size, 2)
         rr = max_profit / max_loss if max_loss > 0 else 0.0
 
         contract_symbol = f"{underlying} {short_put}/{short_call} IRON CONDOR"
@@ -1280,6 +1424,16 @@ class DerivativeEngine:
             hedge_strike_price=long_put,
             hedge_entry_price=bs_lp["premium"],
             net_credit=net_credit,
+            short_put_strike=short_put,
+            long_put_strike=long_put,
+            short_call_strike=short_call,
+            long_call_strike=long_call,
+            short_put_entry=bs_sp["premium"],
+            long_put_entry=bs_lp["premium"],
+            short_call_entry=bs_sc["premium"],
+            long_call_entry=bs_lc["premium"],
+            lower_breakeven=lower_be,
+            upper_breakeven=upper_be,
             margin_or_premium_required=hedged_margin,
             max_loss_amount=max_loss,
             max_profit_amount=max_profit,
@@ -1288,6 +1442,7 @@ class DerivativeEngine:
             theta=net_theta,
             gamma=round(-abs(bs_sp["gamma"] + bs_sc["gamma"]), 6),
             vega=round(-abs(bs_sp["vega"] + bs_sc["vega"]), 4),
+            rho=round(-abs(bs_sp["rho"] + bs_sc["rho"]), 4),
             days_to_expiry=round(dte, 4),
             iv=sigma,
             is_approved=is_approved,
@@ -1628,6 +1783,24 @@ class DerivativeEngine:
         initial_dte = float(trade.get("days_to_expiry") or self.get_days_to_expiry(underlying))
         days_left = max(0.001, initial_dte - days_elapsed)
         T = days_left / 365.0
+
+        if strat == "IRON_CONDOR" or trade.get("instrument_type") == "IRON_CONDOR":
+            interval = self.get_strike_interval(underlying)
+            sp_k = float(trade.get("short_put_strike") or (strike - interval if strike > 0 else current_spot - interval))
+            lp_k = float(trade.get("long_put_strike") or (sp_k - interval))
+            sc_k = float(trade.get("short_call_strike") or (strike + interval if strike > 0 else current_spot + interval))
+            lc_k = float(trade.get("long_call_strike") or (sc_k + interval))
+
+            bs_sp = self.black_scholes(current_spot, sp_k, T, self.RISK_FREE_RATE, iv, "PE")
+            bs_lp = self.black_scholes(current_spot, lp_k, T, self.RISK_FREE_RATE, iv, "PE")
+            bs_sc = self.black_scholes(current_spot, sc_k, T, self.RISK_FREE_RATE, iv, "CE")
+            bs_lc = self.black_scholes(current_spot, lc_k, T, self.RISK_FREE_RATE, iv, "CE")
+
+            put_val = max(0.0, bs_sp["premium"] - bs_lp["premium"])
+            call_val = max(0.0, bs_sc["premium"] - bs_lc["premium"])
+            net_val = max(0.05, round(put_val + call_val, 2))
+            net_delta = round((abs(bs_sp["delta"]) - abs(bs_lp["delta"])) + (-bs_sc["delta"] + bs_lc["delta"]), 4)
+            return net_val, net_delta
 
         if strat == "CREDIT_SPREAD" or trade.get("instrument_type") == "SPREAD":
             hedge_strike = trade.get("hedge_strike_price", strike)

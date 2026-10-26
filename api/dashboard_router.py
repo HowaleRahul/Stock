@@ -99,6 +99,8 @@ async def get_portfolio(_rate_limit: bool = Depends(rate_limiter(60))):
                         "order_id": t.order_id,
                         "ticker": t.ticker,
                         "direction": t.direction,
+                        "action": ctx.get("action", "BUY" if t.direction == "BUY" else "SELL"),
+                        "strategy_type": ctx.get("strategy_type", "DIRECTIONAL"),
                         "entry_price": t.entry_price,
                         "quantity": t.quantity,
                         "invested": t.invested,
@@ -110,9 +112,22 @@ async def get_portfolio(_rate_limit: bool = Depends(rate_limiter(60))):
                         "opt_strike": ctx.get("opt_strike", 0.0),
                         "opt_delta": ctx.get("opt_delta", 0.5),
                         "opt_theta": ctx.get("opt_theta", 0.0),
+                        "opt_gamma": ctx.get("opt_gamma", 0.0),
+                        "opt_vega": ctx.get("opt_vega", 0.0),
+                        "opt_rho": ctx.get("opt_rho", 0.0),
+                        "opt_iv": ctx.get("opt_iv", 0.0),
                         "unrealized_pnl": ctx.get("unrealized_pnl", 0.0),
                         "strike_type": ctx.get("strike_type", "ATM"),
                         "lot_size": ctx.get("lot_size", 25),
+                        "hedge_strike_price": ctx.get("hedge_strike_price"),
+                        "hedge_entry_price": ctx.get("hedge_entry_price"),
+                        "net_credit": ctx.get("net_credit"),
+                        "short_put_strike": ctx.get("short_put_strike"),
+                        "long_put_strike": ctx.get("long_put_strike"),
+                        "short_call_strike": ctx.get("short_call_strike"),
+                        "long_call_strike": ctx.get("long_call_strike"),
+                        "lower_breakeven": ctx.get("lower_breakeven"),
+                        "upper_breakeven": ctx.get("upper_breakeven"),
                     })
                     
                 return {
@@ -143,6 +158,8 @@ async def get_portfolio(_rate_limit: bool = Depends(rate_limiter(60))):
                                 "order_id": t.get("id"),
                                 "ticker": t.get("ticker"),
                                 "direction": t.get("direction"),
+                                "action": t.get("action", "BUY" if t.get("direction") == "BUY" else "SELL"),
+                                "strategy_type": t.get("strategy_type", "DIRECTIONAL"),
                                 "entry_price": t.get("entry_price"),
                                 "quantity": t.get("quantity"),
                                 "invested": t.get("invested"),
@@ -154,9 +171,22 @@ async def get_portfolio(_rate_limit: bool = Depends(rate_limiter(60))):
                                 "opt_strike": t.get("opt_strike", 0.0),
                                 "opt_delta": t.get("opt_delta", 0.5),
                                 "opt_theta": t.get("opt_theta", 0.0),
+                                "opt_gamma": t.get("opt_gamma", 0.0),
+                                "opt_vega": t.get("opt_vega", 0.0),
+                                "opt_rho": t.get("opt_rho", 0.0),
+                                "opt_iv": t.get("opt_iv", 0.0),
                                 "unrealized_pnl": t.get("unrealized_pnl", 0.0),
                                 "strike_type": t.get("strike_type", "ATM"),
                                 "lot_size": t.get("lot_size", 25),
+                                "hedge_strike_price": t.get("hedge_strike_price"),
+                                "hedge_entry_price": t.get("hedge_entry_price"),
+                                "net_credit": t.get("net_credit"),
+                                "short_put_strike": t.get("short_put_strike"),
+                                "long_put_strike": t.get("long_put_strike"),
+                                "short_call_strike": t.get("short_call_strike"),
+                                "long_call_strike": t.get("long_call_strike"),
+                                "lower_breakeven": t.get("lower_breakeven"),
+                                "upper_breakeven": t.get("upper_breakeven"),
                             })
             except Exception:
                 pass
@@ -336,7 +366,7 @@ async def get_trades(
 
 
 @router.get("/config")
-async def get_config():
+async def get_config(_rate_limit: bool = Depends(rate_limiter(60))):
     """Get current configuration."""
     try:
         return load_config_atomic(CONFIG_PATH)

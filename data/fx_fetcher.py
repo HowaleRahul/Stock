@@ -9,6 +9,8 @@ INR=X quotes are delayed or unavailable.
 
 import datetime
 import logging
+import re
+import urllib.parse
 from typing import Dict, Any, Optional
 import httpx
 import pandas as pd
@@ -16,6 +18,21 @@ import pandas as pd
 logger = logging.getLogger("trading.data.fx_fetcher")
 
 FRANKFURTER_BASE_URL = "https://api.frankfurter.app"
+_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_safe_fx_redirect(url: str) -> bool:
+    """Validate redirect destination against SSRF: only HTTPS to frankfurter.app or frankfurter.dev allowed."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "https":
+            return False
+        host = parsed.hostname
+        if not host:
+            return False
+        return host in ("api.frankfurter.app", "api.frankfurter.dev", "frankfurter.app", "frankfurter.dev") or host.endswith(".frankfurter.app") or host.endswith(".frankfurter.dev")
+    except Exception:
+        return False
 
 
 class FrankfurterFXFetcher:
@@ -28,9 +45,24 @@ class FrankfurterFXFetcher:
     def get_latest_usdinr_sync(cls, timeout: float = 6.0) -> Optional[float]:
         """Fetch the latest USD/INR exchange rate."""
         try:
-            with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-                resp = client.get(f"{FRANKFURTER_BASE_URL}/latest?from=USD&to=INR")
-                if resp.status_code == 200:
+            current_url = f"{FRANKFURTER_BASE_URL}/latest?from=USD&to=INR"
+            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                resp = None
+                for _ in range(3):
+                    resp = client.get(current_url)
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        loc = resp.headers.get("Location")
+                        if not loc:
+                            break
+                        next_url = urllib.parse.urljoin(current_url, loc)
+                        if not _is_safe_fx_redirect(next_url):
+                            logger.warning(f"Blocked unsafe SSRF redirect to: {next_url}")
+                            return None
+                        current_url = next_url
+                    else:
+                        break
+
+                if resp and resp.status_code == 200:
                     data = resp.json()
                     rate = float(data.get("rates", {}).get("INR", 0.0))
                     if rate > 0:
@@ -61,14 +93,52 @@ class FrankfurterFXFetcher:
             if not start_date:
                 start_date = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
 
-            endpoint = f"{FRANKFURTER_BASE_URL}/{start_date}.."
+            # Input validation: strictly validate start_date and end_date formats
+            clean_start = str(start_date).strip()
+            if not _ISO_DATE_PATTERN.match(clean_start):
+                logger.warning(f"Invalid start_date format '{start_date}'; rejecting request.")
+                return None
+            try:
+                datetime.date.fromisoformat(clean_start)
+            except ValueError:
+                logger.warning(f"Invalid calendar date for start_date: '{start_date}'")
+                return None
+
+            clean_end = ""
             if end_date:
-                endpoint += f"{end_date}"
+                clean_end = str(end_date).strip()
+                if not _ISO_DATE_PATTERN.match(clean_end):
+                    logger.warning(f"Invalid end_date format '{end_date}'; rejecting request.")
+                    return None
+                try:
+                    datetime.date.fromisoformat(clean_end)
+                except ValueError:
+                    logger.warning(f"Invalid calendar date for end_date: '{end_date}'")
+                    return None
+
+            endpoint = f"{FRANKFURTER_BASE_URL}/{clean_start}.."
+            if clean_end:
+                endpoint += f"{clean_end}"
             endpoint += "?from=USD&to=INR"
 
-            with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-                resp = client.get(endpoint)
-                if resp.status_code == 200:
+            current_url = endpoint
+            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                resp = None
+                for _ in range(3):
+                    resp = client.get(current_url)
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        loc = resp.headers.get("Location")
+                        if not loc:
+                            break
+                        next_url = urllib.parse.urljoin(current_url, loc)
+                        if not _is_safe_fx_redirect(next_url):
+                            logger.warning(f"Blocked unsafe SSRF redirect in FX fetcher: {next_url}")
+                            return None
+                        current_url = next_url
+                    else:
+                        break
+
+                if resp and resp.status_code == 200:
                     data = resp.json()
                     rates_dict = data.get("rates", {})
                     if not rates_dict:

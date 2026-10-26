@@ -3,24 +3,24 @@
     "rsi_setup": {
       "trending": {
         "alpha": 1.0,
-        "beta": 53.99999999999994,
-        "ewma_reward": -0.010482181937486333,
-        "n": 73
+        "beta": 57.67499999999993,
+        "ewma_reward": -0.010491477675935711,
+        "n": 80
       }
     },
     "vcp_setup": {
       "trending": {
-        "alpha": 127.0,
+        "alpha": 148.0,
         "beta": 1.0,
-        "ewma_reward": 0.631183869554858,
-        "n": 42
+        "ewma_reward": 0.6343818993560278,
+        "n": 49
       }
     }
   },
   "global_weights": {
-    "rsi_setup": 0.018181818181818202,
-    "vcp_setup": 0.9921875
+    "rsi_setup": 0.017043033659991498,
+    "vcp_setup": 0.9932885906040269
   },
-  "version": 115,
-  "last_update": "2026-10-26T10:44:47.899623"
+  "version": 129,
+  "last_update": "2026-10-26T12:32:00.600060"
 }

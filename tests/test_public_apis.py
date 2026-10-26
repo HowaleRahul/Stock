@@ -110,6 +110,7 @@ def test_smartapi_place_order_mocked():
         password="test_password",
         totp_secret="JBSWY3DPEHPK3PXP",
     )
+    broker.broker_mode = "live"
     broker.is_connected = True
     broker.jwt_token = "MOCK_JWT_TOKEN"
     broker.algo_id = "SEBI_ALGO_INDEX_01"

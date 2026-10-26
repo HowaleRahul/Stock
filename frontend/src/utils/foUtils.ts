@@ -316,6 +316,13 @@ export const calculateOptionPayoffProfile = (params: {
   strategyType?: string;
   hedgeStrike?: number;
   hedgePrice?: number;
+  netCredit?: number;
+  shortPutStrike?: number;
+  longPutStrike?: number;
+  shortCallStrike?: number;
+  longCallStrike?: number;
+  lowerBreakeven?: number;
+  upperBreakeven?: number;
   lotSize?: number;
   quantity?: number;
   rawTheta?: number;
@@ -337,8 +344,9 @@ export const calculateOptionPayoffProfile = (params: {
 
   const totalQty = quantity && quantity > 0 ? quantity : lotSize;
   const isCE = String(optionType).toUpperCase().includes('CE') || String(optionType).toUpperCase().includes('CALL');
-  const isSpread = strategyType.toUpperCase().includes('SPREAD') || Boolean(hedgeStrike);
-  const isSeller = action === 'SELL' || strategyType.toUpperCase().includes('CREDIT') || strategyType.toUpperCase().includes('WRITING');
+  const isIronCondor = strategyType.toUpperCase().includes('CONDOR') || strategyType.toUpperCase().includes('HEDGED_WRITING');
+  const isSpread = !isIronCondor && (strategyType.toUpperCase().includes('SPREAD') || Boolean(hedgeStrike));
+  const isSeller = isIronCondor || action === 'SELL' || strategyType.toUpperCase().includes('CREDIT') || strategyType.toUpperCase().includes('WRITING');
 
   let strategyName = 'Long Option';
   let isCredit = false;
@@ -348,9 +356,26 @@ export const calculateOptionPayoffProfile = (params: {
   let netPremium = entryPrice;
   let marginEstimated = entryPrice * totalQty;
 
-  const interval = (underlying === 'BANKNIFTY' || underlying === 'SENSEX') ? 100 : (underlying === 'MIDCPNIFTY' ? 25 : 50);
+  const interval = getIndexStrikeStep(underlying);
 
-  if (isSpread || strategyType.toUpperCase().includes('CREDIT')) {
+  if (isIronCondor) {
+    strategyName = 'Iron Condor (4-Leg Neutral)';
+    isCredit = true;
+    const sp = params.shortPutStrike || (strike - interval);
+    const lp = params.longPutStrike || (sp - interval);
+    const sc = params.shortCallStrike || (strike + interval);
+    const lc = params.longCallStrike || (sc + interval);
+    const credit = params.netCredit && params.netCredit > 0 ? params.netCredit : Math.max(10, entryPrice * 0.7);
+    netPremium = credit;
+    const wingWidth = Math.max(interval, Math.abs(sp - lp), Math.abs(lc - sc));
+    maxProfit = credit * totalQty;
+    maxLoss = Math.max(0, (wingWidth - credit) * totalQty);
+    marginEstimated = Math.max(45000, (wingWidth - credit) * totalQty + 3500);
+
+    const lowerBe = params.lowerBreakeven || Number((sp - credit).toFixed(2));
+    const upperBe = params.upperBreakeven || Number((sc + credit).toFixed(2));
+    breakeven = currentSpot <= (sp + sc) / 2 ? lowerBe : upperBe;
+  } else if (isSpread || strategyType.toUpperCase().includes('CREDIT')) {
     isCredit = true;
     const soldPrice = entryPrice;
     const boughtPrice = hedgePrice || Math.max(1, entryPrice * 0.25);
@@ -421,24 +446,31 @@ export const calculateOptionPayoffProfile = (params: {
     ? `+₹${absTheta.toFixed(2)}/day`
     : `-₹${absTheta.toFixed(2)}/day`;
 
-  // Safety buffer: % distance between current spot and breakeven
-  const safetyBufferPct = currentSpot > 0
-    ? Math.abs(((currentSpot - breakeven) / currentSpot) * 100)
-    : 0;
-
   const curve = calculateOptionPayoffCurve({
     underlying,
     strike,
     optionType,
     entryPrice,
     currentSpot,
-    action,
+    action: isSeller ? 'SELL' : 'BUY',
     strategyType,
     hedgeStrike,
     hedgePrice,
+    netCredit: params.netCredit,
+    shortPutStrike: params.shortPutStrike,
+    longPutStrike: params.longPutStrike,
+    shortCallStrike: params.shortCallStrike,
+    longCallStrike: params.longCallStrike,
+    lowerBreakeven: params.lowerBreakeven,
+    upperBreakeven: params.upperBreakeven,
     lotSize,
     quantity: totalQty,
   });
+
+  // Safety buffer: % distance between current spot and breakeven (or nearest breakeven for Condor)
+  const safetyBufferPct = isIronCondor && curve.breakevens.length >= 2 && currentSpot > 0
+    ? (Math.min(Math.max(0, currentSpot - curve.breakevens[0]), Math.max(0, curve.breakevens[1] - currentSpot)) / currentSpot) * 100
+    : (currentSpot > 0 ? Math.abs(((currentSpot - breakeven) / currentSpot) * 100) : 0);
 
   return {
     strategyName,
@@ -472,6 +504,13 @@ export const calculateOptionPayoffCurve = (params: {
   strategyType?: string;
   hedgeStrike?: number;
   hedgePrice?: number;
+  netCredit?: number;
+  shortPutStrike?: number;
+  longPutStrike?: number;
+  shortCallStrike?: number;
+  longCallStrike?: number;
+  lowerBreakeven?: number;
+  upperBreakeven?: number;
   lotSize?: number;
   quantity?: number;
 }): PayoffCurveData => {
@@ -491,8 +530,8 @@ export const calculateOptionPayoffCurve = (params: {
 
   const totalQty = quantity && quantity > 0 ? quantity : lotSize;
   const isCE = String(optionType).toUpperCase().includes('CE') || String(optionType).toUpperCase().includes('CALL');
-  const isSpread = strategyType.toUpperCase().includes('SPREAD') || Boolean(hedgeStrike);
   const isIronCondor = strategyType.toUpperCase().includes('CONDOR') || strategyType.toUpperCase().includes('HEDGED_WRITING');
+  const isSpread = !isIronCondor && (strategyType.toUpperCase().includes('SPREAD') || Boolean(hedgeStrike));
   const interval = getIndexStrikeStep(underlying);
 
   const strikes: Array<{ strike: number; label: string; type: 'SHORT' | 'LONG' }> = [];
@@ -501,11 +540,11 @@ export const calculateOptionPayoffCurve = (params: {
   let calculatePnlAtSpot: (spot: number) => number;
 
   if (isIronCondor) {
-    const putShort = strike - interval;
-    const putLong = strike - 2 * interval;
-    const callShort = strike + interval;
-    const callLong = strike + 2 * interval;
-    const credit = Math.max(10, entryPrice * 0.7);
+    const putShort = params.shortPutStrike || (strike - interval);
+    const putLong = params.longPutStrike || (putShort - interval);
+    const callShort = params.shortCallStrike || (strike + interval);
+    const callLong = params.longCallStrike || (callShort + interval);
+    const credit = params.netCredit && params.netCredit > 0 ? params.netCredit : Math.max(10, entryPrice * 0.7);
 
     strikes.push(
       { strike: putLong, label: `Long Put (${putLong})`, type: 'LONG' },
@@ -513,7 +552,9 @@ export const calculateOptionPayoffCurve = (params: {
       { strike: callShort, label: `Short Call (${callShort})`, type: 'SHORT' },
       { strike: callLong, label: `Long Call (${callLong})`, type: 'LONG' }
     );
-    breakevens.push(Number((putShort - credit).toFixed(2)), Number((callShort + credit).toFixed(2)));
+    const lowerBe = params.lowerBreakeven || Number((putShort - credit).toFixed(2));
+    const upperBe = params.upperBreakeven || Number((callShort + credit).toFixed(2));
+    breakevens.push(lowerBe, upperBe);
 
     calculatePnlAtSpot = (s: number) => {
       const putPayoff = Math.max(0, putLong - s) - Math.max(0, putShort - s);

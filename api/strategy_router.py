@@ -150,7 +150,7 @@ def _read_strategies() -> list:
 
 
 @router.get("/list")
-async def list_strategies():
+async def list_strategies(_rate_limit: bool = Depends(rate_limiter(60))):
     async with _file_lock:
         with _thread_lock:
             return {"strategies": _read_strategies()}

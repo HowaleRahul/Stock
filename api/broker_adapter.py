@@ -23,6 +23,7 @@ Incorporates the proven architecture from `TheHardeep/fenix` and `Apurv-Salunke/
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 import uuid
@@ -64,11 +65,40 @@ class PaperMatchingEngine:
         self.cash_balance: float = 1_000_000.0
 
     def submit_order(self, order: NormalizedOrder, current_ltp: float) -> NormalizedOrder:
-        """Evaluates an order against current LTP."""
-        if current_ltp <= 0:
+        """Evaluates an order against current LTP with rigorous validation."""
+        if not isinstance(current_ltp, (int, float)) or not math.isfinite(current_ltp) or current_ltp <= 0:
             order.status = "REJECTED"
             logger.warning(f"Order {order.order_id} rejected: invalid current LTP {current_ltp}")
             return order
+
+        if not isinstance(order.quantity, int) or order.quantity <= 0:
+            order.status = "REJECTED"
+            logger.warning(f"Order {order.order_id} rejected: non-positive quantity {order.quantity}")
+            return order
+
+        order.direction = str(order.direction).strip().upper()
+        if order.direction not in ("BUY", "SELL"):
+            order.status = "REJECTED"
+            logger.warning(f"Order {order.order_id} rejected: invalid direction {order.direction}")
+            return order
+
+        order.order_type = str(order.order_type).strip().upper()
+        if order.order_type not in ("MARKET", "LIMIT", "SL", "SL-M"):
+            order.status = "REJECTED"
+            logger.warning(f"Order {order.order_id} rejected: invalid order type {order.order_type}")
+            return order
+
+        if order.order_type in ("LIMIT", "SL"):
+            if not isinstance(order.price, (int, float)) or not math.isfinite(order.price) or order.price <= 0:
+                order.status = "REJECTED"
+                logger.warning(f"Order {order.order_id} rejected: invalid limit price {order.price}")
+                return order
+
+        if order.order_type in ("SL", "SL-M"):
+            if not isinstance(order.trigger_price, (int, float)) or not math.isfinite(order.trigger_price) or order.trigger_price <= 0:
+                order.status = "REJECTED"
+                logger.warning(f"Order {order.order_id} rejected: invalid trigger price {order.trigger_price}")
+                return order
 
         # Market order: fills immediately with slippage
         if order.order_type == "MARKET":
@@ -87,6 +117,8 @@ class PaperMatchingEngine:
     def on_tick(self, symbol: str, ltp: float, high: float = 0.0, low: float = 0.0) -> List[NormalizedOrder]:
         """
         Processes price ticks and executes triggered resting orders.
+        Guarantees that triggered Stop-Loss Limit orders continue to work as limit orders
+        and that all filled resting orders are logged to order_history.
         """
         filled_now = []
         h = high if high > 0 else ltp
@@ -97,31 +129,37 @@ class PaperMatchingEngine:
             if order.symbol != symbol:
                 continue
 
-            triggered = False
             # Stop Loss Trigger check
             if order.order_type in ("SL", "SL-M"):
-                if order.direction == "SELL" and (l <= order.trigger_price or ltp <= order.trigger_price):
-                    triggered = True
-                elif order.direction == "BUY" and (h >= order.trigger_price or ltp >= order.trigger_price):
-                    triggered = True
+                is_already_triggered = order.status == "TRIGGERED"
+                triggered_now = False
 
-                if triggered:
+                if not is_already_triggered:
+                    if order.direction == "SELL" and (l <= order.trigger_price or ltp <= order.trigger_price):
+                        triggered_now = True
+                    elif order.direction == "BUY" and (h >= order.trigger_price or ltp >= order.trigger_price):
+                        triggered_now = True
+
+                if is_already_triggered or triggered_now:
                     if order.order_type == "SL-M":
                         order.fill_price = order.trigger_price * (1 - self.slippage_pct if order.direction == "SELL" else 1 + self.slippage_pct)
                         order.fill_time = datetime.now(timezone.utc)
                         order.status = "FILLED"
                         self._update_position(order)
                         filled_now.append(order)
+                        self.order_history.append(order)
                         to_remove.append(order_id)
                     else:  # SL Limit
                         order.status = "TRIGGERED"
-                        # Check if limit price is immediately marketable
-                        if (order.direction == "SELL" and ltp >= order.price) or (order.direction == "BUY" and ltp <= order.price):
+                        # Check if limit price is marketable
+                        if (order.direction == "SELL" and (h >= order.price or ltp >= order.price)) or \
+                           (order.direction == "BUY" and (l <= order.price or ltp <= order.price)):
                             order.fill_price = order.price
                             order.fill_time = datetime.now(timezone.utc)
                             order.status = "FILLED"
                             self._update_position(order)
                             filled_now.append(order)
+                            self.order_history.append(order)
                             to_remove.append(order_id)
 
             elif order.order_type == "LIMIT":
@@ -132,6 +170,7 @@ class PaperMatchingEngine:
                     order.status = "FILLED"
                     self._update_position(order)
                     filled_now.append(order)
+                    self.order_history.append(order)
                     to_remove.append(order_id)
                 elif order.direction == "SELL" and h >= order.price:
                     order.fill_price = order.price
@@ -139,12 +178,31 @@ class PaperMatchingEngine:
                     order.status = "FILLED"
                     self._update_position(order)
                     filled_now.append(order)
+                    self.order_history.append(order)
                     to_remove.append(order_id)
 
         for oid in to_remove:
             self.resting_orders.pop(oid, None)
 
         return filled_now
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancels a resting order and records it in history."""
+        if order_id in self.resting_orders:
+            order = self.resting_orders.pop(order_id)
+            order.status = "CANCELLED"
+            self.order_history.append(order)
+            return True
+        return False
+
+    def get_order(self, order_id: str) -> Optional[NormalizedOrder]:
+        """Looks up an order by order_id from resting book or history."""
+        if order_id in self.resting_orders:
+            return self.resting_orders[order_id]
+        for o in self.order_history:
+            if o.order_id == order_id:
+                return o
+        return None
 
     def _update_position(self, order: NormalizedOrder):
         sym = order.symbol
@@ -283,6 +341,27 @@ class UnifiedBrokerAdapter:
                 f"[LIVE BROKER ORDER: {self.broker_name.upper()}] {norm_order.direction} {norm_order.quantity}x {norm_order.symbol} (Algo-ID: {self.algo_id})"
             )
             return order_id
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancels a resting order."""
+        if not self.is_connected:
+            raise ConnectionError("Broker adapter not connected.")
+        if self.broker_name == "paper":
+            return self.paper_engine.cancel_order(order_id)
+        logger.info(f"Cancellation requested for live order {order_id} on {self.broker_name.upper()}")
+        return True
+
+    def get_order(self, order_id: str) -> Optional[NormalizedOrder]:
+        """Retrieves order status by order_id."""
+        if self.broker_name == "paper":
+            return self.paper_engine.get_order(order_id)
+        return None
+
+    def get_order_history(self) -> List[NormalizedOrder]:
+        """Returns chronological order execution history."""
+        if self.broker_name == "paper":
+            return list(self.paper_engine.order_history)
+        return []
 
     def get_positions(self) -> Dict[str, Any]:
         """Returns open positions."""

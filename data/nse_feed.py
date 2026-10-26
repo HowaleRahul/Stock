@@ -38,6 +38,8 @@ class NSEFeed:
     _session = None
     _last_warmed_at = 0.0
     _WARM_INTERVAL = 300.0  # re-warm cookies every 5 minutes
+    _chain_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+    _CACHE_TTL = 900.0  # 15 minutes cache fallback for Akamai blocks
 
     @classmethod
     def _get_headers(cls) -> Dict[str, str]:
@@ -85,11 +87,15 @@ class NSEFeed:
 
     @classmethod
     def get_option_chain_raw(cls, symbol: str) -> Optional[Dict[str, Any]]:
-        """Fetches raw JSON option chain payload from NSE with automatic retry and cookie refreshment."""
+        """Fetches raw JSON option chain payload from NSE with automatic retry, cookie refreshment, and cache fallback."""
         sym = cls.clean_symbol(symbol)
         if not sym:
             return None
         nse_query_sym = sym[:-3] if (sym.endswith(".NS") or sym.endswith(".BO")) else sym
+        if nse_query_sym == "SENSEX":
+            logger.debug("SENSEX is traded on BSE (BFO); NSE option chain API does not host SENSEX.")
+            return None
+
         encoded_sym = urllib.parse.quote(nse_query_sym)
         is_index = nse_query_sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
 
@@ -106,10 +112,11 @@ class NSEFeed:
                     try:
                         data = resp.json()
                         if isinstance(data, dict) and "records" in data:
+                            cls._chain_cache[sym] = (time.time(), data)
                             return data
                     except Exception as json_err:
                         logger.warning(f"NSE option chain JSON decode error for {sym}: {json_err}")
-                elif resp.status_code in (401, 403):
+                elif resp.status_code in (401, 403, 429):
                     logger.warning(f"NSE session expired/blocked (status {resp.status_code}) for {sym}. Re-warming...")
                     cls._session = None
                     cls._last_warmed_at = 0.0
@@ -123,6 +130,13 @@ class NSEFeed:
                 cls._last_warmed_at = 0.0
                 if attempt == 0:
                     time.sleep(0.5)
+
+        # Fallback to fresh cached chain if blocked by Akamai or TLS error
+        if sym in cls._chain_cache:
+            cache_t, cached_data = cls._chain_cache[sym]
+            if (time.time() - cache_t) <= cls._CACHE_TTL:
+                logger.info(f"Using cached option chain for {sym} (Akamai/TLS block fallback).")
+                return cached_data
 
         return None
 

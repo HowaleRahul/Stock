@@ -187,8 +187,8 @@ class LiveMarketLearner:
             qty = trade["quantity"]
             direction = trade["direction"]
 
-            if inst_type == "OPTION":
-                # Option MTM: re-price theoretical option premium using Black-Scholes
+            if inst_type in ("OPTION", "SPREAD", "IRON_CONDOR"):
+                # Option / Spread / Iron Condor MTM: re-price theoretical option value using Black-Scholes
                 bars_held = trade.get("bars_held", 0)
                 days_elapsed = max(0.01, bars_held / 6.25)
                 live_prem, live_delta = self.derivative_engine.calculate_option_mtm(
@@ -198,9 +198,16 @@ class LiveMarketLearner:
                 trade["current_spot"] = round(spot_ltp, 2)
                 trade["delta"] = round(live_delta, 3)
 
-                # For bought options (Long CE or Long PE):
-                # PnL = (current_premium - entry_premium) * quantity
-                pnl = (live_prem - entry_p) * qty
+                act = str(trade.get("action", "BUY")).upper()
+                strat = str(trade.get("strategy_type", "DIRECTIONAL")).upper()
+                if act == "SELL" or strat in ("CREDIT_SPREAD", "IRON_CONDOR") or inst_type in ("SPREAD", "IRON_CONDOR"):
+                    # Option Selling / Spreads / Iron Condors: Collected entry_p net credit.
+                    # Current net value to close is live_prem.
+                    pnl = (entry_p - live_prem) * qty
+                else:
+                    # Bought options (Long CE or Long PE):
+                    # PnL = (current_premium - entry_premium) * quantity
+                    pnl = (live_prem - entry_p) * qty
 
             elif inst_type == "FUTURE":
                 # Future MTM: tracks spot movement with 1.0 delta
@@ -261,13 +268,13 @@ class LiveMarketLearner:
             # 1. Intraday MIS Square-Off Rule (15:15 IST)
             if is_intraday_square_off_time(current_dt):
                 exit_reason = "INTRADAY_SQUARE_OFF"
-                if inst_type == "OPTION":
+                if inst_type in ("OPTION", "SPREAD", "IRON_CONDOR"):
                     exit_price = trade.get("current_ltp", trade["entry_price"])
                 else:
                     exit_price = spot_ltp
 
-            elif inst_type in ("OPTION", "SPREAD"):
-                # Option & Spread Exit Management
+            elif inst_type in ("OPTION", "SPREAD", "IRON_CONDOR"):
+                # Option & Spread & Iron Condor Exit Management
                 current_prem = trade.get("current_ltp", trade["entry_price"])
                 entry_prem = trade["entry_price"]
                 sl_prem = trade["sl"]
@@ -276,10 +283,10 @@ class LiveMarketLearner:
                 act = str(trade.get("action", "BUY")).upper()
                 strat = str(trade.get("strategy_type", "DIRECTIONAL")).upper()
 
-                if act == "SELL" or strat == "CREDIT_SPREAD":
-                    # Option Selling & Credit Spreads:
-                    # Profit when premium decays (current_prem <= tp_prem)
-                    # Loss when premium expands (current_prem >= sl_prem)
+                if act == "SELL" or strat in ("CREDIT_SPREAD", "IRON_CONDOR") or inst_type in ("SPREAD", "IRON_CONDOR"):
+                    # Option Selling & Credit Spreads & Iron Condors:
+                    # Profit when premium/debit decays (current_prem <= tp_prem)
+                    # Loss when premium/debit expands (current_prem >= sl_prem)
                     if current_prem <= tp_prem:
                         exit_reason = "TAKE_PROFIT"
                         exit_price = current_prem
@@ -331,12 +338,24 @@ class LiveMarketLearner:
                 # Trade is exiting!
                 entry_p = trade["entry_price"]
                 invested = trade.get("invested", 1.0)
-                if inst_type in ("OPTION", "SPREAD"):
+                if inst_type in ("OPTION", "SPREAD", "IRON_CONDOR"):
                     qty = trade.get("total_quantity") or trade.get("quantity") or self.derivative_engine.get_lot_size(underlying)
                     act = str(trade.get("action", "BUY")).upper()
                     strat = str(trade.get("strategy_type", "DIRECTIONAL")).upper()
 
-                    if strat == "CREDIT_SPREAD" or inst_type == "SPREAD":
+                    if strat in ("IRON_CONDOR", "CONDOR") or inst_type == "IRON_CONDOR":
+                        f_calc = IndianFOFrictionModel.calculate_iron_condor_friction(
+                            short_put_entry=trade.get("short_put_entry", entry_p * 0.4),
+                            short_put_exit=exit_price * 0.4,
+                            long_put_entry=trade.get("long_put_entry", 0.05),
+                            long_put_exit=0.05,
+                            short_call_entry=trade.get("short_call_entry", entry_p * 0.4),
+                            short_call_exit=exit_price * 0.4,
+                            long_call_entry=trade.get("long_call_entry", 0.05),
+                            long_call_exit=0.05,
+                            quantity=qty
+                        )
+                    elif strat == "CREDIT_SPREAD" or inst_type == "SPREAD":
                         f_calc = IndianFOFrictionModel.calculate_spread_friction(
                             short_entry_prem=trade.get("opt_entry_premium", entry_p),
                             short_exit_prem=exit_price * 0.8,
@@ -527,7 +546,7 @@ class LiveMarketLearner:
             df.columns = [c.lower() for c in df.columns]
             if "time" in df.columns:
                 df["datetime"] = pd.to_datetime(df["time"], unit="s")
-                df.set_index("datetime", inplace=True)
+                df = df.set_index("datetime")
 
             # High-low true range for ATR
             high_low = df["high"] - df["low"]
@@ -615,7 +634,8 @@ class LiveMarketLearner:
                     capital=self.capital,
                     derivative_type=self.derivative_type,
                     strike_pref=self.strike_preference,
-                    regime=regime_str
+                    regime=regime_str,
+                    adx=regime.get("adx")
                 )
 
                 if not d_plan.is_approved:
@@ -659,6 +679,10 @@ class LiveMarketLearner:
                     "strike_type": d_plan.strike_type,
                     "hedge_strike_price": d_plan.hedge_strike_price,
                     "hedge_entry_price": d_plan.hedge_entry_price,
+                    "short_put_strike": getattr(d_plan, "short_put_strike", 0.0),
+                    "long_put_strike": getattr(d_plan, "long_put_strike", 0.0),
+                    "short_call_strike": getattr(d_plan, "short_call_strike", 0.0),
+                    "long_call_strike": getattr(d_plan, "long_call_strike", 0.0),
                     "net_credit": d_plan.net_credit,
                     "opt_entry_premium": d_plan.entry_price,
                     "direction": d_plan.direction,

@@ -26,7 +26,23 @@ def _is_trusted_proxy(host: str) -> bool:
         ip = ipaddress.ip_address(normalized)
         if hasattr(ip, "ipv4_mapped") and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
-        return ip.is_loopback or ip.is_private
+        if ip.is_loopback:
+            return True
+        trusted_env = os.getenv("TRUSTED_PROXIES", "").strip()
+        if trusted_env:
+            for item in trusted_env.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                try:
+                    if "/" in item:
+                        if ip in ipaddress.ip_network(item, strict=False):
+                            return True
+                    elif ip == ipaddress.ip_address(item):
+                        return True
+                except ValueError:
+                    continue
+        return False
     except ValueError:
         return False
 

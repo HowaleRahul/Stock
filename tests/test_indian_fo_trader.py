@@ -719,3 +719,103 @@ class TestOptionSellingAndCreditSpreads:
         # Gross PnL: Short gain (80-20)*25 = 1500; Long loss (5-30)*25 = -625. Net gross = 875
         assert f_spread.gross_pnl == 875.0
         assert f_spread.net_pnl == 875.0 - f_spread.total_friction
+
+    def test_iron_condor_plan_4_leg_strikes_and_greeks(self):
+        """Verifies 4-leg Iron Condor generation with valid wing strikes, positive theta, and margin."""
+        engine = DerivativeEngine()
+        spot_plan = TradePlan(
+            ticker="^NSEI",
+            direction="NEUTRAL",
+            entry_price=22000.0,
+            take_profit=22150.0,
+            stop_loss=21850.0,
+            capital=100000.0,
+            ai_probability=0.52,
+            regime="rangebound"
+        )
+        plan = engine.generate_derivative_plan(
+            spot_plan=spot_plan,
+            capital=100000.0,
+            derivative_type="IRON_CONDOR",
+            strike_pref="AUTO",
+            regime="rangebound",
+            iv=0.15
+        )
+        assert plan.instrument_type == "IRON_CONDOR"
+        assert plan.short_put_strike == 21950.0 or plan.short_put_strike == 21900.0 or plan.short_put_strike < 22000.0
+        assert plan.long_put_strike < plan.short_put_strike
+        assert plan.short_call_strike > 22000.0
+        assert plan.long_call_strike > plan.short_call_strike
+        assert plan.theta > 0.0, "Iron Condor must have positive theta decay!"
+        assert plan.net_credit > 0.0
+        assert plan.margin_or_premium_required > 0.0
+        d = plan.to_dict()
+        assert "short_put_strike" in d and "long_call_strike" in d
+
+    def test_iron_condor_mtm_calculation_4_legs(self):
+        """Verifies calculate_option_mtm correctly re-prices all 4 legs of an Iron Condor."""
+        engine = DerivativeEngine()
+        condor_trade = {
+            "underlying_ticker": "NIFTY",
+            "instrument_type": "IRON_CONDOR",
+            "strategy_type": "IRON_CONDOR",
+            "action": "SELL",
+            "strike": 22000.0,
+            "short_put_strike": 21900.0,
+            "long_put_strike": 21800.0,
+            "short_call_strike": 22100.0,
+            "long_call_strike": 22200.0,
+            "days_to_expiry": 5.0,
+            "iv": 0.15
+        }
+        initial_val, _ = engine.calculate_option_mtm(condor_trade, current_spot=22000.0, days_elapsed=0.0)
+        decayed_val, delta = engine.calculate_option_mtm(condor_trade, current_spot=22000.0, days_elapsed=2.0)
+        assert initial_val > 0.0
+        assert decayed_val > 0.0
+        # Because of 2 days theta decay with spot stationary at center, cost to close must shrink
+        assert decayed_val < initial_val
+        assert abs(delta) < 0.20, f"Iron Condor net delta should be near neutral, got {delta}"
+
+    def test_implied_volatility_newton_raphson_and_brent(self):
+        """Validates numerical IV solver returns expected volatility within 0.005 tolerance."""
+        engine = DerivativeEngine()
+        spot = 22000.0
+        strike = 22000.0
+        T = 7.0 / 365.0
+        r = 0.065
+        true_sigma = 0.165
+
+        # Compute theoretical price
+        bs = engine.black_scholes(S=spot, K=strike, T=T, r=r, sigma=true_sigma, option_type="CE")
+        mkt_price = bs["premium"]
+
+        solved_iv = engine.calculate_implied_volatility(
+            market_price=mkt_price,
+            S=spot,
+            K=strike,
+            T=T,
+            r=r,
+            option_type="CE"
+        )
+        assert abs(solved_iv - true_sigma) < 0.005, f"Expected IV {true_sigma}, got {solved_iv}"
+
+    def test_iron_condor_4leg_friction_calculation(self):
+        """Verifies exact 8-order round trip friction for 4-leg Iron Condor."""
+        f_condor = IndianFOFrictionModel.calculate_iron_condor_friction(
+            short_put_entry=40.0,
+            short_put_exit=10.0,
+            long_put_entry=15.0,
+            long_put_exit=2.0,
+            short_call_entry=40.0,
+            short_call_exit=10.0,
+            long_call_entry=15.0,
+            long_call_exit=2.0,
+            quantity=25
+        )
+        assert f_condor.brokerage == 160.0  # 8 orders * ₹20
+        assert f_condor.total_friction > 160.0
+        # Gross PnL: Put side (40-10) - (15-2) = 30 - 13 = 17 pts
+        # Call side (40-10) - (15-2) = 30 - 13 = 17 pts
+        # Total = 34 pts * 25 = 850
+        assert f_condor.gross_pnl == 850.0
+        assert f_condor.net_pnl == 850.0 - f_condor.total_friction

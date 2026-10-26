@@ -25,6 +25,12 @@ interface OptionChartProps {
   hedgeStrike?: number;
   hedgePrice?: number;
   netCredit?: number;
+  shortPutStrike?: number;
+  longPutStrike?: number;
+  shortCallStrike?: number;
+  longCallStrike?: number;
+  lowerBreakeven?: number;
+  upperBreakeven?: number;
   entryPrice?: number;
   targetPrice?: number;
   stopLossPrice?: number;
@@ -402,6 +408,13 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
   strategyType = 'DIRECTIONAL',
   hedgeStrike,
   hedgePrice,
+  netCredit,
+  shortPutStrike,
+  longPutStrike,
+  shortCallStrike,
+  longCallStrike,
+  lowerBreakeven,
+  upperBreakeven,
   entryPrice,
   targetPrice,
   stopLossPrice,
@@ -527,6 +540,7 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
               theta: res.data.theta,
               gamma: res.data.gamma,
               vega: res.data.vega,
+              rho: res.data.rho,
               iv: res.data.iv,
             }
           };
@@ -670,10 +684,17 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
       strategyType: activeStrategy,
       hedgeStrike,
       hedgePrice,
+      netCredit,
+      shortPutStrike,
+      longPutStrike,
+      shortCallStrike,
+      longCallStrike,
+      lowerBreakeven,
+      upperBreakeven,
       lotSize,
       rawTheta: chartData?.greeks?.theta,
     });
-  }, [underlying, strike, optionType, entryPrice, chartData?.current_premium, chartData?.current_spot, chartData?.greeks?.theta, action, activeStrategy, hedgeStrike, hedgePrice, lotSize]);
+  }, [underlying, strike, optionType, entryPrice, chartData?.current_premium, chartData?.current_spot, chartData?.greeks?.theta, action, activeStrategy, hedgeStrike, hedgePrice, netCredit, shortPutStrike, longPutStrike, shortCallStrike, longCallStrike, lowerBreakeven, upperBreakeven, lotSize]);
 
   useEffect(() => {
     const candleSeries = candleSeriesRef.current;
@@ -923,19 +944,23 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
       <div className="mb-3 p-3 bg-gray-900/90 rounded-lg border border-gray-800 text-xs font-mono">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-gray-400 uppercase text-[10px] font-bold">Breakeven Spot:</span>
+            <span className="text-gray-400 uppercase text-[10px] font-bold">
+              {payoff.breakevenPoints.length > 1 ? 'Breakeven Range:' : 'Breakeven Spot:'}
+            </span>
             <span className="text-amber-400 font-bold text-sm bg-gray-950 px-2 py-0.5 rounded border border-gray-800">
-              ₹{payoff.breakeven.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+              {payoff.breakevenPoints.length > 1
+                ? `₹${payoff.breakevenPoints[0].toLocaleString('en-IN', { minimumFractionDigits: 2 })} – ₹${payoff.breakevenPoints[1].toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                : `₹${payoff.breakeven.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`}
             </span>
             <span className="text-[10px] text-gray-400">
-              ({payoff.safetyBufferPct}% {optionType === 'CE' ? 'below ceiling' : 'cushion to spot'})
+              ({payoff.safetyBufferPct}% {payoff.breakevenPoints.length > 1 ? 'range cushion' : optionType === 'CE' ? 'below ceiling' : 'cushion to spot'})
             </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-4">
             <div>
               <span className="text-gray-400 uppercase text-[10px] mr-1">
-                {action === 'SELL' ? 'Max Profit (Net Credit):' : 'Max Profit:'}
+                {activeStrategy.includes('CONDOR') ? 'Max Profit (Net Credit):' : action === 'SELL' ? 'Max Profit (Net Credit):' : 'Max Profit:'}
               </span>
               <span className="text-emerald-400 font-bold text-xs">
                 +{formatIndianCurrency(payoff.maxProfit)}
@@ -943,7 +968,7 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
             </div>
             <div>
               <span className="text-gray-400 uppercase text-[10px] mr-1">
-                {action === 'SELL' && activeStrategy.includes('SPREAD') ? 'Max Risk (Spread Width - Credit):' : 'Max Risk:'}
+                {activeStrategy.includes('CONDOR') || activeStrategy.includes('SPREAD') ? 'Max Risk (Wing - Credit):' : 'Max Risk:'}
               </span>
               <span className="text-red-400 font-bold text-xs">
                 -{formatIndianCurrency(payoff.maxLoss)}
@@ -959,9 +984,35 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
         </div>
       </div>
 
-      {/* Real-Time Option Greeks Bar (Full 5 Greeks + Margin vs Premium Labels) */}
+      {/* Condor 4-Leg Wing Badges */}
+      {activeStrategy.includes('CONDOR') && payoff.curve?.strikes?.length >= 4 && (
+        <div className="mb-3 p-2 bg-gray-950/80 rounded-lg border border-purple-900/40 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+          <span className="text-purple-300 font-bold uppercase text-[10px] flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" /> Iron Condor 4 Wings:
+          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {payoff.curve.strikes.map((stk, sIdx) => (
+              <span
+                key={sIdx}
+                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                  stk.type === 'SHORT'
+                    ? 'bg-amber-950/80 text-amber-300 border border-amber-800'
+                    : 'bg-blue-950/80 text-blue-300 border border-blue-800'
+                }`}
+              >
+                {stk.label}
+              </span>
+            ))}
+          </div>
+          <span className="text-emerald-400 font-bold text-[10px]">
+            Net Credit: ₹{payoff.netPremium.toFixed(2)}
+          </span>
+        </div>
+      )}
+
+      {/* Real-Time Option Greeks Bar (Full 6 Greeks + Margin vs Premium Labels) */}
       {chartData?.greeks && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-3 text-xs font-mono">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 mb-3 text-xs font-mono">
           <div className="p-2 rounded bg-gray-900/80 border border-gray-800 text-center">
             <span className="text-[10px] text-gray-400 block uppercase">Delta (Δ)</span>
             <span className="text-emerald-400 font-bold">{Number(chartData.greeks.delta || 0.5).toFixed(3)}</span>
@@ -989,6 +1040,10 @@ export const OptionChartViewer: React.FC<OptionChartProps> = ({
             <span className="text-amber-400 font-bold">
               {formatIndianCurrency(chartData.greeks.vega || 14.20)} / 1% IV
             </span>
+          </div>
+          <div className="p-2 rounded bg-gray-900/80 border border-gray-800 text-center">
+            <span className="text-[10px] text-gray-400 block uppercase">Rho (ρ)</span>
+            <span className="text-teal-400 font-bold">{Number(chartData.greeks.rho ?? 0.0).toFixed(4)}</span>
           </div>
           <div className="p-2 rounded bg-gray-900/80 border border-gray-800 text-center">
             <span className="text-[10px] text-gray-400 block uppercase">Implied Vol (IV)</span>

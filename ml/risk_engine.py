@@ -962,20 +962,26 @@ class RiskEngine:
         trade: Dict[str, Any],
         current_high: float,
         current_low: float,
+        current_delta: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Update trailing stop for an open trade based on current price action.
+        Update trailing stop for an open trade based on current price action
+        and optional Greek delta trailing ratchet for options.
         
         Logic:
         1. After price moves 1× ATR in our favor → trail SL to breakeven
         2. After price moves 1.5× ATR in our favor → lock in 0.5× ATR profit
-        3. Never move the trailing stop backwards (only tighten)
+        3. Delta Trailing Ratchet (Options):
+           - Long option: delta expansion >= +0.20 locks in 1.0× ATR profit.
+           - Short option / credit spread: delta collapse <= 0.15 locks in 0.5× ATR profit.
+        4. Never move the trailing stop backwards (only tighten).
         
         Args:
             trade: Trade dict with 'direction', 'entry_price', 'atr_at_entry',
                    'trailing_stop', 'sl' keys
             current_high: Current bar's high
             current_low: Current bar's low
+            current_delta: Optional live delta for Greek delta ratchet
             
         Returns:
             Updated trade dict with new trailing_stop value
@@ -1007,6 +1013,15 @@ class RiskEngine:
             else:
                 new_trail = current_trail
 
+            # Delta Trailing Ratchet for Long Options
+            if current_delta is not None and trade.get("is_options", False):
+                entry_delta = float(trade.get("opt_delta") or trade.get("delta") or 0.5)
+                act = str(trade.get("action", "BUY")).upper()
+                if act == "BUY" and (abs(current_delta) - abs(entry_delta)) >= 0.20:
+                    new_trail = max(new_trail, entry + (1.0 * atr))
+                elif act == "SELL" and abs(current_delta) <= 0.15:
+                    new_trail = max(new_trail, entry + (0.5 * atr))
+
             # Never move trailing stop downward
             trade["trailing_stop"] = max(current_trail, new_trail)
 
@@ -1020,6 +1035,15 @@ class RiskEngine:
                 new_trail = entry * 0.9995
             else:
                 new_trail = current_trail
+
+            # Delta Trailing Ratchet for Short Options
+            if current_delta is not None and trade.get("is_options", False):
+                entry_delta = float(trade.get("opt_delta") or trade.get("delta") or -0.5)
+                act = str(trade.get("action", "BUY")).upper()
+                if act == "BUY" and (abs(current_delta) - abs(entry_delta)) >= 0.20:
+                    new_trail = min(new_trail, entry - (1.0 * atr))
+                elif act == "SELL" and abs(current_delta) <= 0.15:
+                    new_trail = min(new_trail, entry - (0.5 * atr))
 
             # Never move trailing stop upward (for shorts)
             trade["trailing_stop"] = min(current_trail, new_trail)

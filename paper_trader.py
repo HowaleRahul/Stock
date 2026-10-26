@@ -102,55 +102,104 @@ MIN_AI_CONFIDENCE = CONFIG.get("min_ai_confidence", 0.65)
 # Account & Trade Persistence
 # ---------------------------------------------------------------------------
 
+_paper_file_lock = threading.RLock()
+
+
 def load_account():
-    if os.path.exists(ACCOUNT_FILE):
-        with open(ACCOUNT_FILE, 'r') as f:
-            return json.load(f)
-    return {"capital": STARTING_CAPITAL, "peak_capital": STARTING_CAPITAL, "status": "ACTIVE"}
+    with _paper_file_lock:
+        if os.path.exists(ACCOUNT_FILE):
+            for attempt in range(5):
+                try:
+                    with open(ACCOUNT_FILE, 'r', encoding='utf-8') as f:
+                        return json.load(f)
+                except (PermissionError, OSError):
+                    time.sleep(0.02 * (attempt + 1))
+                except Exception:
+                    break
+        return {"capital": STARTING_CAPITAL, "peak_capital": STARTING_CAPITAL, "status": "ACTIVE"}
 
 def save_account(account):
-    tmp_path = f"{ACCOUNT_FILE}.tmp"
-    try:
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(account, f, indent=4)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, ACCOUNT_FILE)
-    except Exception as e:
-        logger.error(f"Failed to save account file atomically: {e}")
-        if os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+    with _paper_file_lock:
+        directory = os.path.dirname(os.path.abspath(ACCOUNT_FILE)) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".paper_acc-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(account, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            replaced = False
+            last_err = None
+            for attempt in range(5):
+                try:
+                    os.replace(tmp_path, ACCOUNT_FILE)
+                    replaced = True
+                    break
+                except PermissionError as pe:
+                    last_err = pe
+                    time.sleep(0.02 * (attempt + 1))
+            if not replaced and last_err:
+                raise last_err
+        except Exception as e:
+            logger.error(f"Failed to save account file atomically: {e}")
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
 def load_open_trades():
-    if os.path.exists(TRADES_FILE):
-        with open(TRADES_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return []
+    with _paper_file_lock:
+        if os.path.exists(TRADES_FILE):
+            for attempt in range(5):
+                try:
+                    with open(TRADES_FILE, 'r', encoding='utf-8') as f:
+                        return json.load(f)
+                except (PermissionError, OSError):
+                    time.sleep(0.02 * (attempt + 1))
+                except Exception:
+                    break
+        return []
 
 def save_trades(trades):
-    tmp_path = f"{TRADES_FILE}.tmp"
-    try:
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(trades, f, indent=4)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, TRADES_FILE)
-        if trades:
-            df = pd.DataFrame(trades)
-            tmp_report = f"{REPORT_FILE}.tmp"
-            df.to_csv(tmp_report, index=False)
-            os.replace(tmp_report, REPORT_FILE)
-            logger.info("Exported CSV report.")
-    except Exception as e:
-        logger.error(f"Failed to save trades file atomically: {e}")
-        if os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+    with _paper_file_lock:
+        directory = os.path.dirname(os.path.abspath(TRADES_FILE)) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".paper_trades-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(trades, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            replaced = False
+            last_err = None
+            for attempt in range(5):
+                try:
+                    os.replace(tmp_path, TRADES_FILE)
+                    replaced = True
+                    break
+                except PermissionError as pe:
+                    last_err = pe
+                    time.sleep(0.02 * (attempt + 1))
+            if not replaced and last_err:
+                raise last_err
+            if trades:
+                df = pd.DataFrame(trades)
+                fd_rep, tmp_report = tempfile.mkstemp(dir=directory, prefix=".paper_rep-", suffix=".tmp")
+                os.close(fd_rep)
+                df.to_csv(tmp_report, index=False)
+                for attempt in range(5):
+                    try:
+                        os.replace(tmp_report, REPORT_FILE)
+                        break
+                    except PermissionError:
+                        time.sleep(0.02 * (attempt + 1))
+                logger.info("Exported CSV report.")
+        except Exception as e:
+            logger.error(f"Failed to save trades file atomically: {e}")
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
 # ---------------------------------------------------------------------------
 # Data Fetching
@@ -261,7 +310,8 @@ async def run_loop():
             high = float(df['high'].iloc[-1])
 
             # --- Trailing Stop Update ---
-            trade = RiskEngine.update_trailing_stop(trade, high, low)
+            curr_delta = trade.get("opt_delta")
+            trade = RiskEngine.update_trailing_stop(trade, high, low, current_delta=curr_delta)
             active_sl = trade.get("trailing_stop", trade["sl"])
 
             # --- Time-Based Exit Check ---
@@ -303,6 +353,15 @@ async def run_loop():
                     exit_reason = "CLOSED_WIN"
                     bar_open = float(df['open'].iloc[-1])
                     trade['exit_price'] = min(trade['tp'], bar_open) if bar_open < trade['tp'] else trade['tp']
+            elif trade['direction'] in ('NEUTRAL', 'RANGEBOUND'):
+                lower_bound = min(trade['sl'], trade['tp']) if trade.get('sl') and trade.get('tp') else trade.get('sl')
+                upper_bound = max(trade['sl'], trade['tp']) if trade.get('sl') and trade.get('tp') else trade.get('tp')
+                if lower_bound is not None and low <= lower_bound:
+                    exit_reason = "CLOSED_LOSS"
+                    trade['exit_price'] = min(lower_bound, float(df['open'].iloc[-1]))
+                elif upper_bound is not None and high >= upper_bound:
+                    exit_reason = "CLOSED_LOSS"
+                    trade['exit_price'] = max(upper_bound, float(df['open'].iloc[-1]))
 
             if exit_reason:
                 trade['status'] = exit_reason
@@ -321,7 +380,50 @@ async def run_loop():
                     strat = str(trade.get("strategy_type", "DIRECTIONAL")).upper()
                     qty = trade.get("total_quantity") or trade.get("quantity") or opt_engine.get_lot_size(ticker)
 
-                    if strat in ("CREDIT_SPREAD", "IRON_CONDOR") or trade.get("instrument_type") in ("SPREAD", "IRON_CONDOR"):
+                    if strat in ("IRON_CONDOR", "CONDOR") or trade.get("instrument_type") in ("IRON_CONDOR", "CONDOR"):
+                        sp_k = float(trade.get("short_put_strike", 0.0) or 0.0)
+                        lp_k = float(trade.get("long_put_strike", 0.0) or 0.0)
+                        sc_k = float(trade.get("short_call_strike", 0.0) or 0.0)
+                        lc_k = float(trade.get("long_call_strike", 0.0) or 0.0)
+
+                        if not sp_k or not sc_k:
+                            strike = float(trade.get("opt_strike", 0.0) or trade.get("strike", 0.0) or exit_spot)
+                            interval = abs(trade.get("hedge_strike_price", strike) - strike) or 100.0
+                            sp_k = strike - interval
+                            lp_k = strike - 2 * interval
+                            sc_k = strike + interval
+                            lc_k = strike + 2 * interval
+
+                        bs_sp = opt_engine._black_scholes(exit_spot, sp_k, T, opt_engine.RISK_FREE_RATE, iv, "PE")
+                        bs_lp = opt_engine._black_scholes(exit_spot, lp_k, T, opt_engine.RISK_FREE_RATE, iv, "PE")
+                        bs_sc = opt_engine._black_scholes(exit_spot, sc_k, T, opt_engine.RISK_FREE_RATE, iv, "CE")
+                        bs_lc = opt_engine._black_scholes(exit_spot, lc_k, T, opt_engine.RISK_FREE_RATE, iv, "CE")
+
+                        p_sp_exit = bs_sp["premium"]
+                        p_lp_exit = bs_lp["premium"]
+                        p_sc_exit = bs_sc["premium"]
+                        p_lc_exit = bs_lc["premium"]
+
+                        p_sp_entry = float(trade.get("short_put_entry", trade.get("opt_entry_premium", 0.0) * 0.4))
+                        p_lp_entry = float(trade.get("long_put_entry", 0.05))
+                        p_sc_entry = float(trade.get("short_call_entry", trade.get("opt_entry_premium", 0.0) * 0.4))
+                        p_lc_entry = float(trade.get("long_call_entry", 0.05))
+
+                        f_calc = IndianFOFrictionModel.calculate_iron_condor_friction(
+                            short_put_entry=p_sp_entry,
+                            short_put_exit=p_sp_exit,
+                            long_put_entry=p_lp_entry,
+                            long_put_exit=p_lp_exit,
+                            short_call_entry=p_sc_entry,
+                            short_call_exit=p_sc_exit,
+                            long_call_entry=p_lc_entry,
+                            long_call_exit=p_lc_exit,
+                            quantity=qty
+                        )
+                        cash_pnl = f_calc.net_pnl
+                        trade["opt_exit_premium"] = max(0.05, round((p_sp_exit - p_lp_exit) + (p_sc_exit - p_lc_exit), 2))
+
+                    elif strat in ("CREDIT_SPREAD", "SPREAD") or trade.get("instrument_type") in ("SPREAD", "CREDIT_SPREAD"):
                         short_k = trade.get("opt_strike", 0.0)
                         long_k = trade.get("hedge_strike_price", 0.0)
                         opt_t = trade.get("opt_type", "PE")
@@ -660,6 +762,8 @@ async def run_loop():
                 strike_pref=strike_pref,
                 regime=regime_str,
                 iv=iv,
+                adx=regime.get("adx"),
+                options_data=live_opts,
             )
 
             if not fo_plan.is_approved:
@@ -721,6 +825,14 @@ async def run_loop():
                 "opt_strike": fo_plan.strike_price,
                 "hedge_strike_price": fo_plan.hedge_strike_price,
                 "hedge_entry_price": fo_plan.hedge_entry_price,
+                "short_put_strike": getattr(fo_plan, "short_put_strike", 0.0),
+                "long_put_strike": getattr(fo_plan, "long_put_strike", 0.0),
+                "short_call_strike": getattr(fo_plan, "short_call_strike", 0.0),
+                "long_call_strike": getattr(fo_plan, "long_call_strike", 0.0),
+                "short_put_entry": getattr(fo_plan, "short_put_entry", 0.0),
+                "long_put_entry": getattr(fo_plan, "long_put_entry", 0.0),
+                "short_call_entry": getattr(fo_plan, "short_call_entry", 0.0),
+                "long_call_entry": getattr(fo_plan, "long_call_entry", 0.0),
                 "net_credit": fo_plan.net_credit,
                 "opt_entry_premium": fo_plan.entry_price if fo_plan.instrument_type in ("OPTION", "SPREAD", "IRON_CONDOR") else 0.0,
                 "opt_delta": fo_plan.delta,

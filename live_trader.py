@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 
 from setups.engine import SetupEngine
 from ml.ensemble import EnsembleModel
-from ml.risk_engine import RiskEngine
+from ml.risk_engine import RiskEngine, is_intraday_square_off_time
 from ml.options_engine import OptionsEngine
 from ml.drift_detector import DriftDetector
 from ml.circuit_breaker import DrawdownCircuitBreaker
@@ -38,7 +38,7 @@ from api.config_store import load_config_atomic, CONFIG_PATH
 import yfinance as yf
 from sqlalchemy import select
 from api.db import async_session_factory
-from models.models import Trade
+from models.models import Trade, TradeContext
 
 load_dotenv()
 
@@ -57,6 +57,9 @@ def load_config() -> dict:
     except Exception as e:
         logger.warning(f"Error loading config via config_store: {e}. Falling back to default.")
         return {}
+
+
+CONFIG = load_config()
 
 
 def _load_live_trades_disk() -> List[Dict[str, Any]]:
@@ -96,7 +99,21 @@ async def get_active_trades():
             try:
                 stmt = select(Trade).where(Trade.is_open == True)
                 res = await session.execute(stmt)
-                return list(res.scalars().all())
+                trades = list(res.scalars().all())
+                for tr in trades:
+                    if tr.order_id:
+                        ctx_stmt = select(TradeContext).where(TradeContext.order_id == tr.order_id)
+                        ctx_res = await session.execute(ctx_stmt)
+                        ctx = ctx_res.scalar_one_or_none()
+                        if ctx and ctx.payload:
+                            try:
+                                ctx_dict = json.loads(ctx.payload)
+                                for k, v in ctx_dict.items():
+                                    if not hasattr(tr, k) or getattr(tr, k) is None:
+                                        setattr(tr, k, v)
+                            except Exception:
+                                pass
+                return trades
             except Exception:
                 await session.rollback()
                 raise
@@ -111,19 +128,28 @@ async def get_active_trades():
                     order_id=dt.get("order_id"),
                     ticker=dt.get("ticker"),
                     direction=dt.get("direction"),
+                    action=dt.get("action", "BUY"),
+                    strategy_type=dt.get("strategy_type", "DIRECTIONAL"),
+                    instrument_type=dt.get("instrument_type", "OPTION"),
                     entry_price=dt.get("entry_price"),
                     quantity=dt.get("quantity"),
                     invested=dt.get("invested"),
                     take_profit=dt.get("tp"),
                     stop_loss=dt.get("sl"),
+                    hedge_strike_price=dt.get("hedge_strike_price", 0.0),
+                    short_put_strike=dt.get("short_put_strike", 0.0),
+                    long_put_strike=dt.get("long_put_strike", 0.0),
+                    short_call_strike=dt.get("short_call_strike", 0.0),
+                    long_call_strike=dt.get("long_call_strike", 0.0),
                     is_open=True,
                     entry_time=None
                 ))
         return res
 
 
-async def close_trade(trade_id, exit_price, broker=None):
+async def close_trade(trade_id, exit_price, broker=None, exit_reason="CLOSED"):
     closed_rec = None
+    disk_trades = _load_live_trades_disk()
     # 1. Attempt database close with automatic rollback
     try:
         async with async_session_factory() as session:
@@ -133,15 +159,34 @@ async def close_trade(trade_id, exit_price, broker=None):
                 trade = res.scalar_one_or_none()
                 if trade:
                     is_option = " " in (trade.ticker or "")
-                    trade_action = getattr(trade, "action", None) or ("SELL" if "SELL" in (trade.ticker or "").upper() else "BUY")
+                    trade_action = getattr(trade, "action", None)
+                    if not trade_action and trade.order_id:
+                        ctx_stmt = select(TradeContext).where(TradeContext.order_id == trade.order_id)
+                        ctx_res = await session.execute(ctx_stmt)
+                        ctx = ctx_res.scalar_one_or_none()
+                        if ctx and ctx.payload:
+                            try:
+                                ctx_dict = json.loads(ctx.payload)
+                                trade_action = ctx_dict.get("action")
+                            except Exception:
+                                pass
+                    if not trade_action:
+                        for dt in disk_trades:
+                            if str(dt.get("order_id")) == str(trade.order_id) or str(dt.get("id")) == str(trade.id):
+                                trade_action = dt.get("action")
+                                break
+                    if not trade_action:
+                        trade_action = "BUY" if str(trade.direction).upper() in {"LONG", "BULLISH", "BUY"} else "SELL"
+
                     if broker and getattr(broker, "is_connected", False):
                         try:
+                            # To exit: reverse entry action
+                            # Selling position is closed by BUYING; Buying position is closed by SELLING
+                            exit_dir = "BUY" if trade_action == "SELL" else "SELL"
                             is_fo = is_option or "FUT" in (trade.ticker or "").upper() or "SPREAD" in (trade.ticker or "").upper() or "CONDOR" in (trade.ticker or "").upper()
                             if is_fo:
-                                exit_dir = "BUY" if trade_action == "SELL" else "SELL"
                                 exchange = "BFO" if "SENSEX" in (trade.ticker or "").upper() else "NFO"
                             else:
-                                exit_dir = "SELL" if str(trade.direction).upper() in {"LONG", "BULLISH", "BUY"} else "BUY"
                                 exchange = "BSE" if "SENSEX" in (trade.ticker or "").upper() else "NSE"
 
                             broker.place_order(
@@ -159,14 +204,13 @@ async def close_trade(trade_id, exit_price, broker=None):
                     trade.exit_time = datetime.datetime.now(datetime.timezone.utc)
 
                     pnl = (exit_price - trade.entry_price) / trade.entry_price if trade.entry_price > 0 else 0.0
-                    if is_option and trade_action == "SELL":
-                        pnl = -pnl
-                    elif not is_option and str(trade.direction).upper() in {"BEARISH", "SHORT", "SELL"}:
+                    if trade_action == "SELL":
                         pnl = -pnl
                     trade.pnl_pct = pnl * 100
                     cash_pnl = trade.invested * pnl if trade.invested else 0.0
 
                     await session.commit()
+                    closed_status = exit_reason if exit_reason != "CLOSED" else ("CLOSED_TP" if pnl > 0 else "CLOSED_SL")
                     closed_rec = {
                         "id": trade.id,
                         "order_id": trade.order_id,
@@ -174,7 +218,7 @@ async def close_trade(trade_id, exit_price, broker=None):
                         "direction": trade.direction,
                         "entry_price": trade.entry_price,
                         "exit_price": exit_price,
-                        "status": "CLOSED_TP" if pnl > 0 else "CLOSED_SL",
+                        "status": closed_status,
                         "pnl_pct": pnl,
                         "cash_pnl": cash_pnl,
                     }
@@ -185,7 +229,6 @@ async def close_trade(trade_id, exit_price, broker=None):
         logger.warning(f"Database error in close_trade for {trade_id}: {db_err}; syncing with disk state.")
 
     # 2. Synchronize disk fallback state
-    disk_trades = _load_live_trades_disk()
     for dt in disk_trades:
         if str(dt.get("id")) == str(trade_id) or str(dt.get("order_id")) == str(trade_id):
             dt["is_open"] = False
@@ -193,11 +236,8 @@ async def close_trade(trade_id, exit_price, broker=None):
             dt["exit_time"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             entry_p = float(dt.get("entry_price", 1.0))
             pnl = (exit_price - entry_p) / entry_p if entry_p > 0 else 0.0
-            is_option = " " in (dt.get("ticker") or "")
-            dt_action = str(dt.get("action", "SELL" if "SELL" in (dt.get("ticker") or "").upper() else "BUY")).upper()
-            if is_option and dt_action == "SELL":
-                pnl = -pnl
-            elif not is_option and str(dt.get("direction", "")).upper() in {"BEARISH", "SHORT", "SELL"}:
+            dt_action = str(dt.get("action", "BUY" if str(dt.get("direction", "")).upper() in {"LONG", "BULLISH", "BUY"} else "SELL")).upper()
+            if dt_action == "SELL":
                 pnl = -pnl
             dt["pnl_pct"] = pnl * 100
             cash_pnl = float(dt.get("invested", 0.0)) * pnl
@@ -205,16 +245,13 @@ async def close_trade(trade_id, exit_price, broker=None):
             if closed_rec is None:
                 if broker and getattr(broker, "is_connected", False):
                     try:
-                        is_fo = is_option or "FUT" in str(dt.get("ticker")).upper() or "SPREAD" in str(dt.get("ticker")).upper() or "CONDOR" in str(dt.get("ticker")).upper()
-                        if is_fo:
-                            exit_dir = "BUY" if dt_action == "SELL" else "SELL"
-                            exchange = "BFO" if "SENSEX" in str(dt.get("ticker")).upper() else "NFO"
-                        else:
-                            exit_dir = "SELL" if str(dt.get("direction")).upper() in {"LONG", "BULLISH", "BUY"} else "BUY"
-                            exchange = "BSE" if "SENSEX" in str(dt.get("ticker")).upper() else "NSE"
+                        exit_dir = "BUY" if dt_action == "SELL" else "SELL"
+                        is_fo = (" " in (dt.get("ticker") or "")) or "FUT" in str(dt.get("ticker")).upper() or "SPREAD" in str(dt.get("ticker")).upper() or "CONDOR" in str(dt.get("ticker")).upper()
+                        exchange = "BFO" if ("SENSEX" in str(dt.get("ticker")).upper() and is_fo) else ("NFO" if is_fo else ("BSE" if "SENSEX" in str(dt.get("ticker")).upper() else "NSE"))
                         broker.place_order(ticker=dt.get("ticker"), quantity=dt.get("quantity", 1), direction=exit_dir, exchange=exchange)
                     except Exception as b_err:
                         logger.error(f"Broker exit failed in disk fallback: {b_err}")
+                closed_status = exit_reason if exit_reason != "CLOSED" else ("CLOSED_TP" if pnl > 0 else "CLOSED_SL")
                 closed_rec = {
                     "id": dt.get("id"),
                     "order_id": dt.get("order_id"),
@@ -222,7 +259,7 @@ async def close_trade(trade_id, exit_price, broker=None):
                     "direction": dt.get("direction"),
                     "entry_price": entry_p,
                     "exit_price": exit_price,
-                    "status": "CLOSED_TP" if pnl > 0 else "CLOSED_SL",
+                    "status": closed_status,
                     "pnl_pct": pnl,
                     "cash_pnl": cash_pnl,
                 }
@@ -257,6 +294,10 @@ async def open_trade(trade_record):
                     is_open=True,
                 )
                 session.add(new_trade)
+                # Store full F&O context into TradeContext
+                ctx_payload = json.dumps(trade_record)
+                new_ctx = TradeContext(order_id=trade_record["order_id"], payload=ctx_payload)
+                session.add(new_ctx)
                 await session.commit()
             except Exception:
                 await session.rollback()
@@ -354,44 +395,92 @@ async def run_live_loop_async():
                         or trade.ticker.startswith(fo_name)
                     )
                     if is_match:
-                        if trade.stop_loss is not None and trade.take_profit is not None:
+                        exit_reason = None
+                        should_exit = False
+
+                        # 1. Intraday MIS Square-Off (15:15 IST)
+                        if is_intraday_square_off_time():
+                            exit_reason = "INTRADAY_SQUARE_OFF"
+                            should_exit = True
+                        elif trade.stop_loss is not None and trade.take_profit is not None:
                             direction = str(trade.direction).upper()
                             if direction in {"LONG", "BULLISH", "BUY"}:
-                                should_exit = current_price <= trade.stop_loss or current_price >= trade.take_profit
+                                if current_price <= trade.stop_loss:
+                                    should_exit = True
+                                    exit_reason = "STOP_LOSS"
+                                elif current_price >= trade.take_profit:
+                                    should_exit = True
+                                    exit_reason = "TAKE_PROFIT"
                             elif direction in {"SHORT", "BEARISH", "SELL"}:
-                                should_exit = current_price >= trade.stop_loss or current_price <= trade.take_profit
+                                if current_price >= trade.stop_loss:
+                                    should_exit = True
+                                    exit_reason = "STOP_LOSS"
+                                elif current_price <= trade.take_profit:
+                                    should_exit = True
+                                    exit_reason = "TAKE_PROFIT"
+                            elif direction in {"NEUTRAL", "RANGEBOUND"}:
+                                # Neutral strategy (Iron Condor / Rangebound):
+                                # Exit on outer wing boundary breaches
+                                lower_bound = min(trade.stop_loss, trade.take_profit)
+                                upper_bound = max(trade.stop_loss, trade.take_profit)
+                                if current_price <= lower_bound or current_price >= upper_bound:
+                                    should_exit = True
+                                    exit_reason = "STOP_LOSS"
                             else:
                                 logger.error("Unknown persisted trade direction %r; refusing automatic exit.", trade.direction)
                                 should_exit = False
-                            if should_exit:
-                                logger.info(f"Closing live position: {trade.ticker}")
-                                parts = (trade.ticker or "").split()
-                                is_option = len(parts) == 3 and parts[2] in ("CE", "PE")
-                                if is_option:
-                                    try:
-                                        strike = float(parts[1])
-                                        opt_type = parts[2]
-                                        iv = (df['macro_vix'].iloc[-1] / 100.0) if ('macro_vix' in df.columns and not pd.isna(df['macro_vix'].iloc[-1]) and df['macro_vix'].iloc[-1] > 0) else 0.15
-                                        entry_t = trade.entry_time if trade.entry_time else datetime.datetime.now(datetime.timezone.utc)
-                                        if entry_t.tzinfo is None:
-                                            entry_t = entry_t.replace(tzinfo=datetime.timezone.utc)
-                                        days_held = max(0.0, (datetime.datetime.now(datetime.timezone.utc) - entry_t).total_seconds() / 86400.0)
-                                        days_to_expiry = max(0.5, 7.0 - days_held)
-                                        T = days_to_expiry / 365.0
-                                        bs_res = opt_engine._black_scholes(S=current_price, K=strike, T=T, r=0.06, sigma=iv, option_type=opt_type)
-                                        opt_exit_price = max(0.05, bs_res["premium"])
-                                    except Exception as calc_err:
-                                        logger.error(f"Error calculating option exit premium: {calc_err}")
-                                        opt_exit_price = trade.entry_price
-                                    closed_rec = await close_trade(trade.id, opt_exit_price, broker=broker)
-                                else:
-                                    closed_rec = await close_trade(trade.id, current_price, broker=broker)
-                                if closed_rec:
-                                    notifier.send_exit_alert(closed_rec, is_live=True)
-                                    circuit_breaker.record_trade_outcome(
-                                        pnl_pct=closed_rec.get("pnl_pct", 0.0),
-                                        cash_pnl=closed_rec.get("cash_pnl", 0.0)
-                                    )
+
+                        if should_exit:
+                            logger.info(f"Closing live position: {trade.ticker} (Reason: {exit_reason})")
+                            parts = (trade.ticker or "").split()
+                            is_option = len(parts) == 3 and parts[2] in ("CE", "PE")
+                            strat_type = getattr(trade, "strategy_type", "")
+                            if strat_type in ("IRON_CONDOR", "CREDIT_SPREAD") or "CONDOR" in (trade.ticker or "").upper() or "SPREAD" in (trade.ticker or "").upper():
+                                trade_dict = {
+                                    "ticker": ticker,
+                                    "underlying_ticker": ticker,
+                                    "strike": getattr(trade, "strike_price", 0.0) or getattr(trade, "strike", 0.0),
+                                    "hedge_strike_price": getattr(trade, "hedge_strike_price", 0.0),
+                                    "short_put_strike": getattr(trade, "short_put_strike", 0.0),
+                                    "long_put_strike": getattr(trade, "long_put_strike", 0.0),
+                                    "short_call_strike": getattr(trade, "short_call_strike", 0.0),
+                                    "long_call_strike": getattr(trade, "long_call_strike", 0.0),
+                                    "strategy_type": strat_type or "IRON_CONDOR",
+                                    "action": getattr(trade, "action", "SELL"),
+                                    "entry_price": trade.entry_price,
+                                }
+                                try:
+                                    opt_exit_price, _ = opt_engine.calculate_option_mtm(trade_dict, current_spot=current_price)
+                                except Exception as calc_err:
+                                    logger.error(f"Error calculating condor exit premium: {calc_err}")
+                                    opt_exit_price = trade.entry_price
+                                closed_rec = await close_trade(trade.id, opt_exit_price, broker=broker, exit_reason=exit_reason)
+                            elif is_option:
+                                try:
+                                    strike = float(parts[1])
+                                    opt_type = parts[2]
+                                    iv = (df['macro_vix'].iloc[-1] / 100.0) if ('macro_vix' in df.columns and not pd.isna(df['macro_vix'].iloc[-1]) and df['macro_vix'].iloc[-1] > 0) else 0.15
+                                    entry_t = trade.entry_time if trade.entry_time else datetime.datetime.now(datetime.timezone.utc)
+                                    if entry_t.tzinfo is None:
+                                        entry_t = entry_t.replace(tzinfo=datetime.timezone.utc)
+                                    days_held = max(0.0, (datetime.datetime.now(datetime.timezone.utc) - entry_t).total_seconds() / 86400.0)
+                                    initial_dte = float(opt_engine.get_days_to_expiry(ticker))
+                                    days_to_expiry = max(0.001, initial_dte - days_held)
+                                    T = days_to_expiry / 365.0
+                                    bs_res = opt_engine._black_scholes(S=current_price, K=strike, T=T, r=opt_engine.RISK_FREE_RATE, sigma=iv, option_type=opt_type)
+                                    opt_exit_price = max(0.05, bs_res["premium"])
+                                except Exception as calc_err:
+                                    logger.error(f"Error calculating option exit premium: {calc_err}")
+                                    opt_exit_price = trade.entry_price
+                                closed_rec = await close_trade(trade.id, opt_exit_price, broker=broker, exit_reason=exit_reason)
+                            else:
+                                closed_rec = await close_trade(trade.id, current_price, broker=broker, exit_reason=exit_reason)
+                            if closed_rec:
+                                notifier.send_exit_alert(closed_rec, is_live=True)
+                                circuit_breaker.record_trade_outcome(
+                                    pnl_pct=closed_rec.get("pnl_pct", 0.0),
+                                    cash_pnl=closed_rec.get("cash_pnl", 0.0)
+                                )
 
                 # Gate: If circuit breaker is not allowed, refuse new trade entries
                 if not circuit_decision.is_allowed:
@@ -453,10 +542,12 @@ async def run_live_loop_async():
                         opt_plan = opt_engine.generate_derivative_plan(
                             spot_plan=trade_plan,
                             capital=actual_capital,
-                            derivative_type=CONFIG.get("derivative_type", "AUTO"),
-                            strike_pref=CONFIG.get("strike_preference", "AUTO"),
+                            derivative_type=config.get("derivative_type", "AUTO"),
+                            strike_pref=config.get("strike_preference", "AUTO"),
                             regime=regime.get("regime", "trending"),
-                            iv=dynamic_iv
+                            iv=dynamic_iv,
+                            adx=regime.get("adx"),
+                            options_data=live_opts,
                         )
                         if opt_plan.is_approved:
                             exchange = "BFO" if "SENSEX" in opt_plan.contract_symbol else "NFO"

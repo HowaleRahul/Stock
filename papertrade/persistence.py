@@ -23,10 +23,13 @@ async def ensure_schema() -> None:
 def _timestamp(value: Optional[str]) -> datetime:
     if not value:
         return datetime.now(timezone.utc)
-    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except (ValueError, TypeError, AttributeError):
+        return datetime.now(timezone.utc)
 
 
 async def load_account(default_capital: float) -> Dict[str, Any]:
@@ -49,11 +52,15 @@ async def load_account(default_capital: float) -> Dict[str, Any]:
     except Exception as exc:
         logger.warning(f"Database session failed in load_account: {exc}; falling back to disk.")
         if os.path.exists("paper_account.json"):
-            try:
-                with open("paper_account.json", "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
+            import time
+            for attempt in range(5):
+                try:
+                    with open("paper_account.json", "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except (PermissionError, OSError):
+                    time.sleep(0.02 * (attempt + 1))
+                except Exception:
+                    break
         return {'capital': default_capital, 'peak_capital': default_capital, 'status': 'ACTIVE'}
 
 
@@ -119,12 +126,16 @@ async def load_open_trades() -> List[Dict[str, Any]]:
     except Exception as exc:
         logger.warning(f"Database session failed in load_open_trades: {exc}; falling back to disk.")
         if os.path.exists("paper_trades.json"):
-            try:
-                with open("paper_trades.json", "r", encoding="utf-8") as f:
-                    raw_trades = json.load(f)
-                    return [t for t in raw_trades if t.get("status") == "OPEN"]
-            except Exception:
-                pass
+            import time
+            for attempt in range(5):
+                try:
+                    with open("paper_trades.json", "r", encoding="utf-8") as f:
+                        raw_trades = json.load(f)
+                        return [t for t in raw_trades if t.get("status") == "OPEN"]
+                except (PermissionError, OSError):
+                    time.sleep(0.02 * (attempt + 1))
+                except Exception:
+                    break
         return []
 
 

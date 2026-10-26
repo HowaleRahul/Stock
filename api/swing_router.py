@@ -68,6 +68,27 @@ class AddWatchlistRequest(BaseModel):
     def validate_ticker(cls, v: str) -> str:
         return _validate_swing_ticker(v)
 
+    @field_validator("sector")
+    @classmethod
+    def validate_sector(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        clean = v.replace("\x00", "").strip()
+        return clean[:64] if clean else None
+
+    @field_validator("source_scanners")
+    @classmethod
+    def validate_scanners(cls, v: List[str]) -> List[str]:
+        return [str(s).replace("\x00", "").strip()[:64] for s in v if str(s).strip()]
+
+    @field_validator("notes")
+    @classmethod
+    def validate_notes(cls, v: Optional[str]) -> str:
+        if not v:
+            return ""
+        clean = v.replace("\x00", "").strip()
+        return clean[:1024]
+
 
 class ChecklistEvaluateRequest(BaseModel):
     ticker: str = Field(..., min_length=1, max_length=32)

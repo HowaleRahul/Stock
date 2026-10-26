@@ -348,7 +348,8 @@ class MultiAgentConsensusEngine:
 
                 # Analyze Gamma Exposure
                 if strikes_data:
-                    lot_size = 25 if "NIFTY" in clean_sym and "BANK" not in clean_sym else (15 if "BANK" in clean_sym else 25)
+                    from ml.options_engine import DerivativeEngine
+                    lot_size = DerivativeEngine().get_lot_size(clean_sym)
                     gex_res = GEXEngine.analyze_chain_gex(
                         spot=spot or float(strikes_data[len(strikes_data) // 2]["strike"]),
                         strikes_data=strikes_data,

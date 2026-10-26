@@ -246,26 +246,45 @@ class SmartAPIBroker(BrokerAPI):
         Execute an F&O order via SmartAPI with Algo-ID tagging.
         exchange must be 'NFO' (NSE F&O) or 'BFO' (BSE F&O / SENSEX).
         """
+        if self.broker_mode != "live":
+            raise RuntimeError("Live trading disabled: BROKER_MODE must be 'live' to submit orders.")
+
         if not self.is_connected:
             raise ConnectionError("SmartAPI is not connected.")
+
+        if not isinstance(ticker, str) or not ticker.strip() or "\x00" in ticker:
+            raise ValueError("Valid ticker is required")
+        if not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError("Quantity must be a positive integer")
+        dir_clean = direction.upper().strip()
+        if dir_clean not in {"BUY", "SELL", "LONG", "SHORT"}:
+            raise ValueError(f"Invalid direction '{direction}'. Must be BUY, SELL, LONG, or SHORT.")
+        side = "BUY" if dir_clean in ("BUY", "LONG") else "SELL"
+
+        ot_clean = order_type.upper().strip()
+        if ot_clean not in {"MARKET", "LIMIT"}:
+            raise ValueError(f"Unsupported order type '{order_type}'. Must be MARKET or LIMIT.")
+
+        if ot_clean == "LIMIT":
+            if not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
+                raise ValueError("Limit orders require a positive finite price")
 
         ex = exchange.upper().strip()
         if ex not in ("NFO", "BFO", "NSE", "BSE"):
             raise ValueError(f"Invalid exchange for SmartAPI F&O: {exchange}")
 
-        side = "BUY" if direction.upper() in ("BUY", "LONG") else "SELL"
         variety = "NORMAL"
 
         payload = {
             "variety": variety,
-            "tradingsymbol": ticker,
-            "symboltoken": symbol_token,
+            "tradingsymbol": ticker.strip().upper(),
+            "symboltoken": str(symbol_token).strip(),
             "transactiontype": side,
             "exchange": ex,
-            "ordertype": order_type.upper(),
+            "ordertype": ot_clean,
             "producttype": "INTRADAY",
             "duration": "DAY",
-            "price": str(price) if order_type.upper() == "LIMIT" else "0",
+            "price": str(price) if ot_clean == "LIMIT" else "0",
             "quantity": str(quantity),
             "tag": self.algo_id,  # Mandatory SEBI Algo-ID
         }

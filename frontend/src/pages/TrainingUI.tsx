@@ -119,6 +119,12 @@ const TrainingUI = () => {
     hedgeStrike?: number;
     hedgePrice?: number;
     netCredit?: number;
+    shortPutStrike?: number;
+    longPutStrike?: number;
+    shortCallStrike?: number;
+    longCallStrike?: number;
+    lowerBreakeven?: number;
+    upperBreakeven?: number;
     entryPrice?: number;
     targetPrice?: number;
     stopLossPrice?: number;
@@ -856,6 +862,12 @@ const TrainingUI = () => {
                                   hedgeStrike: pos.hedge_strike_price,
                                   hedgePrice: pos.hedge_entry_price,
                                   netCredit: pos.net_credit,
+                                  shortPutStrike: pos.short_put_strike,
+                                  longPutStrike: pos.long_put_strike,
+                                  shortCallStrike: pos.short_call_strike,
+                                  longCallStrike: pos.long_call_strike,
+                                  lowerBreakeven: pos.lower_breakeven,
+                                  upperBreakeven: pos.upper_breakeven,
                                   entryPrice: Number(pos.entry_price || 0),
                                   targetPrice: Number(pos.target || pos.tp || 0),
                                   stopLossPrice: Number(pos.stop_loss || pos.sl || 0),
@@ -1069,6 +1081,12 @@ const TrainingUI = () => {
             hedgeStrike={focusedOption?.hedgeStrike}
             hedgePrice={focusedOption?.hedgePrice}
             netCredit={focusedOption?.netCredit}
+            shortPutStrike={focusedOption?.shortPutStrike}
+            longPutStrike={focusedOption?.longPutStrike}
+            shortCallStrike={focusedOption?.shortCallStrike}
+            longCallStrike={focusedOption?.longCallStrike}
+            lowerBreakeven={focusedOption?.lowerBreakeven}
+            upperBreakeven={focusedOption?.upperBreakeven}
             entryPrice={focusedOption?.entryPrice}
             targetPrice={focusedOption?.targetPrice}
             stopLossPrice={focusedOption?.stopLossPrice}
@@ -1402,6 +1420,13 @@ const TrainingUI = () => {
               strategyType: inspectedTrade.strategy_type || (isTradeSpread ? 'CREDIT_SPREAD' : isTradeSeller ? 'WRITING' : 'DIRECTIONAL'),
               hedgeStrike: inspectedTrade.hedge_strike_price,
               hedgePrice: inspectedTrade.hedge_entry_price,
+              netCredit: inspectedTrade.net_credit,
+              shortPutStrike: inspectedTrade.short_put_strike,
+              longPutStrike: inspectedTrade.long_put_strike,
+              shortCallStrike: inspectedTrade.short_call_strike,
+              longCallStrike: inspectedTrade.long_call_strike,
+              lowerBreakeven: inspectedTrade.lower_breakeven,
+              upperBreakeven: inspectedTrade.upper_breakeven,
               lotSize: inspectedTrade.lot_size || getExchangeLotSize(inspectedTrade.underlying_ticker || inspectedTrade.ticker),
               quantity: inspectedTrade.quantity,
               rawTheta: inspectedTrade.theta || inspectedTrade.opt_theta,
@@ -1526,9 +1551,13 @@ const TrainingUI = () => {
                   </span>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                     <div className="p-2.5 bg-gray-900/90 rounded border border-gray-800">
-                      <span className="text-gray-400 block text-[10px] uppercase font-bold">Breakeven Spot</span>
+                      <span className="text-gray-400 block text-[10px] uppercase font-bold">
+                        {dossierPayoff.breakevenPoints.length > 1 ? 'Breakeven Range' : 'Breakeven Spot'}
+                      </span>
                       <strong className="text-amber-400 text-sm">
-                        ₹{dossierPayoff.breakeven.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        {dossierPayoff.breakevenPoints.length > 1
+                          ? `₹${dossierPayoff.breakevenPoints[0].toLocaleString('en-IN', { minimumFractionDigits: 1 })} – ₹${dossierPayoff.breakevenPoints[1].toLocaleString('en-IN', { minimumFractionDigits: 1 })}`
+                          : `₹${dossierPayoff.breakeven.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`}
                       </strong>
                       <span className="text-[9px] text-gray-400 block mt-0.5">
                         {dossierPayoff.safetyBufferPct}% margin to spot
@@ -1562,6 +1591,32 @@ const TrainingUI = () => {
                       </span>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {/* Condor Wings Ribbon */}
+              {dossierPayoff && dossierPayoff.curve?.strikes?.length >= 4 && (
+                <div className="mb-4 p-2.5 bg-gray-950/90 rounded-xl border border-purple-900/40 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
+                  <span className="text-purple-300 font-bold uppercase text-[10px] flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" /> Condor Wings:
+                  </span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {dossierPayoff.curve.strikes.map((stk, sIdx) => (
+                      <span
+                        key={sIdx}
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          stk.type === 'SHORT'
+                            ? 'bg-amber-950/80 text-amber-300 border border-amber-800'
+                            : 'bg-blue-950/80 text-blue-300 border border-blue-800'
+                        }`}
+                      >
+                        {stk.label}
+                      </span>
+                    ))}
+                  </div>
+                  <span className="text-emerald-400 font-bold text-[10px]">
+                    Net Credit: ₹{dossierPayoff.netPremium.toFixed(2)}
+                  </span>
                 </div>
               )}
 
@@ -1605,7 +1660,7 @@ const TrainingUI = () => {
                 <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-2">
                   3. Full Option Greeks &amp; Black-Scholes Derivatives Metrics
                 </span>
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-xs font-mono">
+                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 text-xs font-mono">
                   <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800 text-center">
                     <span className="text-gray-400 block text-[10px]">Delta (Δ)</span>
                     <strong className="text-blue-400 text-sm">{Number(inspectedTrade.delta || 0.5).toFixed(3)}</strong>
@@ -1634,6 +1689,13 @@ const TrainingUI = () => {
                     <span className="text-gray-400 block text-[10px]">Vega (ν)</span>
                     <strong className="text-emerald-400 text-sm">{formatIndianCurrency(inspectedTrade.vega || 14.20)}</strong>
                     <span className="text-[10px] text-gray-400 block">/ 1% IV shift</span>
+                  </div>
+                  <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800 text-center">
+                    <span className="text-gray-400 block text-[10px]">Rho (ρ)</span>
+                    <strong className="text-teal-400 text-sm">
+                      {Number(inspectedTrade.rho ?? inspectedTrade.opt_rho ?? 0.0).toFixed(4)}
+                    </strong>
+                    <span className="text-[10px] text-gray-400 block">/ 1% Rates</span>
                   </div>
                   <div className="p-2.5 bg-gray-950/80 rounded border border-gray-800 text-center">
                     <span className="text-gray-400 block text-[10px]">Implied Vol (IV)</span>
@@ -1715,6 +1777,12 @@ const TrainingUI = () => {
                         hedgeStrike: inspectedTrade.hedge_strike_price,
                         hedgePrice: inspectedTrade.hedge_entry_price,
                         netCredit: inspectedTrade.net_credit,
+                        shortPutStrike: inspectedTrade.short_put_strike,
+                        longPutStrike: inspectedTrade.long_put_strike,
+                        shortCallStrike: inspectedTrade.short_call_strike,
+                        longCallStrike: inspectedTrade.long_call_strike,
+                        lowerBreakeven: inspectedTrade.lower_breakeven,
+                        upperBreakeven: inspectedTrade.upper_breakeven,
                         entryPrice: Number(inspectedTrade.entry_price || 0),
                         targetPrice: Number(inspectedTrade.tp || 0),
                         stopLossPrice: Number(inspectedTrade.sl || 0),

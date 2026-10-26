@@ -593,20 +593,85 @@ This document records the major architectural, structural, and design decisions 
 
 ---
 
-### Decision 33: Intraday Yahoo Chart Range Boundaries & RealTimeDataFeed Column Normalization
-- **Date**: Chart Streaming & Intraday Data Integrity (October 2026; Pass 30)
+### Decision 34: Institutional Indian F&O Multi-Leg Mechanics & Iron Condor Valuation
+- **Date**: Indian F&O Derivatives Mechanics & Execution Parity (October 2026; Pass 31)
 - **What was decided**:
-  1. **Enforce 60-Day Intraday Range Boundaries (`data/fetcher.py`)**:
-     - Yahoo Finance's `/v8/finance/chart/` endpoint rejects any request for intraday bars (`1m`..`1h`) whose `range` exceeds 60 days with `HTTP 422 Unprocessable Entity ("The requested range must be within the last 60 days")`.
-     - In `_fetch_chart_direct_sync()`, mapped intraday ranges defensively: `interval in ("1m",)` -> `range="5d"`; `interval in ("2m", "5m", "15m", "30m", "60m", "1h")` -> `range="60d"`. Daily and weekly intervals continue using full multi-year ranges (`1y`, `2y`, `5y`).
-  2. **Defensive Column Casing in `RealTimeDataFeed.get_chart_candles()` (`data/realtime_feed.py`)**:
-     - Updated row mapping in `get_chart_candles()` to defensively check both Title Case (`"Close"`, `"Open"`) and lowercase (`"close"`, `"open"`), preventing zero-price (`0.0`) candle fallbacks regardless of DataFrame source.
-  3. **Stale Process Invalidation & 502 Bad Gateway Elimination**:
-     - Documented root cause of `502 Bad Gateway`: stale `start.py` instances spawned from old or unactivated terminal sessions running empty virtualenvs where Uvicorn failed to start.
-- **Why it was made**: The frontend chart viewer reported `Failed to load market candles. Please check if the market data service is running.` and `Scan failed: Request failed with status code 502` due to HTTP 422 range rejections and stale backend process terminations.
-- **Files/components affected**: `data/fetcher.py`, `data/realtime_feed.py`, `start.py`.
+  1. **Full 4-Leg Iron Condor Pricing & MTM Valuation (`ml/options_engine.py`)**:
+     - Added explicit wing fields to `DerivativeTradePlan`: `short_put_strike`, `long_put_strike`, `short_call_strike`, `long_call_strike`, `short_put_entry`, `long_put_entry`, `short_call_entry`, `long_call_entry`, `lower_breakeven`, `upper_breakeven`, and Greek `rho`.
+     - In `calculate_option_mtm()`, implemented dedicated 4-leg Black-Scholes valuation: $\text{net\_val} = (\text{BS}_{sp} - \text{BS}_{lp}) + (\text{BS}_{sc} - \text{BS}_{lc})$ and net delta $\Delta_{\text{net}} = (|\Delta_{sp}| - |\Delta_{lp}|) + (-\Delta_{sc} + \Delta_{lc})$. Replaced the previous single-option fallthrough that treated 4-leg condors as a single ATM Put.
+  2. **Realism in Option Selling MTM Accounting (`ml/live_market_learner.py`)**:
+     - Corrected the option MTM formula for all sold options, credit spreads, and Iron Condors (`action == "SELL"`): $\text{PnL} = (\text{entry\_p} - \text{live\_prem}) \times \text{quantity}$. Premium decay below entry credit accurately reflects trading profit, while premium expansion reflects unrealized loss.
+  3. **Neutral Strategy Exit Handling (`live_trader.py`, `paper_trader.py`)**:
+     - Enabled automatic stop-loss and take-profit evaluations for `direction in ("NEUTRAL", "RANGEBOUND")`. Trades exit with `STOP_LOSS` if the underlying spot breaches either the lower or upper outer wings.
+  4. **Analytical & Numerical Implied Volatility Engine (`ml/options_engine.py`)**:
+     - Built `calculate_implied_volatility(market_price, S, K, T, r, option_type)` using Newton-Raphson with analytical Vega, falling back to Brent's method (`scipy.optimize.brentq`), and finally to India VIX baseline (0.14).
+  5. **Centralized Index Normalization Hierarchy (`ml/options_engine.py`)**:
+     - Delegated `DerivativeEngine._normalize_ticker` to `normalize_index_ticker()`, ensuring `MIDCPNIFTY` and `FINNIFTY` are parsed before `NIFTY`, eliminating lot size and strike interval misclassifications.
+  6. **15:15 IST MIS Auto-Square-Off Parity (`live_trader.py`)**:
+     - Integrated `is_intraday_square_off_time()` into the live trading loop, ensuring that all open intraday positions square off prior to broker RMS auto-square-off penalty triggers.
+  7. **Broker Order Inversion Parity (`live_trader.py`)**:
+     - In `close_trade()`, closing a short position (`trade_action == "SELL"`) places a `BUY` order to cover, preventing accidental position doubling.
+  8. **TradeContext Relational Persistence (`live_trader.py`, `models/models.py`)**:
+     - Persisted full F&O trade payload into the `TradeContext` table and hydrated attributes (`action`, `strategy_type`, `short_put_strike`, etc.) upon loading active trades.
+- **Why it was made**: Tracing derivatives execution paths revealed that Iron Condors lacked 4-leg MTM tracking, sold options inverted PnL math, neutral strategies refused automatic exits in live trading, and broker exit orders did not reverse short positions.
+- **Files/components affected**: `ml/options_engine.py`, `ml/live_market_learner.py`, `live_trader.py`, `paper_trader.py`, `models/models.py`, `tests/test_indian_fo_trader.py`, `tests/test_quant_adversarial_fo_audit.py`.
+- **Known trade-offs**: None; brings system into exact parity with Indian institutional F&O trading reality.
+- **Evidence/source in the project**: 35 passed tests in `test_indian_fo_trader.py` + 16 passed tests in `test_quant_adversarial_fo_audit.py`.
+- **Reason status**: **Verified**.
+
+---
+
+### Decision 35: Adversarial Backend Security, SSRF Hardening & Concurrency Protection
+- **Date**: Adversarial Security, SDET & Infrastructure Hardening (October 2026; Pass 31)
+- **What was decided**:
+  1. **Fail-Closed SmartAPI Execution Guard (`api/broker.py`)**:
+     - Added mandatory check `if self.broker_mode != "live": raise RuntimeError(...)` to `SmartAPIBroker.place_order` and input validation on quantity, price, ticker, and direction.
+  2. **Trusted Proxy Rate-Limit Hardening (`api/auth.py`)**:
+     - Removed blanket `ip.is_private` allowance from `_is_trusted_proxy`. Untrusted LAN clients can no longer spoof `X-Forwarded-For` to bypass rate limits.
+  3. **Frankfurter FX SSRF & Redirect Host Lockdown (`data/fx_fetcher.py`)**:
+     - Enforced ISO date regex validation on date parameters and HTTPS redirect destination whitelist limited to `api.frankfurter.app` and `api.frankfurter.dev`.
+  4. **Tempfile Concurrency & Windows Lock Retry Loop (`paper_trader.py`, `api/config_store.py`, `papertrade/persistence.py`)**:
+     - Replaced static `.tmp` filenames with `tempfile.mkstemp` and wrapped file replacements and reads in retry loops with exponential backoff.
+  5. **Watchlist NUL Byte Sanitization (`api/swing_router.py`)**:
+     - Sanitized notes, sector, and source scanner strings to strip `\x00` characters, preventing PostgreSQL byte encoding crashes.
+  6. **Endpoint Rate-Limiting Coverage (`api/dashboard_router.py`, `api/strategy_router.py`)**:
+     - Attached sliding-window rate limiters to `/dashboard/config` and `/strategy/list`.
+- **Why it was made**: Adversarial testing revealed potential live fund leaks if tests mocked `is_connected=True`, rate limiter bypass via LAN IP headers, and Windows file lock crashes under heavy read/write contention.
+- **Files/components affected**: `api/broker.py`, `api/auth.py`, `data/fx_fetcher.py`, `paper_trader.py`, `api/config_store.py`, `papertrade/persistence.py`, `api/swing_router.py`, `api/dashboard_router.py`, `api/strategy_router.py`, `tests/test_adversarial_security_audit.py`.
 - **Known trade-offs**: None.
-- **Evidence/source in the project**: Verified `RealTimeDataFeed.get_chart_candles('NIFTY', '5m', 5)` successfully returns 5m live spot candles with exact price coordinates. 352 pytest tests pass (100% green).
+- **Evidence/source in the project**: All 6 security tests in `tests/test_adversarial_security_audit.py` pass cleanly.
+- **Reason status**: **Verified**.
+
+---
+
+### Decision 36: Paper Matching Engine Triggered-State Lifecycle & Order History Tracking
+- **Date**: Paper Execution & SDET Hardening (October 2026; Pass 32)
+- **What was decided**:
+  1. **Stop-Loss Limit Lifecycle Continuation**: In `api/broker_adapter.py`, once a Stop-Loss Limit order triggers (`order.status = "TRIGGERED"`), it remains an active limit order in subsequent ticks and executes if the high/low/ltp meets the limit price, regardless of whether price has rebounded above the trigger price.
+  2. **Order History Audit Log**: In `PaperMatchingEngine.on_tick()`, all resting orders that fill are appended to `self.order_history`, fixing a gap where resting fills were missing from history.
+  3. **Order Management Methods**: Implemented `cancel_order(order_id)` and `get_order(order_id)` on both `PaperMatchingEngine` and `UnifiedBrokerAdapter`.
+  4. **Strict Input Sanitization**: Rejection of orders with non-positive quantities, invalid directions, invalid order types, and non-positive limit or trigger prices.
+- **Why it was made**: Adversarial QA revealed that resting Stop-Loss Limit orders failed to execute on price rebounds after triggering, resting fills bypassed order history tracking, and invalid orders could corrupt position tables.
+- **Files/components affected**: `api/broker_adapter.py`, `tests/test_broker_adapter_and_greeks.py`.
+- **Known trade-offs**: None.
+- **Evidence/source in the project**: 4 new tests in `tests/test_broker_adapter_and_greeks.py` verify all states.
+- **Reason status**: **Verified**.
+
+---
+
+### Decision 37: End-to-End Iron Condor Wing Visualization & Full 6 Greeks Alignment
+- **Date**: Derivatives UI & API Alignment (October 2026; Pass 32)
+- **What was decided**:
+  1. **Full 6 Greeks Across Stack**: Added Greek $\text{Rho}$ ($\rho$) to `/api/v1/market/option-tick` and `/api/v1/market/option-chart`.
+  2. **Portfolio F&O Payload Serialization**: Updated `/dashboard/portfolio` to serialize full 4-leg condor wing specs (`short_put_strike`, `long_put_strike`, `short_call_strike`, `long_call_strike`, `lower_breakeven`, `upper_breakeven`), `action`, and Greeks (`opt_rho`, `opt_gamma`, `opt_vega`, `opt_iv`).
+  3. **Frontend Iron Condor Payoff & Greeks UI**:
+     - `foUtils.ts`: Added native Iron Condor support to `calculateOptionPayoffProfile` and `calculateOptionPayoffCurve` with exact wing strikes and range breakeven.
+     - `OptionChartViewer.tsx`: Added full 6 Greeks bar (Delta, Theta, Gamma, Vega, Rho, IV), Breakeven Range, and interactive 4-leg Condor Wings ribbon.
+     - `TrainingUI.tsx`: Wired 4-leg wing specs into Trade Dossier Modal and focused option state, displaying Rho ($\rho$) and Condor Wings ribbon.
+- **Why it was made**: To ensure institutional-grade clarity for options traders by visualizing all 4 wings and complete Black-Scholes Greeks without UI distortion or missing data.
+- **Files/components affected**: `api/market_router.py`, `api/dashboard_router.py`, `frontend/src/utils/foUtils.ts`, `frontend/src/components/OptionChartViewer.tsx`, `frontend/src/pages/TrainingUI.tsx`.
+- **Known trade-offs**: None.
+- **Evidence/source in the project**: 0 Oxlint errors/warnings, Vite build succeeds in 2.75s, 3 new tests in `tests/test_broker_adapter_and_greeks.py`.
 - **Reason status**: **Verified**.
 
 
